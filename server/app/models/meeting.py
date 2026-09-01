@@ -4,7 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
 from app.models.enum_types import pg_enum
@@ -47,6 +47,14 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     duration_seconds: Mapped[int | None] = mapped_column(Integer)
     audio_path: Mapped[str | None] = mapped_column(String(1024))
     summary: Mapped[str | None] = mapped_column(Text)
+    processing_error: Mapped[str | None] = mapped_column(Text)
+
+    @property
+    def has_audio(self) -> bool:
+        """Not a column — lets MeetingRead expose whether audio exists
+        without leaking the on-disk `audio_path` to the API.
+        """
+        return self.audio_path is not None
 
 
 class Speaker(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -90,6 +98,15 @@ class TranscriptSegment(UUIDPrimaryKeyMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+    speaker: Mapped[Speaker | None] = relationship(lazy="joined")
+
+    @property
+    def speaker_label(self) -> str | None:
+        """Not a column — lets TranscriptSegmentRead expose the speaker's
+        display name via the `speaker_id` relationship above.
+        """
+        return self.speaker.label if self.speaker else None
 
 
 class Note(UUIDPrimaryKeyMixin, TimestampMixin, Base):

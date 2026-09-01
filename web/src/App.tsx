@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import Dashboard from "@/routes/Dashboard";
 import Login from "@/routes/Login";
+import MeetingDetail from "@/routes/MeetingDetail";
 import Register from "@/routes/Register";
 import Settings from "@/routes/Settings";
 
@@ -25,6 +26,14 @@ export default function App() {
           element={
             <RequireAuth>
               <Dashboard />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/meetings/:meetingId"
+          element={
+            <RequireAuth>
+              <MeetingDetail />
             </RequireAuth>
           }
         />

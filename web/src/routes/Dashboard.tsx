@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import { api, type Meeting } from "@/lib/api";
+import { ApiError, api, type Meeting } from "@/lib/api";
 
 const STATUS_LABEL: Record<Meeting["status"], string> = {
   recording: "Recording",
@@ -10,21 +11,38 @@ const STATUS_LABEL: Record<Meeting["status"], string> = {
   failed: "Failed",
 };
 
+/** Strip the extension and tidy up a filename for use as a default title,
+ * e.g. "sales-call_2026-09-01.m4a" -> "sales-call_2026-09-01". */
+function titleFromFilename(name: string): string {
+  return name.replace(/\.[^./]+$/, "") || "Untitled meeting";
+}
+
 export default function Dashboard() {
+  const navigate = useNavigate();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [meetings, setMeetings] = useState<Meeting[] | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.listMeetings().then(setMeetings);
   }, []);
 
-  async function startMeeting() {
-    setCreating(true);
+  async function onFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+
+    setError(null);
+    setUploading(true);
     try {
-      const meeting = await api.createMeeting("Untitled meeting");
-      setMeetings((prev) => [meeting, ...(prev ?? [])]);
+      const meeting = await api.createMeeting(titleFromFilename(file.name));
+      await api.uploadMeetingAudio(meeting.id, file);
+      navigate(`/meetings/${meeting.id}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Upload failed");
     } finally {
-      setCreating(false);
+      setUploading(false);
     }
   }
 
@@ -37,17 +55,32 @@ export default function Dashboard() {
             Your recorded calls, transcripts, and coaching reports.
           </p>
         </div>
-        <button onClick={startMeeting} disabled={creating} className="btn-primary">
-          {creating ? "Starting…" : "New meeting"}
-        </button>
+        <div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="audio/*"
+            className="hidden"
+            onChange={onFileSelected}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="btn-primary"
+          >
+            {uploading ? "Uploading…" : "Upload recording"}
+          </button>
+        </div>
       </div>
+
+      {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
 
       {meetings === null && <p className="text-sm text-ink-muted">Loading…</p>}
 
       {meetings?.length === 0 && (
         <div className="card p-10 text-center">
           <p className="text-sm text-ink-muted">
-            No meetings yet. Start one to see it appear here.
+            No meetings yet. Upload a recording to see it appear here.
           </p>
         </div>
       )}
@@ -55,18 +88,23 @@ export default function Dashboard() {
       {meetings && meetings.length > 0 && (
         <ul className="card divide-y divide-border dark:divide-border-dark">
           {meetings.map((meeting) => (
-            <li key={meeting.id} className="flex items-center justify-between px-5 py-4">
-              <div>
-                <p className="text-sm font-medium text-ink dark:text-ink-inverted">
-                  {meeting.title}
-                </p>
-                <p className="mt-0.5 text-xs text-ink-subtle">
-                  {new Date(meeting.created_at).toLocaleString()}
-                </p>
-              </div>
-              <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
-                {STATUS_LABEL[meeting.status]}
-              </span>
+            <li key={meeting.id}>
+              <Link
+                to={`/meetings/${meeting.id}`}
+                className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+              >
+                <div>
+                  <p className="text-sm font-medium text-ink dark:text-ink-inverted">
+                    {meeting.title}
+                  </p>
+                  <p className="mt-0.5 text-xs text-ink-subtle">
+                    {new Date(meeting.created_at).toLocaleString()}
+                  </p>
+                </div>
+                <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                  {STATUS_LABEL[meeting.status]}
+                </span>
+              </Link>
             </li>
           ))}
         </ul>

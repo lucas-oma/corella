@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # Audio storage
     audio_storage_path: str = "/data/audio"
+    max_audio_upload_mb: int = 500
 
 
 @lru_cache

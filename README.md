@@ -51,7 +51,11 @@ If you have an NVIDIA GPU + the NVIDIA Container Toolkit installed, layer on the
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 ```
 
-Speaker diarization uses a gated pyannote.audio pipeline — accept its terms on Hugging Face and set `HF_TOKEN` in `.env` before the worker can download it.
+Speaker diarization uses a gated pyannote.audio pipeline — accept its terms on Hugging Face and set `HF_TOKEN` in `.env` before the worker can download it. Without `HF_TOKEN`, transcription still works fine; the transcript just won't have speaker labels.
+
+## Recording a meeting
+
+Today this is upload-based: on the Dashboard, "Upload recording" picks an audio file, which is transcribed (and, if `HF_TOKEN` is set, speaker-diarized) in the background — the meeting page polls and updates itself as processing finishes. Live in-browser recording is on the roadmap (see Status).
 
 ## Access control
 
@@ -84,8 +88,8 @@ npm run dev
 
 ## Status
 
-This is an early-stage build. See the repo's plan history for the phased roadmap — foundations (auth, data model, UI shell) are in place; the recording/transcription/diarization pipeline, the LLM copilot, and the knowledge base are landing next.
+This is an early-stage build. See the repo's plan history for the phased roadmap. Done so far: auth and admin-managed accounts, the full data model, the UI shell, and upload-based transcription/diarization with a transcript + playback view. Landing next: pluggable LLM providers, the knowledge base, live in-browser recording, and the live copilot.
 
 ## Environment variables
 
-See `.env.example` for the full list: data store URLs, JWT secret, access control (`ALLOW_PUBLIC_REGISTRATION`, `ADMIN_EMAIL`/`ADMIN_PASSWORD`), Hugging Face token (for diarization models), default Whisper model/compute type, and optional instance-wide LLM provider keys.
+See `.env.example` for the full list: data store URLs, JWT secret, access control (`ALLOW_PUBLIC_REGISTRATION`, `ADMIN_EMAIL`/`ADMIN_PASSWORD`), audio storage path and upload size cap, Hugging Face token (for diarization models), default Whisper model/compute type, and optional instance-wide LLM provider keys.

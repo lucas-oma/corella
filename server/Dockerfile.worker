@@ -1,7 +1,6 @@
 # Worker image for the ASR / diarization / embedding background jobs
 # (app/workers). Heavier than the API image — pulls in faster-whisper,
-# pyannote.audio and sentence-transformers, so it isn't built by default
-# until Phase B wires up real Celery tasks.
+# pyannote.audio and sentence-transformers (and transitively, torch).
 FROM python:3.11-slim
 
 WORKDIR /srv
@@ -12,6 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml ./
 COPY app ./app
-RUN pip install --no-cache-dir -e ".[worker]"
+# PyPI's default `torch` wheel bundles ~8GB of NVIDIA CUDA libraries even for
+# a CPU-only install. This project's default deployment target is CPU-only
+# (see docker-compose.gpu.yml for the opt-in GPU override), so resolve
+# torch/torchaudio from PyTorch's CPU-only index instead — everything else
+# still comes from PyPI via --extra-index-url.
+RUN pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple \
+    -e ".[worker]"
 
 CMD ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info"]
