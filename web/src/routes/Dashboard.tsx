@@ -24,6 +24,7 @@ export default function Dashboard() {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
 
   useEffect(() => {
     api.listMeetings().then(setMeetings);
@@ -53,6 +54,19 @@ export default function Dashboard() {
     }
   }
 
+  async function onRecordLive() {
+    setError(null);
+    setStarting(true);
+    try {
+      const meeting = await api.createMeeting("Live recording");
+      navigate(`/meetings/${meeting.id}/live`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't start a live session");
+    } finally {
+      setStarting(false);
+    }
+  }
+
   async function onDelete(e: React.MouseEvent, meetingId: string) {
     e.preventDefault();
     e.stopPropagation();
@@ -76,7 +90,10 @@ export default function Dashboard() {
             Your recorded calls, transcripts, and coaching reports.
           </p>
         </div>
-        <div>
+        <div className="flex gap-2">
+          <button onClick={onRecordLive} disabled={starting} className="btn-primary">
+            {starting ? "Starting…" : "Record live"}
+          </button>
           <input
             ref={fileInputRef}
             type="file"
@@ -87,7 +104,7 @@ export default function Dashboard() {
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
-            className="btn-primary"
+            className="btn-secondary"
           >
             {uploading ? "Uploading…" : "Upload recording"}
           </button>

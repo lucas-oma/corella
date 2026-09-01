@@ -27,6 +27,14 @@ def _model():
     return WhisperModel(settings.whisper_model, compute_type=settings.whisper_compute_type)
 
 
+def warm_up() -> None:
+    """Force the lazy model singleton to load now rather than on first use —
+    called right after a live session's WS auth succeeds so the first
+    utterance isn't stuck behind several seconds of model-load latency.
+    """
+    _model()
+
+
 def transcribe(audio_path: str) -> list[WhisperSegment]:
     """Transcribe a mono 16kHz WAV file. Loads the model once per worker
     process (module-level lazy singleton) — reloading it per task would

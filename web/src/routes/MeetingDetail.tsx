@@ -13,6 +13,15 @@ function formatTimestamp(ms: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+/** Live-recorded segments have no Speaker row (channel already says who) —
+ * fall back to "Me"/"Them" so they aren't unlabeled. */
+function speakerLabel(segment: TranscriptSegment): string | null {
+  if (segment.speaker_label) return segment.speaker_label;
+  if (segment.channel === "me") return "Me";
+  if (segment.channel === "them") return "Them";
+  return null;
+}
+
 export default function MeetingDetail() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
@@ -107,11 +116,20 @@ export default function MeetingDetail() {
             {new Date(meeting.created_at).toLocaleString()}
           </p>
 
-          {(meeting.status === "recording" || meeting.status === "processing") && (
+          {meeting.status === "processing" && (
             <div className="card mt-6 p-6 text-center">
               <p className="text-sm text-ink-muted">
                 Transcribing your recording — this page will update automatically.
               </p>
+            </div>
+          )}
+
+          {meeting.status === "recording" && (
+            <div className="card mt-6 p-6 text-center">
+              <p className="text-sm text-ink-muted">This meeting hasn't been recorded yet.</p>
+              <Link to={`/meetings/${meeting.id}/live`} className="btn-primary mt-4 inline-flex">
+                Go to live session
+              </Link>
             </div>
           )}
 
@@ -152,9 +170,9 @@ export default function MeetingDetail() {
                           {formatTimestamp(segment.start_ms)}
                         </span>
                         <span>
-                          {segment.speaker_label && (
+                          {speakerLabel(segment) && (
                             <span className="mr-2 text-xs font-medium text-ink-muted">
-                              {segment.speaker_label}
+                              {speakerLabel(segment)}
                             </span>
                           )}
                           <span className="text-sm text-ink dark:text-ink-inverted">{segment.text}</span>

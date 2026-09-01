@@ -22,11 +22,18 @@ dependencies = [
     "redis==5.2.1",
     "qdrant-client==1.12.1",
     "httpx==0.28.1",
+    # Live recording (app/ws/live_session.py): faster-whisper depends only on
+    # CTranslate2/onnxruntime, not torch, so — unlike pyannote.audio/
+    # sentence-transformers below — it's light enough to run in the api
+    # process itself rather than needing a worker/Celery round-trip.
+    "faster-whisper==1.1.0",
+    "requests==2.32.3",  # faster-whisper's own model-download path needs it directly
+    "webrtcvad==2.0.10",
+    "numpy==2.2.1",
 ]
 
 [project.optional-dependencies]
 worker = [
-    "faster-whisper==1.1.0",
     "pyannote.audio==3.3.2",
     "sentence-transformers==3.3.1",
     "pypdf==5.1.0",

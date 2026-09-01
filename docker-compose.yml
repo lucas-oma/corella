@@ -53,6 +53,10 @@ services:
     volumes:
       - audio_data:${AUDIO_STORAGE_PATH:-/data/audio}
       - kb_data:${KB_STORAGE_PATH:-/data/kb}
+      # Shared with worker: the api process now also loads faster-whisper
+      # directly (live recording), and shouldn't re-download the model on
+      # every restart.
+      - model_cache:/root/.cache
     depends_on:
       postgres:
         condition: service_healthy

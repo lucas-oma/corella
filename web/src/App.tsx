@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import Dashboard from "@/routes/Dashboard";
 import KnowledgeBase from "@/routes/KnowledgeBase";
+import LiveSession from "@/routes/LiveSession";
 import Login from "@/routes/Login";
 import MeetingDetail from "@/routes/MeetingDetail";
 import Register from "@/routes/Register";
@@ -35,6 +36,14 @@ export default function App() {
           element={
             <RequireAuth>
               <MeetingDetail />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/meetings/:meetingId/live"
+          element={
+            <RequireAuth>
+              <LiveSession />
             </RequireAuth>
           }
         />

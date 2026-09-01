@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR /srv
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc \
+    libpq-dev build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./

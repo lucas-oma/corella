@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     ollama_base_url: str | None = None
 
+    # Live recording (app/ws/live_session.py)
+    live_vad_aggressiveness: int = 2  # webrtcvad mode 0-3; higher = more aggressive filtering
+    live_max_utterance_seconds: int = 20  # force a flush even without a detected pause
+    live_min_utterance_ms: int = 300  # ignore speech blips shorter than this
+
 
 @lru_cache
 def get_settings() -> Settings:
