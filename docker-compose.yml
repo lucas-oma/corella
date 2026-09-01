@@ -52,6 +52,7 @@ services:
       - "8000:8000"
     volumes:
       - audio_data:${AUDIO_STORAGE_PATH:-/data/audio}
+      - kb_data:${KB_STORAGE_PATH:-/data/kb}
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,6 +78,7 @@ services:
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
     volumes:
       - audio_data:${AUDIO_STORAGE_PATH:-/data/audio}
+      - kb_data:${KB_STORAGE_PATH:-/data/kb}
       - model_cache:/root/.cache
     depends_on:
       postgres:
@@ -103,4 +105,5 @@ volumes:
   redis_data:
   qdrant_data:
   audio_data:
+  kb_data:
   model_cache:

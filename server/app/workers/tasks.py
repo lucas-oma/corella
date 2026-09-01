@@ -6,10 +6,15 @@ from pathlib import Path
 from uuid import UUID
 
 from app.core.db import get_sync_db
+from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.services.alignment.align import align
 from app.services.asr.whisper import transcribe
 from app.services.diarization.pyannote import DiarizationUnavailable, diarize
+from app.services.embeddings.chunking import chunk_text
+from app.services.embeddings.embed import embed_texts
+from app.services.embeddings.extract import extract_text
+from app.services.embeddings.qdrant_store import upsert_chunks
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -105,4 +110,36 @@ def process_meeting_audio(meeting_id: str) -> None:
             db.rollback()
             meeting.status = MeetingStatus.FAILED
             meeting.processing_error = str(e)[:2000]
+            db.commit()
+
+
+@celery_app.task(name="corella.process_kb_document")
+def process_kb_document(document_id: str) -> None:
+    with get_sync_db() as db:
+        document = db.get(KBDocument, UUID(document_id))
+        if document is None:
+            logger.error("process_kb_document: document %s not found", document_id)
+            return
+
+        document.status = KBDocumentStatus.PROCESSING
+        db.commit()
+
+        try:
+            text = extract_text(document.storage_path)
+            chunks = chunk_text(text)
+            if not chunks:
+                raise ValueError("No extractable text found in this document")
+
+            embeddings = embed_texts(chunks)
+            upsert_chunks(document.id, document.owner_id, chunks, embeddings)
+
+            document.chunk_count = len(chunks)
+            document.status = KBDocumentStatus.READY
+            document.error = None
+            db.commit()
+        except Exception as e:
+            logger.exception("process_kb_document failed for document %s", document_id)
+            db.rollback()
+            document.status = KBDocumentStatus.FAILED
+            document.error = str(e)[:2000]
             db.commit()

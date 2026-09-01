@@ -29,6 +29,7 @@ worker = [
     "faster-whisper==1.1.0",
     "pyannote.audio==3.3.2",
     "sentence-transformers==3.3.1",
+    "pypdf==5.1.0",
 ]
 
 [tool.setuptools.packages.find]

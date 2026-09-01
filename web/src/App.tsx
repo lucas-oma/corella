@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AuthProvider, useAuth } from "@/lib/auth";
 import Dashboard from "@/routes/Dashboard";
+import KnowledgeBase from "@/routes/KnowledgeBase";
 import Login from "@/routes/Login";
 import MeetingDetail from "@/routes/MeetingDetail";
 import Register from "@/routes/Register";
@@ -34,6 +35,14 @@ export default function App() {
           element={
             <RequireAuth>
               <MeetingDetail />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/knowledge-base"
+          element={
+            <RequireAuth>
+              <KnowledgeBase />
             </RequireAuth>
           }
         />

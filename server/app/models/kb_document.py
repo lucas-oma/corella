@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,9 +18,10 @@ class KBDocumentStatus(str, enum.Enum):
 
 
 class KBDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A knowledge-base source document. Chunked and embedded into the
-    per-user Qdrant `kb_chunks` collection by a background worker once
-    status transitions past PENDING (see app.services.embeddings).
+    """A knowledge-base source document. Chunked and embedded by a background
+    worker into the shared Qdrant `kb_chunks` collection, scoped by an
+    `owner_id` payload field (see app.services.embeddings), once status
+    transitions past PENDING.
     """
 
     __tablename__ = "kb_documents"
@@ -34,3 +35,5 @@ class KBDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[KBDocumentStatus] = mapped_column(
         pg_enum(KBDocumentStatus, "kb_document_status"), default=KBDocumentStatus.PENDING
     )
+    chunk_count: Mapped[int | None] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text)

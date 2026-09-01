@@ -50,9 +50,14 @@ class Settings(BaseSettings):
     audio_storage_path: str = "/data/audio"
     max_audio_upload_mb: int = 500
 
+    # Knowledge base document storage
+    kb_storage_path: str = "/data/kb"
+    max_kb_upload_mb: int = 50
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+
     # Instance-wide LLM provider fallbacks — used when a user hasn't saved
-    # their own key (per-user keys land with the rest of Phase C). Presence
-    # of these is what GET /api/settings/providers reports as "connected".
+    # their own key via PUT /api/settings/providers/{provider}. Presence of
+    # these is what GET /api/settings/providers reports as "connected".
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
     gemini_api_key: str | None = None

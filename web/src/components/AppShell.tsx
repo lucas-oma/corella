@@ -5,6 +5,7 @@ import { useAuth } from "@/lib/auth";
 
 const NAV = [
   { to: "/dashboard", label: "Meetings" },
+  { to: "/knowledge-base", label: "Knowledge base" },
   { to: "/settings", label: "Settings" },
 ];
 

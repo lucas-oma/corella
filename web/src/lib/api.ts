@@ -102,6 +102,16 @@ export interface ProviderStatus {
   source: "user" | "env" | null;
 }
 
+export interface KBDocument {
+  id: string;
+  filename: string;
+  content_type: string;
+  status: "pending" | "processing" | "ready" | "failed";
+  chunk_count: number | null;
+  error: string | null;
+  created_at: string;
+}
+
 export const api = {
   authConfig: () => request<AuthConfig>("/api/auth/config"),
   register: (email: string, password: string, fullName: string) =>
@@ -128,4 +138,18 @@ export const api = {
   getAudioObjectUrl: (id: string) => requestObjectUrl(`/api/meetings/${id}/audio`),
   deleteMeeting: (id: string) => request<void>(`/api/meetings/${id}`, { method: "DELETE" }),
   getProviderStatus: () => request<ProviderStatus[]>("/api/settings/providers"),
+  saveProviderCredential: (provider: ProviderStatus["provider"], value: { api_key?: string; base_url?: string }) =>
+    request<ProviderStatus>(`/api/settings/providers/${provider}`, {
+      method: "PUT",
+      body: JSON.stringify(value),
+    }),
+  removeProviderCredential: (provider: ProviderStatus["provider"]) =>
+    request<ProviderStatus>(`/api/settings/providers/${provider}`, { method: "DELETE" }),
+  listKBDocuments: () => request<KBDocument[]>("/api/kb/documents"),
+  uploadKBDocument: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<KBDocument>("/api/kb/documents", { method: "POST", body: form });
+  },
+  deleteKBDocument: (id: string) => request<void>(`/api/kb/documents/${id}`, { method: "DELETE" }),
 };

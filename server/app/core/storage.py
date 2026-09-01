@@ -15,7 +15,7 @@ CHUNK_SIZE = 1024 * 1024  # 1MB
 # distro/image (the slim container image this runs in lacks the extended
 # table macOS/Ubuntu ship, and guesses "application/octet-stream" for e.g.
 # .m4a — a type an <audio> element won't reliably play). Register the
-# extensions we actually accept (_ALLOWED_AUDIO_TYPES in api/meetings.py)
+# extensions we actually accept (_looks_like_audio in api/meetings.py)
 # explicitly so playback content-type is consistent everywhere.
 for _ext, _type in {
     ".m4a": "audio/mp4",
@@ -28,20 +28,18 @@ for _ext, _type in {
     mimetypes.add_type(_type, _ext)
 
 
-def meeting_dir(meeting_id: UUID) -> Path:
-    return Path(get_settings().audio_storage_path) / str(meeting_id)
+def _item_dir(root: str, item_id: UUID) -> Path:
+    return Path(root) / str(item_id)
 
 
-async def save_upload(meeting_id: UUID, upload: UploadFile) -> str:
-    """Stream an uploaded file to disk, enforcing MAX_AUDIO_UPLOAD_MB rather
-    than buffering the whole thing in memory. Returns the absolute path it
-    was written to.
+async def _save_upload(dest_dir: Path, upload: UploadFile, max_mb: int) -> str:
+    """Stream an uploaded file to disk, enforcing a size cap rather than
+    buffering the whole thing in memory. Returns the absolute path it was
+    written to.
     """
-    settings = get_settings()
-    max_bytes = settings.max_audio_upload_mb * 1024 * 1024
+    max_bytes = max_mb * 1024 * 1024
 
     ext = Path(upload.filename or "").suffix or ".bin"
-    dest_dir = meeting_dir(meeting_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / f"original{ext}"
 
@@ -53,7 +51,7 @@ async def save_upload(meeting_id: UUID, upload: UploadFile) -> str:
                 if written > max_bytes:
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"Audio file exceeds the {settings.max_audio_upload_mb}MB limit",
+                        detail=f"File exceeds the {max_mb}MB limit",
                     )
                 f.write(chunk)
     except HTTPException:
@@ -69,12 +67,44 @@ async def save_upload(meeting_id: UUID, upload: UploadFile) -> str:
     return str(dest_path)
 
 
+# --- Meeting audio -----------------------------------------------------
+
+
+def meeting_dir(meeting_id: UUID) -> Path:
+    return _item_dir(get_settings().audio_storage_path, meeting_id)
+
+
+async def save_upload(meeting_id: UUID, upload: UploadFile) -> str:
+    settings = get_settings()
+    return await _save_upload(meeting_dir(meeting_id), upload, settings.max_audio_upload_mb)
+
+
 def delete_meeting_files(meeting_id: UUID) -> None:
     """Best-effort cleanup of a meeting's stored audio when the meeting
     itself is deleted. Never raises — a missing/already-gone directory is
     not an error here.
     """
     shutil.rmtree(meeting_dir(meeting_id), ignore_errors=True)
+
+
+# --- Knowledge base documents -------------------------------------------
+
+
+def kb_document_dir(document_id: UUID) -> Path:
+    return _item_dir(get_settings().kb_storage_path, document_id)
+
+
+async def save_kb_upload(document_id: UUID, upload: UploadFile) -> str:
+    settings = get_settings()
+    return await _save_upload(kb_document_dir(document_id), upload, settings.max_kb_upload_mb)
+
+
+def delete_kb_document_files(document_id: UUID) -> None:
+    """Best-effort cleanup of a KB document's stored file. Never raises."""
+    shutil.rmtree(kb_document_dir(document_id), ignore_errors=True)
+
+
+# --- Range-aware file serving (meeting audio playback) ------------------
 
 
 def _iter_file(path: Path, start: int, end: int, chunk_size: int = CHUNK_SIZE) -> Iterator[bytes]:
