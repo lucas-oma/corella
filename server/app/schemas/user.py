@@ -11,6 +11,10 @@ class UserCreate(BaseModel):
     full_name: str
 
 
+class AdminUserCreate(UserCreate):
+    role: UserRole = UserRole.MEMBER
+
+
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
@@ -28,3 +32,7 @@ class UserRead(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class AuthConfig(BaseModel):
+    allow_public_registration: bool

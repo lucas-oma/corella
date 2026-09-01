@@ -51,6 +51,10 @@ export interface User {
   role: "admin" | "member";
 }
 
+export interface AuthConfig {
+  allow_public_registration: boolean;
+}
+
 export interface Meeting {
   id: string;
   title: string;
@@ -62,6 +66,7 @@ export interface Meeting {
 }
 
 export const api = {
+  authConfig: () => request<AuthConfig>("/api/auth/config"),
   register: (email: string, password: string, fullName: string) =>
     request<Token>("/api/auth/register", {
       method: "POST",

@@ -20,6 +20,19 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24  # 24h
 
+    # When False, self-serve registration (POST /api/auth/register) is
+    # disabled and new accounts can only be created by an admin (via
+    # POST /api/admin/users). Defaults to open so a fresh single-user
+    # instance works out of the box; flip off for admin-managed teams.
+    allow_public_registration: bool = True
+
+    # Bootstrap admin account, created on startup if it doesn't already
+    # exist. Required to have any admin at all once public registration is
+    # turned off (accounts are no longer promoted to admin automatically).
+    admin_email: str | None = None
+    admin_password: str | None = None
+    admin_full_name: str = "Admin"
+
     # Data stores
     database_url: str = "postgresql+psycopg://corella:corella@localhost:5432/corella"
     redis_url: str = "redis://localhost:6379/0"

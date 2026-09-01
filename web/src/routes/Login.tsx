@@ -4,9 +4,11 @@ import { Link, useNavigate } from "react-router-dom";
 import AuthLayout from "@/components/AuthLayout";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useAuthConfig } from "@/lib/useAuthConfig";
 
 export default function Login() {
   const { login } = useAuth();
+  const authConfig = useAuthConfig();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -61,12 +63,19 @@ export default function Login() {
           {submitting ? "Signing in…" : "Sign in"}
         </button>
       </form>
-      <p className="mt-5 text-center text-sm text-ink-muted">
-        No account yet?{" "}
-        <Link to="/register" className="text-accent dark:text-ink-inverted">
-          Create one
-        </Link>
-      </p>
+      {authConfig?.allow_public_registration && (
+        <p className="mt-5 text-center text-sm text-ink-muted">
+          No account yet?{" "}
+          <Link to="/register" className="text-accent dark:text-ink-inverted">
+            Create one
+          </Link>
+        </p>
+      )}
+      {authConfig && !authConfig.allow_public_registration && (
+        <p className="mt-5 text-center text-sm text-ink-muted">
+          No account yet? Ask your admin to create one for you.
+        </p>
+      )}
     </AuthLayout>
   );
 }

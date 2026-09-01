@@ -4,9 +4,11 @@ import { Link, useNavigate } from "react-router-dom";
 import AuthLayout from "@/components/AuthLayout";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useAuthConfig } from "@/lib/useAuthConfig";
 
 export default function Register() {
   const { register } = useAuth();
+  const authConfig = useAuthConfig();
   const navigate = useNavigate();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
@@ -26,6 +28,20 @@ export default function Register() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (authConfig && !authConfig.allow_public_registration) {
+    return (
+      <AuthLayout title="Registration is closed" subtitle="Your self-hosted meeting workspace">
+        <p className="text-sm text-ink-muted">
+          This instance is admin-managed. Ask your admin to create an account for you, then{" "}
+          <Link to="/login" className="text-accent dark:text-ink-inverted">
+            sign in
+          </Link>
+          .
+        </p>
+      </AuthLayout>
+    );
   }
 
   return (

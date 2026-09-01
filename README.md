@@ -53,6 +53,16 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 
 Speaker diarization uses a gated pyannote.audio pipeline — accept its terms on Hugging Face and set `HF_TOKEN` in `.env` before the worker can download it.
 
+## Access control
+
+By default anyone can create their own account (`ALLOW_PUBLIC_REGISTRATION=true`). For an admin-managed instance:
+
+1. Set `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env` — that account is created automatically on first startup with the `admin` role.
+2. Set `ALLOW_PUBLIC_REGISTRATION=false` to close self-serve sign-up.
+3. Sign in as the admin and create accounts for everyone else via `POST /api/admin/users` (or `/docs`).
+
+`ADMIN_EMAIL`/`ADMIN_PASSWORD` only ever *create* the account — changing them later and restarting won't touch an existing admin's password.
+
 ## Development
 
 Backend:
@@ -78,4 +88,4 @@ This is an early-stage build. See the repo's plan history for the phased roadmap
 
 ## Environment variables
 
-See `.env.example` for the full list: data store URLs, JWT secret, Hugging Face token (for diarization models), default Whisper model/compute type, and optional instance-wide LLM provider keys.
+See `.env.example` for the full list: data store URLs, JWT secret, access control (`ALLOW_PUBLIC_REGISTRATION`, `ADMIN_EMAIL`/`ADMIN_PASSWORD`), Hugging Face token (for diarization models), default Whisper model/compute type, and optional instance-wide LLM provider keys.
