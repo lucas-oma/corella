@@ -1,0 +1,33 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-surface text-ink font-sans antialiased dark:bg-surface-dark dark:text-ink-inverted;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded border border-border bg-surface-raised shadow-card dark:border-border-dark dark:bg-surface-dark-raised;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded bg-accent px-4 py-2 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent-hover disabled:opacity-50;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded border border-border bg-transparent px-4 py-2 text-sm font-medium text-ink transition-colors hover:bg-black/[0.03] dark:border-border-dark dark:text-ink-inverted dark:hover:bg-white/[0.04];
+  }
+
+  .field {
+    @apply w-full rounded border border-border bg-surface-raised px-3 py-2 text-sm outline-none transition-colors focus:border-accent dark:border-border-dark dark:bg-surface-dark-raised;
+  }
+
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-ink-muted;
+  }
+}

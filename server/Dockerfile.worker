@@ -1,0 +1,17 @@
+# Worker image for the ASR / diarization / embedding background jobs
+# (app/workers). Heavier than the API image — pulls in faster-whisper,
+# pyannote.audio and sentence-transformers, so it isn't built by default
+# until Phase B wires up real Celery tasks.
+FROM python:3.11-slim
+
+WORKDIR /srv
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml ./
+COPY app ./app
+RUN pip install --no-cache-dir -e ".[worker]"
+
+CMD ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info"]

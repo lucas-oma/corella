@@ -1,0 +1,35 @@
+[project]
+name = "corella-server"
+version = "0.1.0"
+description = "Self-hosted voice-meeting assistant server"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.32.1",
+    "pydantic==2.10.3",
+    "email-validator==2.2.0",
+    "pydantic-settings==2.7.0",
+    "sqlalchemy==2.0.36",
+    "alembic==1.14.0",
+    "asyncpg==0.30.0",
+    "psycopg[binary]==3.2.3",
+    "python-jose[cryptography]==3.3.0",
+    "cryptography==44.0.0",
+    "passlib[bcrypt]==1.7.4",
+    "bcrypt==4.0.1",  # passlib 1.7.4 doesn't support bcrypt's 4.1+ API changes
+    "python-multipart==0.0.19",
+    "celery==5.4.0",
+    "redis==5.2.1",
+    "qdrant-client==1.12.1",
+    "httpx==0.28.1",
+]
+
+[project.optional-dependencies]
+worker = [
+    "faster-whisper==1.1.0",
+    "pyannote.audio==3.3.2",
+    "sentence-transformers==3.3.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

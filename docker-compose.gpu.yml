@@ -1,0 +1,20 @@
+# Opt-in override for hosts with an NVIDIA GPU + the NVIDIA Container
+# Toolkit installed. Usage:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+#
+# Switches the worker (faster-whisper + pyannote.audio) onto the GPU and
+# bumps the default Whisper model up from the CPU-tuned default, since
+# accuracy no longer has to be traded for latency.
+services:
+  worker:
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-medium}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-float16}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
