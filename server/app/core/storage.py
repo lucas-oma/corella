@@ -1,4 +1,5 @@
 import mimetypes
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import UUID
@@ -66,6 +67,14 @@ async def save_upload(meeting_id: UUID, upload: UploadFile) -> str:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
 
     return str(dest_path)
+
+
+def delete_meeting_files(meeting_id: UUID) -> None:
+    """Best-effort cleanup of a meeting's stored audio when the meeting
+    itself is deleted. Never raises — a missing/already-gone directory is
+    not an error here.
+    """
+    shutil.rmtree(meeting_dir(meeting_id), ignore_errors=True)
 
 
 def _iter_file(path: Path, start: int, end: int, chunk_size: int = CHUNK_SIZE) -> Iterator[bytes]:

@@ -1,3 +1,5 @@
+import logging
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
@@ -14,18 +16,27 @@ from app.schemas.meeting import MeetingCreate, MeetingRead
 from app.schemas.transcript import TranscriptSegmentRead
 from app.workers.celery_app import celery_app
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 
-_ALLOWED_AUDIO_TYPES = {
-    "audio/mpeg",
-    "audio/mp4",
-    "audio/wav",
-    "audio/x-wav",
-    "audio/webm",
-    "audio/ogg",
-    "audio/flac",
-    "video/webm",  # MediaRecorder in the browser often tags audio-only as this
+_ALLOWED_AUDIO_EXTENSIONS = {
+    ".mp3", ".wav", ".m4a", ".mp4", ".webm", ".ogg", ".oga", ".flac", ".aac", ".opus", ".caf",
 }
+
+
+def _looks_like_audio(filename: str | None, content_type: str | None) -> bool:
+    """Browsers/OSes are inconsistent about what Content-Type they report
+    for a given file (an exact-match allowlist was silently rejecting real
+    audio files), so accept on either signal — a recognized extension, or a
+    content-type that at least claims to be audio. ffmpeg is the real
+    validator: it runs in the worker and produces a clear, user-visible
+    error (Meeting.processing_error) if the file turns out not to be audio.
+    """
+    if Path(filename or "").suffix.lower() in _ALLOWED_AUDIO_EXTENSIONS:
+        return True
+    ct = (content_type or "").split(";")[0].strip().lower()
+    return ct.startswith("audio/") or ct == "video/webm"
 
 
 async def _get_owned_meeting(
@@ -81,22 +92,41 @@ async def upload_meeting_audio(
 ) -> Meeting:
     meeting = await _get_owned_meeting(meeting_id, current_user, db)
 
-    content_type = (file.content_type or "").split(";")[0].strip()
-    if content_type not in _ALLOWED_AUDIO_TYPES:
+    if not _looks_like_audio(file.filename, file.content_type):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Unsupported content type: {file.content_type}",
+            detail=f"Doesn't look like an audio file: {file.filename} ({file.content_type})",
         )
 
     meeting.audio_path = await storage.save_upload(meeting_id, file)
     meeting.status = MeetingStatus.PROCESSING
     meeting.processing_error = None
+
+    try:
+        celery_app.send_task("corella.process_meeting_audio", args=[str(meeting_id)])
+    except Exception:
+        # Couldn't even hand the job off (e.g. Redis unreachable) — land on
+        # `failed` with a clear reason rather than leaving the meeting stuck
+        # on `processing` forever with nothing ever going to work on it.
+        logger.exception("Failed to dispatch process_meeting_audio for meeting %s", meeting_id)
+        meeting.status = MeetingStatus.FAILED
+        meeting.processing_error = "Could not start processing — the background worker is unreachable."
+
     await db.commit()
     await db.refresh(meeting)
-
-    celery_app.send_task("corella.process_meeting_audio", args=[str(meeting_id)])
-
     return meeting
+
+
+@router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_meeting(
+    meeting_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    meeting = await _get_owned_meeting(meeting_id, current_user, db)
+    await db.delete(meeting)
+    await db.commit()
+    storage.delete_meeting_files(meeting_id)
 
 
 @router.get("/{meeting_id}/audio")

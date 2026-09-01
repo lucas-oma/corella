@@ -23,6 +23,7 @@ export default function Dashboard() {
   const [meetings, setMeetings] = useState<Meeting[] | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     api.listMeetings().then(setMeetings);
@@ -35,14 +36,34 @@ export default function Dashboard() {
 
     setError(null);
     setUploading(true);
+    let meeting: Meeting | null = null;
     try {
-      const meeting = await api.createMeeting(titleFromFilename(file.name));
+      meeting = await api.createMeeting(titleFromFilename(file.name));
       await api.uploadMeetingAudio(meeting.id, file);
       navigate(`/meetings/${meeting.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Upload failed");
+      // Don't leave a stuck, audio-less "recording" meeting behind just
+      // because the upload itself failed — clean it back up.
+      if (meeting) {
+        await api.deleteMeeting(meeting.id).catch(() => {});
+      }
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function onDelete(e: React.MouseEvent, meetingId: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDeletingId(meetingId);
+    try {
+      await api.deleteMeeting(meetingId);
+      setMeetings((prev) => prev?.filter((m) => m.id !== meetingId) ?? null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't delete meeting");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -101,9 +122,19 @@ export default function Dashboard() {
                     {new Date(meeting.created_at).toLocaleString()}
                   </p>
                 </div>
-                <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
-                  {STATUS_LABEL[meeting.status]}
-                </span>
+                <div className="flex items-center gap-3">
+                  <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                    {STATUS_LABEL[meeting.status]}
+                  </span>
+                  <button
+                    onClick={(e) => onDelete(e, meeting.id)}
+                    disabled={deletingId === meeting.id}
+                    className="text-xs text-ink-subtle hover:text-status-danger"
+                    title="Delete meeting"
+                  >
+                    {deletingId === meeting.id ? "…" : "Delete"}
+                  </button>
+                </div>
               </Link>
             </li>
           ))}

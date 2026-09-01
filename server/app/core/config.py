@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     audio_storage_path: str = "/data/audio"
     max_audio_upload_mb: int = 500
 
+    # Instance-wide LLM provider fallbacks — used when a user hasn't saved
+    # their own key (per-user keys land with the rest of Phase C). Presence
+    # of these is what GET /api/settings/providers reports as "connected".
+    anthropic_api_key: str | None = None
+    openai_api_key: str | None = None
+    gemini_api_key: str | None = None
+    ollama_base_url: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

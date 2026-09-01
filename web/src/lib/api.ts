@@ -96,6 +96,12 @@ export interface TranscriptSegment {
   text: string;
 }
 
+export interface ProviderStatus {
+  provider: "anthropic" | "openai" | "gemini" | "ollama";
+  connected: boolean;
+  source: "user" | "env" | null;
+}
+
 export const api = {
   authConfig: () => request<AuthConfig>("/api/auth/config"),
   register: (email: string, password: string, fullName: string) =>
@@ -120,4 +126,6 @@ export const api = {
   },
   getTranscript: (id: string) => request<TranscriptSegment[]>(`/api/meetings/${id}/transcript`),
   getAudioObjectUrl: (id: string) => requestObjectUrl(`/api/meetings/${id}/audio`),
+  deleteMeeting: (id: string) => request<void>(`/api/meetings/${id}`, { method: "DELETE" }),
+  getProviderStatus: () => request<ProviderStatus[]>("/api/settings/providers"),
 };

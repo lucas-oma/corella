@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
 import { api, type Meeting, type TranscriptSegment } from "@/lib/api";
@@ -15,11 +15,24 @@ function formatTimestamp(ms: number): string {
 
 export default function MeetingDetail() {
   const { meetingId } = useParams<{ meetingId: string }>();
+  const navigate = useNavigate();
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  async function onDelete() {
+    if (!meetingId) return;
+    setDeleting(true);
+    try {
+      await api.deleteMeeting(meetingId);
+      navigate("/dashboard");
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   // Poll while the recording is still being processed; stop once it lands
   // on a terminal status (ready/failed).
@@ -70,9 +83,20 @@ export default function MeetingDetail() {
 
   return (
     <AppShell>
-      <Link to="/dashboard" className="text-sm text-ink-muted hover:text-ink dark:hover:text-ink-inverted">
-        ← Meetings
-      </Link>
+      <div className="flex items-center justify-between">
+        <Link to="/dashboard" className="text-sm text-ink-muted hover:text-ink dark:hover:text-ink-inverted">
+          ← Meetings
+        </Link>
+        {meeting && (
+          <button
+            onClick={onDelete}
+            disabled={deleting}
+            className="text-sm text-ink-subtle hover:text-status-danger"
+          >
+            {deleting ? "Deleting…" : "Delete meeting"}
+          </button>
+        )}
+      </div>
 
       {!meeting && <p className="mt-6 text-sm text-ink-muted">Loading…</p>}
 
