@@ -22,7 +22,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
       <header className="border-b border-border dark:border-border-dark">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-8">
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-end gap-2.5">
               <img src={logoLight} alt="" className="h-7 dark:hidden" />
               <img src={logoDark} alt="" className="hidden h-7 dark:block" />
               <span className="font-serif text-lg text-ink dark:text-ink-inverted">Corella</span>
