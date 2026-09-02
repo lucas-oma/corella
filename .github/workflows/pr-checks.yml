@@ -31,8 +31,14 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: corella
-          POSTGRES_PASSWORD: corella
           POSTGRES_DB: corella_test
+          # No password at all, rather than a throwaway one — this
+          # container only ever exists for this one job's lifetime, with
+          # no exposure beyond localhost inside the runner, so there's
+          # nothing a password would actually protect here. Also sidesteps
+          # secret-scanner false positives on a `user:password@host`
+          # connection string (GitGuardian flagged the previous version).
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -41,8 +47,11 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgresql+psycopg://corella:corella@localhost:5432/corella_test
-      JWT_SECRET: ci-test-secret-not-for-production
+      DATABASE_URL: postgresql+psycopg://corella@localhost:5432/corella_test
+      # Per-run, non-word-shaped value rather than a fixed string — same
+      # false-positive avoidance as POSTGRES_HOST_AUTH_METHOD above, and
+      # this container never outlives the job anyway.
+      JWT_SECRET: ci-run-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
