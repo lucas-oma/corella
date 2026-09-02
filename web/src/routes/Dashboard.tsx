@@ -2,15 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import {
-  ApiError,
-  api,
-  CALL_TYPE_LABEL,
-  type CallType,
-  type GroupMeeting,
-  type Meeting,
-  type MeetingSearchResult,
-} from "@/lib/api";
+import CallTypeModal from "@/components/CallTypeModal";
+import { ApiError, api, type GroupMeeting, type Meeting, type MeetingSearchResult } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
 const STATUS_LABEL: Record<Meeting["status"], string> = {
@@ -42,7 +35,12 @@ export default function Dashboard() {
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[] | null>(null);
   const [allMeetings, setAllMeetings] = useState<GroupMeeting[] | null>(null);
   const [groupFilter, setGroupFilter] = useState("");
-  const [callType, setCallType] = useState<CallType>("meeting");
+  // Which action the call-type popup is currently gating — set by clicking
+  // "Record live" or "Upload recording", cleared on cancel/confirm. Call
+  // types are admin-managed (Admin.tsx) now, not a fixed list, so there's
+  // no static dropdown in the header anymore — the choice happens right
+  // when it's needed instead.
+  const [pendingAction, setPendingAction] = useState<"live" | "upload" | null>(null);
   const isAdmin = user?.role === "admin";
 
   // Not semantic — an instant client-side filter over what's already
@@ -108,6 +106,11 @@ export default function Dashboard() {
     };
   }, [query, view]);
 
+  // The chosen call type from the popup, stashed here for onFileSelected —
+  // the browser file picker only opens after the popup already closed, so
+  // by the time a file is actually picked the popup's own state is gone.
+  const pendingCallTypeId = useRef<string | null>(null);
+
   async function onFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-selecting the same file later
@@ -117,7 +120,7 @@ export default function Dashboard() {
     setUploading(true);
     let meeting: Meeting | null = null;
     try {
-      meeting = await api.createMeeting(titleFromFilename(file.name), callType);
+      meeting = await api.createMeeting(titleFromFilename(file.name), pendingCallTypeId.current);
       await api.uploadMeetingAudio(meeting.id, file);
       navigate(`/meetings/${meeting.id}`);
     } catch (err) {
@@ -132,16 +135,30 @@ export default function Dashboard() {
     }
   }
 
-  async function onRecordLive() {
+  async function onRecordLive(callTypeId: string) {
     setError(null);
     setStarting(true);
     try {
-      const meeting = await api.createMeeting("Live recording", callType);
+      const meeting = await api.createMeeting("Live recording", callTypeId);
       navigate(`/meetings/${meeting.id}/live`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't start a live session");
     } finally {
       setStarting(false);
+    }
+  }
+
+  function onCallTypeChosen(callTypeId: string) {
+    const action = pendingAction;
+    setPendingAction(null);
+    if (action === "live") {
+      onRecordLive(callTypeId);
+    } else if (action === "upload") {
+      pendingCallTypeId.current = callTypeId;
+      // Still inside the same click-driven gesture chain (popup "Continue"
+      // was itself a click), so the browser allows programmatically
+      // opening the file picker here.
+      fileInputRef.current?.click();
     }
   }
 
@@ -169,19 +186,7 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <select
-            value={callType}
-            onChange={(e) => setCallType(e.target.value as CallType)}
-            className="field w-auto py-1.5 text-sm"
-            title="Call type — guides what the post-call report focuses on"
-          >
-            {(Object.keys(CALL_TYPE_LABEL) as CallType[]).map((type) => (
-              <option key={type} value={type}>
-                {CALL_TYPE_LABEL[type]}
-              </option>
-            ))}
-          </select>
-          <button onClick={onRecordLive} disabled={starting} className="btn-primary">
+          <button onClick={() => setPendingAction("live")} disabled={starting} className="btn-primary">
             {starting ? "Starting…" : "Record live"}
           </button>
           <input
@@ -200,7 +205,7 @@ export default function Dashboard() {
             onChange={onFileSelected}
           />
           <button
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => setPendingAction("upload")}
             disabled={uploading}
             className="btn-secondary"
           >
@@ -208,6 +213,12 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
+
+      <CallTypeModal
+        open={pendingAction !== null}
+        onCancel={() => setPendingAction(null)}
+        onConfirm={onCallTypeChosen}
+      />
 
       {(user?.group_id || isAdmin) && (
         <div className="mb-6 flex gap-1 border-b border-border dark:border-border-dark">

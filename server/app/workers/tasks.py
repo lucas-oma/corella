@@ -25,6 +25,7 @@ from app.services.asr.whisper import transcribe as whisper_transcribe
 from app.services.audio.mixing import read_wav_pcm, slice_pcm, write_wav
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import parse_json_response
+from app.services.admin.webhooks import dispatch_call_type_webhook
 from app.services.copilot.report import ReportError
 from app.services.copilot.report import generate_report as run_generate_report
 from app.services.diarization import events as diar_events
@@ -897,6 +898,16 @@ async def _generate_report_async(meeting_id: str) -> None:
             return
 
         try:
-            await run_generate_report(db, meeting, provider)
+            result = await run_generate_report(db, meeting, provider)
         except ReportError as e:
             logger.info("generate_report: skipped for meeting %s: %s", meeting_id, e)
+            return
+
+        # Only the automatic path fires this — never the manual "Regenerate
+        # report" route (api/meetings.py:create_meeting_report), and only
+        # after a *successful* report, since the template's placeholders
+        # need real summary/report data. dispatch_call_type_webhook is a
+        # no-op if this meeting's call type has no webhook configured, and
+        # never raises — a broken webhook must never affect the meeting's
+        # own success.
+        await dispatch_call_type_webhook(db, meeting, result)

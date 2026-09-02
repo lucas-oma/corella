@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
+from app.models.call_type import CallType
 from app.models.enum_types import pg_enum
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.user import User
@@ -31,18 +32,6 @@ class ActionItemStatus(str, enum.Enum):
     DONE = "done"
 
 
-class CallType(str, enum.Enum):
-    """What kind of call this is — picked at creation time, used to steer
-    the post-call report's focus (app/services/copilot/report.py's
-    _CALL_TYPE_GUIDANCE), not just cosmetic."""
-
-    MEETING = "meeting"
-    SALES = "sales"
-    SUPPORT = "support"
-    INTERVIEW = "interview"
-    ONE_ON_ONE = "one_on_one"
-
-
 class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "meetings"
 
@@ -62,8 +51,12 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     audio_path: Mapped[str | None] = mapped_column(String(1024))
     summary: Mapped[str | None] = mapped_column(Text)
     processing_error: Mapped[str | None] = mapped_column(Text)
-    call_type: Mapped[CallType] = mapped_column(
-        pg_enum(CallType, "meeting_call_type"), default=CallType.MEETING
+    # Admin-managed (app/models/call_type.py) — SET NULL rather than
+    # CASCADE so deleting a call type never deletes or blocks deleting the
+    # meetings that used it; a meeting whose type was later removed just
+    # reads as untyped.
+    call_type_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("call_types.id", ondelete="SET NULL")
     )
     key_topics: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     sentiment: Mapped[str | None] = mapped_column(String(255))
@@ -72,6 +65,7 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     estimated_cost_usd: Mapped[float | None] = mapped_column(Float)
 
     owner: Mapped[User] = relationship(lazy="joined")
+    call_type: Mapped[CallType | None] = relationship(lazy="joined")
 
     @property
     def has_audio(self) -> bool:

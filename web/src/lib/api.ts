@@ -77,21 +77,33 @@ export interface AuthConfig {
   allow_public_registration: boolean;
 }
 
-export type CallType = "meeting" | "sales" | "support" | "interview" | "one_on_one";
+/** The lightweight, public shape — every authenticated user needs this to
+ * create a meeting, not just admins. See CallTypeConfig below for the
+ * full admin-managed shape (name/guidance/webhook config). */
+export interface CallTypeOption {
+  id: string;
+  name: string;
+  slug: string;
+  is_default: boolean;
+}
 
-export const CALL_TYPE_LABEL: Record<CallType, string> = {
-  meeting: "Meeting",
-  sales: "Sales call",
-  support: "Support call",
-  interview: "Interview",
-  one_on_one: "1:1",
-};
+export interface CallTypeConfig {
+  id: string;
+  name: string;
+  slug: string;
+  report_guidance: string | null;
+  is_default: boolean;
+  webhook_enabled: boolean;
+  webhook_url: string | null;
+  webhook_method: string;
+  webhook_body_template: string | null;
+}
 
 export interface Meeting {
   id: string;
   title: string;
   status: "recording" | "processing" | "ready" | "failed";
-  call_type: CallType;
+  call_type: CallTypeOption | null;
   started_at: string | null;
   ended_at: string | null;
   duration_seconds: number | null;
@@ -278,10 +290,10 @@ export const api = {
     request<MeetingSearchResult[]>(`/api/meetings/search?q=${encodeURIComponent(query)}`),
   searchAllMeetings: (query: string) =>
     request<MeetingSearchResult[]>(`/api/meetings/search/all?q=${encodeURIComponent(query)}`),
-  createMeeting: (title: string, callType: CallType = "meeting") =>
+  createMeeting: (title: string, callTypeId: string | null = null) =>
     request<Meeting>("/api/meetings", {
       method: "POST",
-      body: JSON.stringify({ title, call_type: callType }),
+      body: JSON.stringify({ title, call_type_id: callTypeId }),
     }),
   getMeeting: (id: string) => request<Meeting>(`/api/meetings/${id}`),
   uploadMeetingAudio: (id: string, file: File) => {
@@ -332,4 +344,11 @@ export const api = {
     request<Group>("/api/admin/groups", { method: "POST", body: JSON.stringify({ name }) }),
   adminDeleteGroup: (id: string) => request<void>(`/api/admin/groups/${id}`, { method: "DELETE" }),
   adminGetCostSummary: () => request<CostSummary>("/api/admin/costs"),
+  getCallTypes: () => request<CallTypeOption[]>("/api/call-types"),
+  adminListCallTypes: () => request<CallTypeConfig[]>("/api/admin/call-types"),
+  adminCreateCallType: (payload: Partial<CallTypeConfig> & { name: string; slug: string; webhook_headers?: string }) =>
+    request<CallTypeConfig>("/api/admin/call-types", { method: "POST", body: JSON.stringify(payload) }),
+  adminUpdateCallType: (id: string, payload: Partial<CallTypeConfig> & { webhook_headers?: string }) =>
+    request<CallTypeConfig>(`/api/admin/call-types/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  adminDeleteCallType: (id: string) => request<void>(`/api/admin/call-types/${id}`, { method: "DELETE" }),
 };

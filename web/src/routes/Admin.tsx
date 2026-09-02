@@ -1,9 +1,55 @@
 import { useEffect, useState } from "react";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type CostSummary, type Group, type User } from "@/lib/api";
+import { ApiError, api, type CallTypeConfig, type CostSummary, type Group, type User } from "@/lib/api";
 
 const NO_GROUP = "__none__";
+
+function slugify(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+type CallTypeDraft = {
+  name: string;
+  slug: string;
+  report_guidance: string;
+  is_default: boolean;
+  webhook_enabled: boolean;
+  webhook_url: string;
+  webhook_method: string;
+  webhook_headers: string;
+  webhook_body_template: string;
+};
+
+const EMPTY_CALL_TYPE_DRAFT: CallTypeDraft = {
+  name: "",
+  slug: "",
+  report_guidance: "",
+  is_default: false,
+  webhook_enabled: false,
+  webhook_url: "",
+  webhook_method: "POST",
+  webhook_headers: "",
+  webhook_body_template: "",
+};
+
+function draftFromCallType(ct: CallTypeConfig): CallTypeDraft {
+  return {
+    name: ct.name,
+    slug: ct.slug,
+    report_guidance: ct.report_guidance ?? "",
+    is_default: ct.is_default,
+    webhook_enabled: ct.webhook_enabled,
+    webhook_url: ct.webhook_url ?? "",
+    webhook_method: ct.webhook_method,
+    webhook_headers: "", // write-only, never returned — blank means "leave unchanged" on save
+    webhook_body_template: ct.webhook_body_template ?? "",
+  };
+}
 
 /** Same sub-cent precision rule as MeetingDetail's per-meeting badge —
  * "$0.00" would misleadingly read as free for a genuinely small amount. */
@@ -15,8 +61,15 @@ export default function Admin() {
   const [groups, setGroups] = useState<Group[] | null>(null);
   const [users, setUsers] = useState<User[] | null>(null);
   const [costs, setCosts] = useState<CostSummary | null>(null);
+  const [callTypes, setCallTypes] = useState<CallTypeConfig[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // "new" for the create form, an id for editing an existing row, null for
+  // neither — only one call-type row (or the create form) expanded at once,
+  // same pattern as Settings.tsx's "AI models in use" edit affordance.
+  const [editingCallTypeId, setEditingCallTypeId] = useState<string | "new" | null>(null);
+  const [callTypeDraft, setCallTypeDraft] = useState<CallTypeDraft>(EMPTY_CALL_TYPE_DRAFT);
 
   const [newGroupName, setNewGroupName] = useState("");
   const [newUser, setNewUser] = useState({
@@ -31,6 +84,7 @@ export default function Admin() {
     api.adminListGroups().then(setGroups);
     api.adminListUsers().then(setUsers);
     api.adminGetCostSummary().then(setCosts);
+    api.adminListCallTypes().then(setCallTypes);
   }, []);
 
   function groupName(groupId: string | null): string {
@@ -108,6 +162,82 @@ export default function Admin() {
       setUsers((prev) => prev?.map((u) => (u.id === user.id ? updated : u)) ?? null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't update user");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function onNewCallType() {
+    setError(null);
+    setCallTypeDraft(EMPTY_CALL_TYPE_DRAFT);
+    setEditingCallTypeId("new");
+  }
+
+  function onEditCallType(ct: CallTypeConfig) {
+    setError(null);
+    setCallTypeDraft(draftFromCallType(ct));
+    setEditingCallTypeId(ct.id);
+  }
+
+  function onCallTypeNameChange(name: string) {
+    setCallTypeDraft((prev) => ({
+      ...prev,
+      name,
+      // Only auto-derive the slug while creating, and only until the admin
+      // has actually typed their own — editing an existing type's name
+      // never silently changes its stable slug out from under it.
+      slug: editingCallTypeId === "new" ? slugify(name) : prev.slug,
+    }));
+  }
+
+  async function onSaveCallType() {
+    const d = callTypeDraft;
+    if (!d.name.trim() || !d.slug.trim()) return;
+    setError(null);
+    setBusy("call-type-save");
+    try {
+      const payload = {
+        name: d.name.trim(),
+        slug: d.slug.trim(),
+        report_guidance: d.report_guidance.trim() || null,
+        is_default: d.is_default,
+        webhook_enabled: d.webhook_enabled,
+        webhook_url: d.webhook_url.trim() || null,
+        webhook_method: d.webhook_method,
+        webhook_body_template: d.webhook_body_template.trim() || null,
+        // Omitted entirely (not even as an empty string) unless the admin
+        // actually typed something this session — it's write-only and
+        // never comes back from the API, so an empty draft field means
+        // "leave whatever's already saved alone," not "clear it."
+        ...(d.webhook_headers.trim() ? { webhook_headers: d.webhook_headers.trim() } : {}),
+      };
+
+      if (editingCallTypeId === "new") {
+        const created = await api.adminCreateCallType(payload);
+        setCallTypes((prev) => [...(prev ?? []), created]);
+      } else if (editingCallTypeId) {
+        const updated = await api.adminUpdateCallType(editingCallTypeId, payload);
+        setCallTypes((prev) => prev?.map((c) => (c.id === updated.id ? updated : c)) ?? null);
+      }
+      if (d.is_default) {
+        setCallTypes((prev) => prev?.map((c) => ({ ...c, is_default: c.slug === d.slug })) ?? null);
+      }
+      setEditingCallTypeId(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't save call type");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onDeleteCallType(ct: CallTypeConfig) {
+    setError(null);
+    setBusy(ct.id);
+    try {
+      await api.adminDeleteCallType(ct.id);
+      setCallTypes((prev) => prev?.filter((c) => c.id !== ct.id) ?? null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't delete call type");
     } finally {
       setBusy(null);
     }
@@ -283,6 +413,78 @@ export default function Admin() {
       </section>
 
       <section className="card mt-6 p-6">
+        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Call types</h2>
+        <p className="mt-1 text-sm text-ink-muted">
+          What steers the post-call report's focus, and an optional webhook fired once a call of
+          that type finishes automatic processing.
+        </p>
+
+        <ul className="mt-5 divide-y divide-border dark:divide-border-dark">
+          {callTypes === null && <li className="py-3 text-sm text-ink-muted">Loading…</li>}
+          {callTypes?.map((ct) => (
+            <li key={ct.id} className="py-3">
+              {editingCallTypeId === ct.id ? (
+                <CallTypeForm
+                  draft={callTypeDraft}
+                  setDraft={setCallTypeDraft}
+                  onNameChange={onCallTypeNameChange}
+                  onSave={onSaveCallType}
+                  onCancel={() => setEditingCallTypeId(null)}
+                  saving={busy === "call-type-save"}
+                />
+              ) : (
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-ink dark:text-ink-inverted">
+                      {ct.name}
+                      {ct.is_default && <span className="ml-1.5 text-xs text-ink-subtle">(default)</span>}
+                    </p>
+                    <p className="text-xs text-ink-subtle">
+                      {ct.slug}
+                      {ct.webhook_enabled && " · webhook configured"}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => onEditCallType(ct)}
+                      className="text-xs text-accent hover:underline"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => onDeleteCallType(ct)}
+                      disabled={busy === ct.id || ct.is_default}
+                      title={ct.is_default ? "Mark a different type as default first" : undefined}
+                      className="text-xs text-ink-subtle hover:text-status-danger disabled:opacity-40 disabled:hover:text-ink-subtle"
+                    >
+                      {busy === ct.id ? "Deleting…" : "Delete"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+
+        <div className="mt-4 border-t border-border pt-4 dark:border-border-dark">
+          {editingCallTypeId === "new" ? (
+            <CallTypeForm
+              draft={callTypeDraft}
+              setDraft={setCallTypeDraft}
+              onNameChange={onCallTypeNameChange}
+              onSave={onSaveCallType}
+              onCancel={() => setEditingCallTypeId(null)}
+              saving={busy === "call-type-save"}
+            />
+          ) : (
+            <button onClick={onNewCallType} className="btn-secondary">
+              New call type
+            </button>
+          )}
+        </div>
+      </section>
+
+      <section className="card mt-6 p-6">
         <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Costs</h2>
         <p className="mt-1 text-sm text-ink-muted">
           Best-effort LLM spend estimate — token usage priced against a point-in-time table
@@ -369,5 +571,130 @@ export default function Admin() {
         )}
       </section>
     </AppShell>
+  );
+}
+
+/** The create-and-edit form for one call type — shared by both flows in
+ * the Call types section above (new-row create, and expand-to-edit on an
+ * existing row), same pattern as Settings.tsx's "AI models in use" inline
+ * edit forms. */
+function CallTypeForm({
+  draft,
+  setDraft,
+  onNameChange,
+  onSave,
+  onCancel,
+  saving,
+}: {
+  draft: CallTypeDraft;
+  setDraft: React.Dispatch<React.SetStateAction<CallTypeDraft>>;
+  onNameChange: (name: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  saving: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-2">
+        <input
+          type="text"
+          placeholder="Name, e.g. Sales call"
+          value={draft.name}
+          onChange={(e) => onNameChange(e.target.value)}
+          className="field text-sm"
+        />
+        <input
+          type="text"
+          placeholder="slug"
+          value={draft.slug}
+          onChange={(e) => setDraft((prev) => ({ ...prev, slug: e.target.value }))}
+          className="field text-sm"
+        />
+      </div>
+      <textarea
+        placeholder="Report guidance — appended to the post-call report prompt to steer what it focuses on"
+        value={draft.report_guidance}
+        onChange={(e) => setDraft((prev) => ({ ...prev, report_guidance: e.target.value }))}
+        rows={3}
+        className="field text-sm"
+      />
+      <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
+        <input
+          type="checkbox"
+          checked={draft.is_default}
+          onChange={(e) => setDraft((prev) => ({ ...prev, is_default: e.target.checked }))}
+          className="accent-accent"
+        />
+        Default for new meetings
+      </label>
+
+      <div className="border-t border-border pt-2 dark:border-border-dark">
+        <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
+          <input
+            type="checkbox"
+            checked={draft.webhook_enabled}
+            onChange={(e) => setDraft((prev) => ({ ...prev, webhook_enabled: e.target.checked }))}
+            className="accent-accent"
+          />
+          Fire a webhook once a call of this type finishes processing
+        </label>
+
+        {draft.webhook_enabled && (
+          <div className="mt-2 space-y-2 border-l-2 border-border pl-3 dark:border-border-dark">
+            <div className="flex gap-2">
+              <select
+                value={draft.webhook_method}
+                onChange={(e) => setDraft((prev) => ({ ...prev, webhook_method: e.target.value }))}
+                className="field w-24 text-sm"
+              >
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+              </select>
+              <input
+                type="text"
+                placeholder="https://example.com/webhook"
+                value={draft.webhook_url}
+                onChange={(e) => setDraft((prev) => ({ ...prev, webhook_url: e.target.value }))}
+                className="field flex-1 text-sm"
+              />
+            </div>
+            <textarea
+              placeholder='Headers, as JSON — e.g. {"Authorization": "Bearer ..."}. Leave blank to keep whatever is already saved.'
+              value={draft.webhook_headers}
+              onChange={(e) => setDraft((prev) => ({ ...prev, webhook_headers: e.target.value }))}
+              rows={2}
+              className="field text-sm"
+            />
+            <textarea
+              placeholder='Body template, as JSON — e.g. {"meeting": "{{meeting_id}}", "summary": "{{summary}}"}'
+              value={draft.webhook_body_template}
+              onChange={(e) => setDraft((prev) => ({ ...prev, webhook_body_template: e.target.value }))}
+              rows={3}
+              className="field text-sm"
+            />
+            <p className="text-xs text-ink-subtle">
+              Placeholders (place inside quotes in the JSON): {"{{meeting_id}}"}, {"{{owner_name}}"},{" "}
+              {"{{title}}"}, {"{{call_type}}"}, {"{{status}}"}, {"{{summary}}"}, {"{{key_topics}}"},{" "}
+              {"{{sentiment}}"}, {"{{coach_score}}"}, {"{{action_items}}"}, {"{{transcript}}"},{" "}
+              {"{{created_at}}"}, {"{{duration_seconds}}"}.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex gap-2 pt-1">
+        <button
+          onClick={onSave}
+          disabled={saving || !draft.name.trim() || !draft.slug.trim()}
+          className="btn-secondary"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button onClick={onCancel} className="text-xs text-ink-subtle">
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }

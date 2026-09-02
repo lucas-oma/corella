@@ -3,12 +3,17 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.meeting import CallType, MeetingStatus
+from app.models.meeting import MeetingStatus
+from app.schemas.call_type import CallTypeOption
 
 
 class MeetingCreate(BaseModel):
     title: str = "Untitled meeting"
-    call_type: CallType = CallType.MEETING
+    # None resolves server-side to whichever CallType has is_default=True
+    # (see api/meetings.py:create_meeting) — call types are admin-managed
+    # now, not a fixed compile-time list, so there's no static default to
+    # fall back to here.
+    call_type_id: UUID | None = None
 
 
 class MeetingRead(BaseModel):
@@ -17,7 +22,7 @@ class MeetingRead(BaseModel):
     id: UUID
     title: str
     status: MeetingStatus
-    call_type: CallType
+    call_type: CallTypeOption | None
     started_at: datetime | None
     ended_at: datetime | None
     duration_seconds: int | None

@@ -2,14 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import {
-  ApiError,
-  api,
-  CALL_TYPE_LABEL,
-  type ActionItem,
-  type Meeting,
-  type TranscriptSegment,
-} from "@/lib/api";
+import { ApiError, api, type ActionItem, type Meeting, type TranscriptSegment } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
 const POLL_INTERVAL_MS = 3000;
@@ -218,9 +211,11 @@ export default function MeetingDetail() {
         <>
           <div className="mt-2 flex items-center gap-2">
             <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">{meeting.title}</h1>
-            <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
-              {CALL_TYPE_LABEL[meeting.call_type]}
-            </span>
+            {meeting.call_type && (
+              <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                {meeting.call_type.name}
+              </span>
+            )}
           </div>
           <p className="mt-1 text-sm text-ink-muted">
             {!isOwner && <>{meeting.owner_name} · </>}

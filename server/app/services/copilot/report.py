@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cost import UsageKind
-from app.models.meeting import ActionItem, ActionItemStatus, CallType, Channel, Meeting, TranscriptSegment
+from app.models.meeting import ActionItem, ActionItemStatus, Channel, Meeting, TranscriptSegment
 from app.services.copilot.action_items import persist_new_action_items
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import as_str_list, parse_json_response
@@ -24,39 +24,6 @@ _SYSTEM_PROMPT = """You are summarizing a completed call transcript. Respond wit
   "coach_score": <integer 0-100 rating how well this call went for Me overall, considering engagement and whether Them's questions or concerns were addressed>,
   "action_items": ["<a commitment or follow-up task mentioned anywhere in the call>"]
 }"""
-
-# Appended to _SYSTEM_PROMPT based on Meeting.call_type — same JSON shape for
-# every type, just different guidance on what to emphasize within it.
-_CALL_TYPE_GUIDANCE: dict[CallType, str] = {
-    CallType.SALES: (
-        "This is a sales call. Focus the summary and key_topics on the prospect's pain points, "
-        "objections raised, budget/timeline signals, and next steps or deal stage. sentiment should "
-        "reflect how receptive the prospect seemed. Prioritize quotes about pricing, timeline, or "
-        "objections for notable_quotes."
-    ),
-    CallType.SUPPORT: (
-        "This is a customer support call. Focus the summary and key_topics on the issue reported, "
-        "whether it was resolved, and any escalation risk. sentiment should reflect the customer's "
-        "frustration or satisfaction level. Prioritize quotes describing the problem or the "
-        "resolution for notable_quotes."
-    ),
-    CallType.INTERVIEW: (
-        "This is a job interview. Focus the summary and key_topics on the candidate's strengths, "
-        "gaps, and fit signals relative to what was asked. sentiment should reflect how the "
-        "conversation went overall. Prioritize quotes that reveal candidate strengths or concerns "
-        "for notable_quotes."
-    ),
-    CallType.ONE_ON_ONE: (
-        "This is a one-on-one check-in. Focus the summary and key_topics on blockers raised, growth "
-        "or career topics, and commitments made by either person. sentiment should reflect the "
-        "overall tone of the conversation. Prioritize quotes about blockers or commitments for "
-        "notable_quotes."
-    ),
-    CallType.MEETING: (
-        "This is a general meeting. Focus the summary and key_topics on decisions made and open "
-        "questions left unresolved."
-    ),
-}
 
 _LABELS = {Channel.ME: "Me", Channel.THEM: "Them"}
 
@@ -98,8 +65,13 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
     if has_channel_data:
         user_content += f"\n\nTalk ratio — Me: {ratio['me']}%, Them: {ratio['them']}%"
 
+    # meeting.call_type is a lazy="joined" relationship (app/models/meeting.py)
+    # — admin-managed now (app/models/call_type.py), not a hardcoded dict.
+    # None (no type, or a type whose row was later deleted) or blank
+    # guidance both mean "no extra steering," same graceful fallback the
+    # old dict.get() already had for an unmapped enum value.
     system_prompt = _SYSTEM_PROMPT
-    guidance = _CALL_TYPE_GUIDANCE.get(meeting.call_type)
+    guidance = meeting.call_type.report_guidance if meeting.call_type else None
     if guidance:
         system_prompt += f"\n\n{guidance}"
 

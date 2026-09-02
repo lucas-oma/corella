@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, require_admin
 from app.core import storage
 from app.core.db import get_db
+from app.models.call_type import CallType
 from app.models.meeting import ActionItem, Meeting, MeetingStatus, TranscriptSegment
 from app.models.user import User, UserRole
 from app.schemas.meeting import GroupMeetingRead, MeetingCreate, MeetingRead, MeetingSearchResult
@@ -112,16 +113,27 @@ async def create_meeting(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Meeting:
-    meeting = Meeting(owner_id=current_user.id, title=payload.title, call_type=payload.call_type)
+    if payload.call_type_id is not None:
+        call_type = await db.get(CallType, payload.call_type_id)
+        if call_type is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unknown call_type_id")
+    else:
+        # None resolves to whichever type is currently marked default —
+        # call types are admin-managed now, no compile-time fallback.
+        call_type = await db.scalar(select(CallType).where(CallType.is_default))
+
+    meeting = Meeting(owner_id=current_user.id, title=payload.title, call_type_id=call_type.id if call_type else None)
     db.add(meeting)
     await db.commit()
-    # refresh() reloads meeting's own columns, not the lazy="joined" owner
-    # relationship (never triggered at all for a freshly-constructed object
-    # — nothing queried it yet) — MeetingRead needs owner_name, and it's
-    # already right here on current_user, so just set it directly rather
-    # than trust an implicit relationship load.
+    # refresh() reloads meeting's own columns, not the lazy="joined"
+    # owner/call_type relationships (never triggered at all for a
+    # freshly-constructed object — nothing queried them yet) — both are
+    # already right here, so set them directly rather than trust an
+    # implicit relationship load. Same pattern as the pre-existing
+    # owner-assignment below.
     await db.refresh(meeting)
     meeting.owner = current_user
+    meeting.call_type = call_type
     return meeting
 
 

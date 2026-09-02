@@ -6,9 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
 from app.core.db import get_db
-from app.core.security import hash_password
+from app.core.security import encrypt_secret, hash_password
+from app.models.call_type import CallType
 from app.models.group import Group
 from app.models.user import User
+from app.schemas.call_type import CallTypeCreate, CallTypeRead, CallTypeUpdate
 from app.schemas.cost import CostSummaryRead, DailyCostRead, UserCostBreakdownRead
 from app.schemas.group import GroupCreate, GroupRead
 from app.schemas.user import AdminUserCreate, AdminUserUpdate, UserRead
@@ -111,6 +113,99 @@ async def delete_group(group_id: UUID, db: AsyncSession = Depends(get_db)) -> No
     if group is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
     await db.delete(group)
+    await db.commit()
+
+
+async def _unset_other_defaults(db: AsyncSession, exclude_id: UUID | None) -> None:
+    """Enforces the single-default invariant (exactly one CallType with
+    is_default=True) in application code, in the same transaction as the
+    caller's own insert/update — not a DB constraint, since "exactly one
+    true, the rest false" isn't expressible as a simple column check.
+    """
+    others = await db.scalars(
+        select(CallType).where(CallType.is_default.is_(True), CallType.id != exclude_id)
+        if exclude_id is not None
+        else select(CallType).where(CallType.is_default.is_(True))
+    )
+    for other in others:
+        other.is_default = False
+
+
+@router.get("/call-types", response_model=list[CallTypeRead])
+async def list_call_types(db: AsyncSession = Depends(get_db)) -> list[CallType]:
+    result = await db.scalars(select(CallType).order_by(CallType.created_at))
+    return list(result)
+
+
+@router.post("/call-types", response_model=CallTypeRead, status_code=status.HTTP_201_CREATED)
+async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(get_db)) -> CallType:
+    existing = await db.scalar(select(CallType).where(CallType.slug == payload.slug))
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A call type with this slug already exists")
+
+    call_type = CallType(
+        name=payload.name,
+        slug=payload.slug,
+        report_guidance=payload.report_guidance,
+        is_default=payload.is_default,
+        webhook_enabled=payload.webhook_enabled,
+        webhook_url=payload.webhook_url,
+        webhook_method=payload.webhook_method,
+        webhook_headers_encrypted=encrypt_secret(payload.webhook_headers) if payload.webhook_headers else None,
+        webhook_body_template=payload.webhook_body_template,
+    )
+    db.add(call_type)
+    if payload.is_default:
+        await db.flush()  # call_type needs its id before excluding it below
+        await _unset_other_defaults(db, call_type.id)
+    await db.commit()
+    await db.refresh(call_type)
+    return call_type
+
+
+@router.patch("/call-types/{call_type_id}", response_model=CallTypeRead)
+async def update_call_type(call_type_id: UUID, payload: CallTypeUpdate, db: AsyncSession = Depends(get_db)) -> CallType:
+    call_type = await db.get(CallType, call_type_id)
+    if call_type is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call type not found")
+
+    fields = payload.model_dump(exclude_unset=True)
+    if "slug" in fields and fields["slug"] != call_type.slug:
+        clash = await db.scalar(select(CallType).where(CallType.slug == fields["slug"]))
+        if clash is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A call type with this slug already exists")
+
+    if "webhook_headers" in fields:
+        headers = fields.pop("webhook_headers")
+        call_type.webhook_headers_encrypted = encrypt_secret(headers) if headers else None
+
+    for field, value in fields.items():
+        setattr(call_type, field, value)
+
+    if fields.get("is_default"):
+        await _unset_other_defaults(db, call_type.id)
+
+    await db.commit()
+    await db.refresh(call_type)
+    return call_type
+
+
+@router.delete("/call-types/{call_type_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_call_type(call_type_id: UUID, db: AsyncSession = Depends(get_db)) -> None:
+    """Meetings that used this type get call_type_id SET NULL automatically
+    (the FK's ondelete rule, app/models/meeting.py) — never blocked or
+    cascaded. The one thing that IS blocked: deleting the current default,
+    since every new meeting needs a default to resolve to.
+    """
+    call_type = await db.get(CallType, call_type_id)
+    if call_type is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call type not found")
+    if call_type.is_default:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Can't delete the default call type — mark a different one as default first",
+        )
+    await db.delete(call_type)
     await db.commit()
 
 
