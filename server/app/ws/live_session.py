@@ -478,3 +478,11 @@ async def _finalize(session: LiveSession) -> None:
             meeting.status = MeetingStatus.FAILED
             meeting.processing_error = f"Failed to finalize live recording: {e}"[:2000]
             await db.commit()
+            return
+
+    try:
+        celery_app.send_task("corella.index_meeting_search", args=[str(session.meeting_id)])
+    except Exception:
+        # Search indexing is a nice-to-have, not a reason to retroactively
+        # mark an already-successfully-finalized meeting as failed.
+        logger.exception("Failed to dispatch index_meeting_search for meeting %s", session.meeting_id)

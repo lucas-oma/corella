@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
 import { ApiError, api, type ActionItem, type Meeting, type TranscriptSegment } from "@/lib/api";
@@ -25,7 +25,9 @@ function speakerLabel(segment: TranscriptSegment): string | null {
 export default function MeetingDetail() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const audioRef = useRef<HTMLAudioElement>(null);
+  const seekedFromSearchRef = useRef(false);
 
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
@@ -118,10 +120,24 @@ export default function MeetingDetail() {
     };
   }, [audioUrl]);
 
-  function seekTo(ms: number) {
+  // Deep-linked from a Dashboard search result (?t=<start_ms>) — position
+  // the playhead at the matched moment once the audio is actually mounted,
+  // without auto-playing (a search click is a real user gesture, but
+  // suddenly-playing audio on arrival is still a surprising thing to do to
+  // someone). Only once per page load — audioUrl can change identity again
+  // later (e.g. StrictMode/effect re-runs) and shouldn't re-trigger this.
+  useEffect(() => {
+    if (seekedFromSearchRef.current || !audioUrl || !audioRef.current) return;
+    const t = searchParams.get("t");
+    if (t === null) return;
+    seekedFromSearchRef.current = true;
+    seekTo(Number(t), false);
+  }, [audioUrl, searchParams]);
+
+  function seekTo(ms: number, autoplay = true) {
     if (!audioRef.current) return;
     audioRef.current.currentTime = ms / 1000;
-    audioRef.current.play().catch(() => {});
+    if (autoplay) audioRef.current.play().catch(() => {});
   }
 
   return (

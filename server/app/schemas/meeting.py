@@ -23,3 +23,12 @@ class MeetingRead(BaseModel):
     processing_error: str | None
     summary: str | None
     created_at: datetime
+
+
+class MeetingSearchResult(BaseModel):
+    meeting_id: UUID
+    title: str
+    status: MeetingStatus
+    created_at: datetime
+    snippet: str
+    start_ms: int  # where in the recording the best-matching chunk starts

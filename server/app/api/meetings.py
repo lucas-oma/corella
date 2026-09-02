@@ -12,10 +12,13 @@ from app.core import storage
 from app.core.db import get_db
 from app.models.meeting import ActionItem, Meeting, MeetingStatus, TranscriptSegment
 from app.models.user import User
-from app.schemas.meeting import MeetingCreate, MeetingRead
+from app.schemas.meeting import MeetingCreate, MeetingRead, MeetingSearchResult
 from app.schemas.report import ActionItemRead, ActionItemUpdate, ReportResponse
 from app.schemas.transcript import TranscriptSegmentRead
 from app.services.copilot.report import ReportError, generate_report
+from app.services.embeddings.qdrant_store import delete_meeting_chunks
+from app.services.embeddings.qdrant_store import search_meetings as qdrant_search_meetings
+from app.services.embeddings.query import embed_query
 from app.services.llm.resolve import resolve_provider
 from app.workers.celery_app import celery_app
 
@@ -77,6 +80,56 @@ async def create_meeting(
     return meeting
 
 
+@router.get("/search", response_model=list[MeetingSearchResult])
+async def search_meetings(
+    q: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[MeetingSearchResult]:
+    """Semantic search over transcript content (app/services/embeddings/,
+    corella.index_meeting_search), not a title/substring filter. Registered
+    before /{meeting_id} — route order matters here, or "search" would be
+    parsed as a meeting_id UUID and 422 instead of matching this route.
+    """
+    q = q.strip()
+    if not q:
+        return []
+
+    embedding = await embed_query(q)
+    hits = qdrant_search_meetings(current_user.id, embedding, top_k=10)
+
+    # Qdrant returns results ordered best-first; keep only the first
+    # (best-scoring) hit per meeting.
+    best_by_meeting: dict[UUID, dict] = {}
+    for hit in hits:
+        meeting_id = UUID(hit["meeting_id"])
+        if meeting_id not in best_by_meeting:
+            best_by_meeting[meeting_id] = hit
+    if not best_by_meeting:
+        return []
+
+    meetings = await db.scalars(
+        select(Meeting).where(
+            Meeting.id.in_(best_by_meeting.keys()), Meeting.owner_id == current_user.id
+        )
+    )
+    results = []
+    for meeting in meetings:
+        hit = best_by_meeting[meeting.id]
+        results.append(
+            MeetingSearchResult(
+                meeting_id=meeting.id,
+                title=meeting.title,
+                status=meeting.status,
+                created_at=meeting.created_at,
+                snippet=hit["text"],
+                start_ms=hit["start_ms"],
+            )
+        )
+    results.sort(key=lambda r: best_by_meeting[r.meeting_id]["score"], reverse=True)
+    return results
+
+
 @router.get("/{meeting_id}", response_model=MeetingRead)
 async def get_meeting(
     meeting_id: UUID,
@@ -130,6 +183,7 @@ async def delete_meeting(
     await db.delete(meeting)
     await db.commit()
     storage.delete_meeting_files(meeting_id)
+    delete_meeting_chunks(meeting_id)
 
 
 @router.get("/{meeting_id}/audio")

@@ -115,6 +115,15 @@ export interface ProviderStatus {
   source: "user" | "env" | null;
 }
 
+export interface MeetingSearchResult {
+  meeting_id: string;
+  title: string;
+  status: Meeting["status"];
+  created_at: string;
+  snippet: string;
+  start_ms: number;
+}
+
 export interface KBDocument {
   id: string;
   filename: string;
@@ -139,6 +148,8 @@ export const api = {
     }),
   me: () => request<User>("/api/auth/me"),
   listMeetings: () => request<Meeting[]>("/api/meetings"),
+  searchMeetings: (query: string) =>
+    request<MeetingSearchResult[]>(`/api/meetings/search?q=${encodeURIComponent(query)}`),
   createMeeting: (title: string) =>
     request<Meeting>("/api/meetings", { method: "POST", body: JSON.stringify({ title }) }),
   getMeeting: (id: string) => request<Meeting>(`/api/meetings/${id}`),

@@ -27,10 +27,10 @@ from app.services.diarization.cluster import (
 from app.services.diarization.embedding import embed_utterance
 from app.services.diarization.pyannote import DiarizationUnavailable, diarize
 from app.services.diarization.text_split import words_in_range
-from app.services.embeddings.chunking import chunk_text
+from app.services.embeddings.chunking import chunk_text, chunk_transcript
 from app.services.embeddings.embed import embed_texts
 from app.services.embeddings.extract import extract_text
-from app.services.embeddings.qdrant_store import upsert_chunks
+from app.services.embeddings.qdrant_store import upsert_chunks, upsert_meeting_chunks
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -127,6 +127,14 @@ def process_meeting_audio(meeting_id: str) -> None:
             meeting.status = MeetingStatus.FAILED
             meeting.processing_error = str(e)[:2000]
             db.commit()
+            return
+
+    try:
+        celery_app.send_task("corella.index_meeting_search", args=[meeting_id])
+    except Exception:
+        # Search indexing is a nice-to-have, not a reason to retroactively
+        # mark an already-successfully-transcribed meeting as failed.
+        logger.exception("Failed to dispatch index_meeting_search for meeting %s", meeting_id)
 
 
 @celery_app.task(name="corella.process_kb_document")
@@ -399,3 +407,35 @@ def diarize_utterance(
         except Exception:
             logger.exception("diarize_utterance: clustering failed for segment %s", segment_id)
             db.rollback()
+
+
+@celery_app.task(name="corella.index_meeting_search")
+def index_meeting_search(meeting_id: str) -> None:
+    """Embeds this meeting's transcript into the meeting_chunks Qdrant
+    collection for Dashboard semantic search — dispatched fire-and-forget
+    whenever a meeting reaches READY, from both process_meeting_audio's
+    success path and live_session.py's _finalize(). Never touches
+    Meeting.status — a failure here just means this meeting won't show up
+    in search yet, not a reason to fail the meeting itself.
+    """
+    with get_sync_db() as db:
+        meeting = db.get(Meeting, UUID(meeting_id))
+        if meeting is None:
+            return
+
+        segments = list(
+            db.scalars(
+                select(TranscriptSegment)
+                .where(TranscriptSegment.meeting_id == meeting.id)
+                .order_by(TranscriptSegment.start_ms)
+            )
+        )
+        chunks = chunk_transcript(segments)
+        if not chunks:
+            return
+
+        try:
+            embeddings = embed_texts([text for text, _start, _end in chunks])
+            upsert_meeting_chunks(meeting.id, meeting.owner_id, chunks, embeddings)
+        except Exception:
+            logger.exception("index_meeting_search failed for meeting %s", meeting_id)
