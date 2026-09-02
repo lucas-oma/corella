@@ -10,6 +10,7 @@ from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import ActionItem, ActionItemStatus, Channel, TranscriptSegment
 from app.services.copilot.action_items import persist_new_action_items
 from app.services.copilot.json_parse import as_str_list, parse_json_response
+from app.services.access import searchable_owner_ids
 from app.services.copilot.talk_ratio import talk_ratio
 from app.services.embeddings.qdrant_store import search_kb
 from app.services.embeddings.query import embed_query
@@ -118,9 +119,15 @@ def _format_transcript(segments: list[TranscriptSegment]) -> str:
 
 
 async def _retrieve_kb_context(db: AsyncSession, owner_id: UUID, query_text: str) -> list[str]:
+    # Group-aware: a grouped user's copilot can draw on *any* group
+    # member's uploaded documents, not just their own (app/services/access.py)
+    # — so the "does this searcher have any KB at all" check has to look
+    # across the same searchable set, or a grouped user with no docs of
+    # their own would short-circuit here and never see a groupmate's.
+    owner_ids = await searchable_owner_ids(db, owner_id)
     has_kb = await db.scalar(
         select(KBDocument.id)
-        .where(KBDocument.owner_id == owner_id, KBDocument.status == KBDocumentStatus.READY)
+        .where(KBDocument.owner_id.in_(owner_ids), KBDocument.status == KBDocumentStatus.READY)
         .limit(1)
     )
     if has_kb is None:
@@ -129,7 +136,7 @@ async def _retrieve_kb_context(db: AsyncSession, owner_id: UUID, query_text: str
     settings = get_settings()
     try:
         embedding = await embed_query(query_text)
-        return search_kb(owner_id, embedding, top_k=settings.copilot_kb_top_k)
+        return search_kb(owner_ids, embedding, top_k=settings.copilot_kb_top_k)
     except Exception:
         logger.exception("KB retrieval failed for owner %s", owner_id)
         return []

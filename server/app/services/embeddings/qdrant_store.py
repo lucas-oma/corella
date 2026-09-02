@@ -62,20 +62,25 @@ def upsert_chunks(
     _client().upsert(collection_name=KB_COLLECTION, points=points)
 
 
-def search_kb(owner_id: UUID, query_embedding: list[float], top_k: int = 5) -> list[str]:
-    """Top-k most relevant KB chunk texts for this user. Empty if the
+def search_kb(owner_ids: list[UUID], query_embedding: list[float], top_k: int = 5) -> list[str]:
+    """Top-k most relevant KB chunk texts across every id in `owner_ids` —
+    just the caller themselves if ungrouped, or their whole group if they
+    have one (app/services/access.py:searchable_owner_ids — that's where
+    the group-sharing decision actually lives, not here). Empty if the
     collection doesn't exist yet (no documents ingested) — a normal state,
     not an error, for a user with no knowledge base.
     """
     client = _client()
-    if not client.collection_exists(KB_COLLECTION):
+    if not client.collection_exists(KB_COLLECTION) or not owner_ids:
         return []
     result = client.query_points(
         collection_name=KB_COLLECTION,
         query=query_embedding,
         query_filter=qmodels.Filter(
             must=[
-                qmodels.FieldCondition(key="owner_id", match=qmodels.MatchValue(value=str(owner_id)))
+                qmodels.FieldCondition(
+                    key="owner_id", match=qmodels.MatchAny(any=[str(oid) for oid in owner_ids])
+                )
             ]
         ),
         limit=top_k,

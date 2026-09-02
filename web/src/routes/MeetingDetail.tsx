@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 
 import AppShell from "@/components/AppShell";
 import { ApiError, api, type ActionItem, type Meeting, type TranscriptSegment } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -25,11 +26,18 @@ function speakerLabel(segment: TranscriptSegment): string | null {
 export default function MeetingDetail() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [searchParams] = useSearchParams();
   const audioRef = useRef<HTMLAudioElement>(null);
   const seekedFromSearchRef = useRef(false);
 
   const [meeting, setMeeting] = useState<Meeting | null>(null);
+  // A group-mate's meeting, opened from the Dashboard's Group tab — report
+  // only (summary/talk-ratio/action items, read-only), never the raw
+  // transcript/audio/delete/report-generation controls. The server enforces
+  // this too (GET /{id} itself 404s for anyone else), this is just what
+  // the UI shows once it *has* been let in.
+  const isOwner = meeting ? meeting.owner_id === user?.id : true;
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -75,17 +83,21 @@ export default function MeetingDetail() {
   }, [meetingId]);
 
   // Once the transcript is ready, load it plus the audio (as an object URL,
-  // since <audio src> can't carry our Authorization header).
+  // since <audio src> can't carry our Authorization header). Skipped for a
+  // group-mate's meeting — the server would 404 both anyway (still strictly
+  // owner-only), no point attempting either fetch.
   useEffect(() => {
     if (!meetingId || meeting?.status !== "ready") return;
 
-    api.getTranscript(meetingId).then(setTranscript);
-    if (meeting.has_audio) {
-      api.getAudioObjectUrl(meetingId).then(setAudioUrl);
+    if (isOwner) {
+      api.getTranscript(meetingId).then(setTranscript);
+      if (meeting.has_audio) {
+        api.getAudioObjectUrl(meetingId).then(setAudioUrl);
+      }
+      api.getProviderStatus().then((statuses) => setProviderConnected(statuses.some((s) => s.connected)));
     }
     api.listActionItems(meetingId).then(setActionItems);
-    api.getProviderStatus().then((statuses) => setProviderConnected(statuses.some((s) => s.connected)));
-  }, [meetingId, meeting?.status, meeting?.has_audio]);
+  }, [meetingId, meeting?.status, meeting?.has_audio, isOwner]);
 
   async function onGenerateReport() {
     if (!meetingId) return;
@@ -146,7 +158,7 @@ export default function MeetingDetail() {
         <Link to="/dashboard" className="text-sm text-ink-muted hover:text-ink dark:hover:text-ink-inverted">
           ← Meetings
         </Link>
-        {meeting && (
+        {meeting && isOwner && (
           <button
             onClick={onDelete}
             disabled={deleting}
@@ -163,13 +175,22 @@ export default function MeetingDetail() {
         <>
           <h1 className="mt-2 font-serif text-2xl text-ink dark:text-ink-inverted">{meeting.title}</h1>
           <p className="mt-1 text-sm text-ink-muted">
+            {!isOwner && <>{meeting.owner_name} · </>}
             {new Date(meeting.created_at).toLocaleString()}
           </p>
+
+          {!isOwner && (
+            <p className="mt-2 text-xs text-ink-subtle">
+              Shared from your group — you can see the report below, not the full recording.
+            </p>
+          )}
 
           {meeting.status === "processing" && (
             <div className="card mt-6 p-6 text-center">
               <p className="text-sm text-ink-muted">
-                Transcribing your recording — this page will update automatically.
+                {isOwner
+                  ? "Transcribing your recording — this page will update automatically."
+                  : "This meeting is still being processed."}
               </p>
             </div>
           )}
@@ -177,9 +198,11 @@ export default function MeetingDetail() {
           {meeting.status === "recording" && (
             <div className="card mt-6 p-6 text-center">
               <p className="text-sm text-ink-muted">This meeting hasn't been recorded yet.</p>
-              <Link to={`/meetings/${meeting.id}/live`} className="btn-primary mt-4 inline-flex">
-                Go to live session
-              </Link>
+              {isOwner && (
+                <Link to={`/meetings/${meeting.id}/live`} className="btn-primary mt-4 inline-flex">
+                  Go to live session
+                </Link>
+              )}
             </div>
           )}
 
@@ -203,7 +226,7 @@ export default function MeetingDetail() {
               <div className="card p-6">
                 <div className="mb-3 flex items-center justify-between">
                   <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Report</h2>
-                  {(meeting.summary || actionItems.length > 0) && (
+                  {isOwner && (meeting.summary || actionItems.length > 0) && (
                     <button
                       onClick={onGenerateReport}
                       disabled={generatingReport || providerConnected === false}
@@ -216,7 +239,11 @@ export default function MeetingDetail() {
 
                 {reportError && <p className="mb-3 text-sm text-status-danger">{reportError}</p>}
 
-                {!meeting.summary && actionItems.length === 0 && (
+                {!isOwner && !meeting.summary && actionItems.length === 0 && (
+                  <p className="text-sm text-ink-muted">No report yet.</p>
+                )}
+
+                {isOwner && !meeting.summary && actionItems.length === 0 && (
                   <>
                     {providerConnected === false ? (
                       <p className="text-sm text-ink-muted">
@@ -257,7 +284,8 @@ export default function MeetingDetail() {
                         <input
                           type="checkbox"
                           checked={item.status === "done"}
-                          onChange={() => onToggleActionItem(item)}
+                          onChange={isOwner ? () => onToggleActionItem(item) : undefined}
+                          disabled={!isOwner}
                           className="mt-0.5"
                         />
                         <span
@@ -275,15 +303,17 @@ export default function MeetingDetail() {
                 )}
               </div>
 
-              {transcript === null && <p className="text-sm text-ink-muted">Loading transcript…</p>}
+              {isOwner && transcript === null && (
+                <p className="text-sm text-ink-muted">Loading transcript…</p>
+              )}
 
-              {transcript?.length === 0 && (
+              {isOwner && transcript?.length === 0 && (
                 <div className="card p-10 text-center">
                   <p className="text-sm text-ink-muted">No speech was detected in this recording.</p>
                 </div>
               )}
 
-              {transcript && transcript.length > 0 && (
+              {isOwner && transcript && transcript.length > 0 && (
                 <ol className="card divide-y divide-border dark:divide-border-dark">
                   {transcript.map((segment) => (
                     <li key={segment.id}>

@@ -23,6 +23,24 @@ class MeetingRead(BaseModel):
     processing_error: str | None
     summary: str | None
     created_at: datetime
+    owner_id: UUID
+    owner_name: str
+
+
+class GroupMeetingRead(BaseModel):
+    """A group-mate's meeting, for the Dashboard's group-browsing list —
+    deliberately a narrower shape than MeetingRead: no summary/has_audio/
+    processing_error here, since this is what's shown *before* opening the
+    meeting (which then re-checks group-visibility server-side anyway)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str
+    status: MeetingStatus
+    created_at: datetime
+    owner_id: UUID
+    owner_name: str
 
 
 class MeetingSearchResult(BaseModel):

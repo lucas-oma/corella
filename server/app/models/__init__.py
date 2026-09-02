@@ -1,4 +1,5 @@
 from app.models.call_profile import CallProfile
+from app.models.group import Group
 from app.models.kb_document import KBDocument
 from app.models.meeting import ActionItem, Meeting, Note, Speaker, TranscriptSegment
 from app.models.provider_credential import ProviderCredential
@@ -6,6 +7,7 @@ from app.models.user import User
 
 __all__ = [
     "User",
+    "Group",
     "Meeting",
     "TranscriptSegment",
     "Speaker",

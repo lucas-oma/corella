@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type Meeting, type MeetingSearchResult } from "@/lib/api";
+import { ApiError, api, type GroupMeeting, type Meeting, type MeetingSearchResult } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 const STATUS_LABEL: Record<Meeting["status"], string> = {
   recording: "Recording",
@@ -19,6 +20,7 @@ function titleFromFilename(name: string): string {
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [meetings, setMeetings] = useState<Meeting[] | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -28,10 +30,21 @@ export default function Dashboard() {
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<MeetingSearchResult[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [view, setView] = useState<"mine" | "group">("mine");
+  const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[] | null>(null);
 
   useEffect(() => {
     api.listMeetings().then(setMeetings);
   }, []);
+
+  // Only fetched once the user actually switches to it — an ungrouped user
+  // (the vast majority, and the tab isn't even shown to them) never needs
+  // this request at all.
+  useEffect(() => {
+    if (view === "group" && groupMeetings === null) {
+      api.listGroupMeetings().then(setGroupMeetings);
+    }
+  }, [view, groupMeetings]);
 
   // Semantic search, not a substring filter over the already-loaded list —
   // needs a real request per query, so debounce it rather than searching on
@@ -144,24 +157,80 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="relative mb-6">
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search meetings by what was said…"
-          className="field"
-        />
-        {searching && (
-          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-ink-subtle">
-            Searching…
-          </span>
-        )}
-      </div>
+      {user?.group_id && (
+        <div className="mb-6 flex gap-1 border-b border-border dark:border-border-dark">
+          {(["mine", "group"] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setView(tab)}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
+                view === tab
+                  ? "border-accent text-ink dark:border-ink-inverted dark:text-ink-inverted"
+                  : "border-transparent text-ink-muted hover:text-ink dark:hover:text-ink-inverted"
+              }`}
+            >
+              {tab === "mine" ? "My meetings" : "Group"}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {view === "mine" && (
+        <div className="relative mb-6">
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search meetings by what was said…"
+            className="field"
+          />
+          {searching && (
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-ink-subtle">
+              Searching…
+            </span>
+          )}
+        </div>
+      )}
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
 
-      {searchResults !== null ? (
+      {view === "group" ? (
+        <>
+          {groupMeetings === null && <p className="text-sm text-ink-muted">Loading…</p>}
+          {groupMeetings?.length === 0 && (
+            <div className="card p-10 text-center">
+              <p className="text-sm text-ink-muted">
+                No meetings from your group yet — reports show up here once a group-mate
+                finishes one.
+              </p>
+            </div>
+          )}
+          {groupMeetings && groupMeetings.length > 0 && (
+            <ul className="card divide-y divide-border dark:divide-border-dark">
+              {groupMeetings.map((meeting) => (
+                <li key={meeting.id}>
+                  <Link
+                    to={`/meetings/${meeting.id}`}
+                    className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-ink dark:text-ink-inverted">
+                        {meeting.title}
+                      </p>
+                      <p className="mt-0.5 text-xs text-ink-subtle">
+                        {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                    <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                      {STATUS_LABEL[meeting.status]}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : searchResults !== null ? (
         <>
           {searchResults.length === 0 && !searching && (
             <div className="card p-10 text-center">

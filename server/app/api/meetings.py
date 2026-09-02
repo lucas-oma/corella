@@ -12,7 +12,7 @@ from app.core import storage
 from app.core.db import get_db
 from app.models.meeting import ActionItem, Meeting, MeetingStatus, TranscriptSegment
 from app.models.user import User
-from app.schemas.meeting import MeetingCreate, MeetingRead, MeetingSearchResult
+from app.schemas.meeting import GroupMeetingRead, MeetingCreate, MeetingRead, MeetingSearchResult
 from app.schemas.report import ActionItemRead, ActionItemUpdate, ReportResponse
 from app.schemas.transcript import TranscriptSegmentRead
 from app.services.copilot.report import ReportError, generate_report
@@ -54,6 +54,28 @@ async def _get_owned_meeting(
     return meeting
 
 
+async def _get_group_visible_meeting(
+    meeting_id: UUID, current_user: User, db: AsyncSession
+) -> Meeting:
+    """Owner OR same group as the owner — used *only* by the report-shaped
+    reads (GET /{id}, GET /{id}/action-items). Every other route (audio,
+    transcript, report generation, action-item edits, delete, upload) stays
+    on the strict _get_owned_meeting above — "no access to others'
+    conversation, just the report" was explicit in the request that asked
+    for this.
+    """
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    if meeting.owner_id == current_user.id:
+        return meeting
+    if current_user.group_id is not None:
+        owner_group_id = await db.scalar(select(User.group_id).where(User.id == meeting.owner_id))
+        if owner_group_id is not None and owner_group_id == current_user.group_id:
+            return meeting
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+
+
 @router.get("", response_model=list[MeetingRead])
 async def list_meetings(
     current_user: User = Depends(get_current_user),
@@ -76,7 +98,13 @@ async def create_meeting(
     meeting = Meeting(owner_id=current_user.id, title=payload.title)
     db.add(meeting)
     await db.commit()
+    # refresh() reloads meeting's own columns, not the lazy="joined" owner
+    # relationship (never triggered at all for a freshly-constructed object
+    # — nothing queried it yet) — MeetingRead needs owner_name, and it's
+    # already right here on current_user, so just set it directly rather
+    # than trust an implicit relationship load.
     await db.refresh(meeting)
+    meeting.owner = current_user
     return meeting
 
 
@@ -130,13 +158,36 @@ async def search_meetings(
     return results
 
 
+@router.get("/group", response_model=list[GroupMeetingRead])
+async def list_group_meetings(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[Meeting]:
+    """Group-mates' meetings, for the Dashboard's group-browsing tab —
+    report-only visibility (title/status/who/when), not the full
+    MeetingRead shape; opening one still goes through
+    _get_group_visible_meeting like any other access, this list is just
+    for browsing. Empty for an ungrouped user, not an error. Registered
+    before /{meeting_id} — same route-order reason as /search.
+    """
+    if current_user.group_id is None:
+        return []
+    result = await db.scalars(
+        select(Meeting)
+        .join(User, User.id == Meeting.owner_id)
+        .where(User.group_id == current_user.group_id, Meeting.owner_id != current_user.id)
+        .order_by(Meeting.created_at.desc())
+    )
+    return list(result)
+
+
 @router.get("/{meeting_id}", response_model=MeetingRead)
 async def get_meeting(
     meeting_id: UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Meeting:
-    return await _get_owned_meeting(meeting_id, current_user, db)
+    return await _get_group_visible_meeting(meeting_id, current_user, db)
 
 
 @router.post("/{meeting_id}/audio", response_model=MeetingRead)
@@ -249,7 +300,7 @@ async def list_action_items(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ActionItem]:
-    await _get_owned_meeting(meeting_id, current_user, db)
+    await _get_group_visible_meeting(meeting_id, current_user, db)
     result = await db.scalars(
         select(ActionItem).where(ActionItem.meeting_id == meeting_id).order_by(ActionItem.created_at)
     )

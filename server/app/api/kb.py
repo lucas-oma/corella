@@ -12,6 +12,7 @@ from app.core.db import get_db
 from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.user import User
 from app.schemas.kb import KBDocumentRead
+from app.services.access import searchable_owner_ids
 from app.services.embeddings.qdrant_store import delete_document_chunks
 from app.workers.celery_app import celery_app
 
@@ -38,9 +39,15 @@ async def list_kb_documents(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[KBDocument]:
+    """Own documents, plus a grouped user's group-mates' documents too —
+    the same shared pool the live copilot draws from
+    (app/services/access.py:searchable_owner_ids), so what's listed here
+    matches what's actually searchable, not just what this user uploaded.
+    """
+    owner_ids = await searchable_owner_ids(db, current_user.id)
     result = await db.scalars(
         select(KBDocument)
-        .where(KBDocument.owner_id == current_user.id)
+        .where(KBDocument.owner_id.in_(owner_ids))
         .order_by(KBDocument.created_at.desc())
     )
     return list(result)
@@ -79,7 +86,11 @@ async def upload_kb_document(
         document.error = "Could not start processing — the background worker is unreachable."
 
     await db.commit()
+    # Same reasoning as meetings.py:create_meeting — refresh() doesn't
+    # populate the lazy="joined" owner relationship for a freshly-
+    # constructed object, and KBDocumentRead needs owner_name.
     await db.refresh(document)
+    document.owner = current_user
     return document
 
 

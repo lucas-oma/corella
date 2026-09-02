@@ -69,6 +69,7 @@ export interface User {
   email: string;
   full_name: string;
   role: "admin" | "member";
+  group_id: string | null;
 }
 
 export interface AuthConfig {
@@ -86,6 +87,20 @@ export interface Meeting {
   processing_error: string | null;
   summary: string | null;
   created_at: string;
+  owner_id: string;
+  owner_name: string;
+}
+
+/** A group-mate's meeting, from the Dashboard's group-browsing tab — a
+ * narrower shape than Meeting (report-only visibility: no summary/audio/
+ * error yet, that's fetched — and re-checked server-side — on open). */
+export interface GroupMeeting {
+  id: string;
+  title: string;
+  status: Meeting["status"];
+  created_at: string;
+  owner_id: string;
+  owner_name: string;
 }
 
 export interface ActionItem {
@@ -132,6 +147,8 @@ export interface KBDocument {
   chunk_count: number | null;
   error: string | null;
   created_at: string;
+  owner_id: string;
+  owner_name: string;
 }
 
 export const api = {
@@ -148,6 +165,7 @@ export const api = {
     }),
   me: () => request<User>("/api/auth/me"),
   listMeetings: () => request<Meeting[]>("/api/meetings"),
+  listGroupMeetings: () => request<GroupMeeting[]>("/api/meetings/group"),
   searchMeetings: (query: string) =>
     request<MeetingSearchResult[]>(`/api/meetings/search?q=${encodeURIComponent(query)}`),
   createMeeting: (title: string) =>

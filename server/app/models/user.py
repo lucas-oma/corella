@@ -1,6 +1,8 @@
 import enum
+import uuid
 
-from sqlalchemy import String
+from sqlalchemy import ForeignKey, String
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -21,6 +23,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     full_name: Mapped[str] = mapped_column(String(255))
     role: Mapped[UserRole] = mapped_column(
         pg_enum(UserRole, "user_role"), default=UserRole.MEMBER
+    )
+    # Admin-assigned, nullable — an ungrouped user (the default) is fully
+    # isolated, same as before groups existed at all. One group per user,
+    # not many-to-many (app/models/group.py).
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("groups.id", ondelete="SET NULL")
     )
 
     def __repr__(self) -> str:  # pragma: no cover

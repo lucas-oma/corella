@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.db import Base
 from app.models.enum_types import pg_enum
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.user import User
 
 
 class MeetingStatus(str, enum.Enum):
@@ -49,12 +50,20 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     summary: Mapped[str | None] = mapped_column(Text)
     processing_error: Mapped[str | None] = mapped_column(Text)
 
+    owner: Mapped[User] = relationship(lazy="joined")
+
     @property
     def has_audio(self) -> bool:
         """Not a column — lets MeetingRead expose whether audio exists
         without leaking the on-disk `audio_path` to the API.
         """
         return self.audio_path is not None
+
+    @property
+    def owner_name(self) -> str:
+        """Not a column — lets MeetingRead show whose meeting this is, since
+        a group member can now view another member's report."""
+        return self.owner.full_name
 
 
 class Speaker(UUIDPrimaryKeyMixin, TimestampMixin, Base):
