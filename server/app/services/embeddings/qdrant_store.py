@@ -61,6 +61,27 @@ def upsert_chunks(
     _client().upsert(collection_name=KB_COLLECTION, points=points)
 
 
+def search_kb(owner_id: UUID, query_embedding: list[float], top_k: int = 5) -> list[str]:
+    """Top-k most relevant KB chunk texts for this user. Empty if the
+    collection doesn't exist yet (no documents ingested) — a normal state,
+    not an error, for a user with no knowledge base.
+    """
+    client = _client()
+    if not client.collection_exists(KB_COLLECTION):
+        return []
+    result = client.query_points(
+        collection_name=KB_COLLECTION,
+        query=query_embedding,
+        query_filter=qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(key="owner_id", match=qmodels.MatchValue(value=str(owner_id)))
+            ]
+        ),
+        limit=top_k,
+    )
+    return [point.payload["text"] for point in result.points if point.payload]
+
+
 def delete_document_chunks(document_id: UUID) -> None:
     """Best-effort — a document with no chunks yet (never processed, or the
     collection doesn't exist yet) is a no-op, not an error.

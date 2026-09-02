@@ -21,4 +21,5 @@ class MeetingRead(BaseModel):
     duration_seconds: int | None
     has_audio: bool
     processing_error: str | None
+    summary: str | None
     created_at: datetime

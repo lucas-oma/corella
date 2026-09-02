@@ -84,7 +84,20 @@ export interface Meeting {
   duration_seconds: number | null;
   has_audio: boolean;
   processing_error: string | null;
+  summary: string | null;
   created_at: string;
+}
+
+export interface ActionItem {
+  id: string;
+  text: string;
+  status: "open" | "done";
+}
+
+export interface Report {
+  summary: string;
+  action_items: ActionItem[];
+  talk_ratio: { me: number; them: number } | null;
 }
 
 export interface TranscriptSegment {
@@ -152,4 +165,11 @@ export const api = {
     return request<KBDocument>("/api/kb/documents", { method: "POST", body: form });
   },
   deleteKBDocument: (id: string) => request<void>(`/api/kb/documents/${id}`, { method: "DELETE" }),
+  generateReport: (id: string) => request<Report>(`/api/meetings/${id}/report`, { method: "POST" }),
+  listActionItems: (id: string) => request<ActionItem[]>(`/api/meetings/${id}/action-items`),
+  updateActionItem: (meetingId: string, itemId: string, status: ActionItem["status"]) =>
+    request<ActionItem>(`/api/meetings/${meetingId}/action-items/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
 };

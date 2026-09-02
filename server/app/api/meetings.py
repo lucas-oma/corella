@@ -10,10 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.core import storage
 from app.core.db import get_db
-from app.models.meeting import Meeting, MeetingStatus, TranscriptSegment
+from app.models.meeting import ActionItem, Meeting, MeetingStatus, TranscriptSegment
 from app.models.user import User
 from app.schemas.meeting import MeetingCreate, MeetingRead
+from app.schemas.report import ActionItemRead, ActionItemUpdate, ReportResponse
 from app.schemas.transcript import TranscriptSegmentRead
+from app.services.copilot.report import ReportError, generate_report
+from app.services.llm.resolve import resolve_provider
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -157,3 +160,61 @@ async def get_meeting_transcript(
         .order_by(TranscriptSegment.start_ms)
     )
     return list(result)
+
+
+@router.post("/{meeting_id}/report", response_model=ReportResponse)
+async def create_meeting_report(
+    meeting_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ReportResponse:
+    meeting = await _get_owned_meeting(meeting_id, current_user, db)
+
+    provider = await resolve_provider(db, current_user.id)
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No LLM provider connected — add one in Settings first.",
+        )
+
+    try:
+        result = await generate_report(db, meeting, provider)
+    except ReportError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+
+    return ReportResponse(
+        summary=result.summary,
+        action_items=[ActionItemRead.model_validate(item) for item in result.action_items],
+        talk_ratio=result.talk_ratio,
+    )
+
+
+@router.get("/{meeting_id}/action-items", response_model=list[ActionItemRead])
+async def list_action_items(
+    meeting_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ActionItem]:
+    await _get_owned_meeting(meeting_id, current_user, db)
+    result = await db.scalars(
+        select(ActionItem).where(ActionItem.meeting_id == meeting_id).order_by(ActionItem.created_at)
+    )
+    return list(result)
+
+
+@router.patch("/{meeting_id}/action-items/{item_id}", response_model=ActionItemRead)
+async def update_action_item(
+    meeting_id: UUID,
+    item_id: UUID,
+    payload: ActionItemUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ActionItem:
+    await _get_owned_meeting(meeting_id, current_user, db)
+    item = await db.get(ActionItem, item_id)
+    if item is None or item.meeting_id != meeting_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action item not found")
+    item.status = payload.status
+    await db.commit()
+    await db.refresh(item)
+    return item

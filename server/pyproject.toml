@@ -30,6 +30,15 @@ dependencies = [
     "requests==2.32.3",  # faster-whisper's own model-download path needs it directly
     "webrtcvad==2.0.10",
     "numpy==2.2.1",
+    # Live copilot (app/services/llm/, app/services/copilot/): official SDK
+    # for Anthropic per house convention; openai/gemini/ollama are hand-rolled
+    # httpx clients against their stable REST shapes (see app/services/llm/).
+    "anthropic==1.3.0",
+    # Query embeddings for KB retrieval — fastembed is ONNX-based (no torch),
+    # verified to produce numerically-identical vectors (cosine sim 1.000000)
+    # to the worker's sentence-transformers path for the same model, so the
+    # api process can embed retrieval queries in-process.
+    "fastembed==0.8.0",
 ]
 
 [project.optional-dependencies]

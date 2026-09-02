@@ -17,6 +17,8 @@ from app.models.meeting import Channel, Meeting, MeetingStatus, TranscriptSegmen
 from app.models.user import User
 from app.services.asr.whisper import transcribe, warm_up
 from app.services.audio.mixing import mix_channel_recordings, write_wav
+from app.services.copilot.live import run_cycle as run_copilot_cycle
+from app.services.llm.resolve import ResolvedProvider, resolve_provider
 from app.services.vad.vad import UtteranceDetector
 
 logger = logging.getLogger(__name__)
@@ -62,8 +64,10 @@ class LiveSession:
     blocked *all* further messages, including `stop`, from being processed.
     """
 
-    def __init__(self, meeting_id: UUID):
+    def __init__(self, meeting_id: UUID, owner_id: UUID, provider: ResolvedProvider | None):
         self.meeting_id = meeting_id
+        self.owner_id = owner_id
+        self.provider = provider
         self._start = time.monotonic()
         settings = get_settings()
         self.detectors = {
@@ -76,6 +80,11 @@ class LiveSession:
         }
         self.recordings: dict[str, list[tuple[int, bytes]]] = {"me": [], "them": []}
         self.queue: asyncio.Queue[_Utterance] = asyncio.Queue()
+
+        # Live copilot trigger state — see _maybe_trigger_copilot.
+        self.segments_since_cycle = 0
+        self.last_cycle_at = self._start
+        self.copilot_running = False
 
     def elapsed_ms(self) -> int:
         return int((time.monotonic() - self._start) * 1000)
@@ -122,16 +131,22 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
             return
         meeting.started_at = datetime.now(timezone.utc)
         await db.commit()
+        provider = await resolve_provider(db, user.id)
 
     # Load the model *before* saying "ready" — better a few extra seconds of
     # "Connecting…" on first use than a session that looks live but silently
     # stalls partway through waiting on a cold model load.
     await asyncio.get_running_loop().run_in_executor(None, warm_up)
 
-    session = LiveSession(meeting_id)
+    session = LiveSession(meeting_id, user.id, provider)
     consumer_task = asyncio.create_task(_consume_utterances(websocket, session))
 
     await websocket.send_json({"type": "ready"})
+    if provider is None:
+        try:
+            await websocket.send_json({"type": "copilot_unavailable"})
+        except Exception:
+            pass
 
     stopped_gracefully = False
     try:
@@ -233,17 +248,64 @@ async def _consume_utterances(websocket: WebSocket, session: LiveSession) -> Non
     while True:
         utterance = await session.queue.get()
         try:
-            await _transcribe_and_send(websocket, session, utterance)
+            created = await _transcribe_and_send(websocket, session, utterance)
+            if created:
+                session.segments_since_cycle += 1
+                await _maybe_trigger_copilot(websocket, session)
         except Exception:
             logger.exception("Live transcription failed for meeting %s", session.meeting_id)
         finally:
             session.queue.task_done()
 
 
-async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utterance: _Utterance) -> None:
+async def _maybe_trigger_copilot(websocket: WebSocket, session: LiveSession) -> None:
+    settings = get_settings()
+    elapsed = time.monotonic() - session.last_cycle_at
+    if session.provider is None or session.copilot_running:
+        return
+
+    if (
+        session.segments_since_cycle < settings.copilot_trigger_segments
+        and elapsed < settings.copilot_trigger_seconds
+    ):
+        return
+
+    session.segments_since_cycle = 0
+    session.last_cycle_at = time.monotonic()
+    session.copilot_running = True
+    _spawn_background(_run_copilot_and_send(websocket, session))
+
+
+async def _run_copilot_and_send(websocket: WebSocket, session: LiveSession) -> None:
+    try:
+        async with SessionLocal() as db:
+            result = await run_copilot_cycle(db, session.meeting_id, session.owner_id, session.provider)
+    except Exception:
+        logger.exception("Copilot cycle failed for meeting %s", session.meeting_id)
+        result = None
+    finally:
+        session.copilot_running = False
+
+    if result is None:
+        return
+    try:
+        await websocket.send_json(
+            {
+                "type": "copilot",
+                "suggestion": result.suggestion,
+                "blockers": result.blockers,
+                "action_items": result.action_items,
+                "coach_score": result.coach_score,
+            }
+        )
+    except Exception:
+        pass  # client may already be gone
+
+
+async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utterance: _Utterance) -> bool:
     text = await _transcribe_pcm(utterance.pcm)
     if not text:
-        return
+        return False
 
     async with SessionLocal() as db:
         row = TranscriptSegment(
@@ -274,6 +336,8 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
         )
     except Exception:
         pass  # client may already be gone; the segment is still persisted
+
+    return True
 
 
 async def _transcribe_pcm(pcm: bytes) -> str:

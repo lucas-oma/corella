@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -8,6 +9,15 @@ from app.api import admin, auth, kb, meetings, settings as settings_api
 from app.core.bootstrap import seed_admin_user
 from app.core.config import get_settings
 from app.ws import live_session
+
+# Without this, the root logger defaults to WARNING with no handler at all —
+# every logger.info()/logger.exception() call in the app (background task
+# failures, skipped copilot cycles, etc.) silently vanishes rather than
+# reaching stdout/docker logs.
+logging.basicConfig(
+    level=get_settings().log_level,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
 
 
 @asynccontextmanager

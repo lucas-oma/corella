@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import { api, type Meeting, type TranscriptSegment } from "@/lib/api";
+import { ApiError, api, type ActionItem, type Meeting, type TranscriptSegment } from "@/lib/api";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -31,6 +31,11 @@ export default function MeetingDetail() {
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [actionItems, setActionItems] = useState<ActionItem[]>([]);
+  const [talkRatio, setTalkRatio] = useState<{ me: number; them: number } | null>(null);
+  const [providerConnected, setProviderConnected] = useState<boolean | null>(null);
+  const [generatingReport, setGeneratingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   async function onDelete() {
     if (!meetingId) return;
@@ -76,7 +81,36 @@ export default function MeetingDetail() {
     if (meeting.has_audio) {
       api.getAudioObjectUrl(meetingId).then(setAudioUrl);
     }
+    api.listActionItems(meetingId).then(setActionItems);
+    api.getProviderStatus().then((statuses) => setProviderConnected(statuses.some((s) => s.connected)));
   }, [meetingId, meeting?.status, meeting?.has_audio]);
+
+  async function onGenerateReport() {
+    if (!meetingId) return;
+    setReportError(null);
+    setGeneratingReport(true);
+    try {
+      const report = await api.generateReport(meetingId);
+      setMeeting((prev) => (prev ? { ...prev, summary: report.summary } : prev));
+      setActionItems(report.action_items);
+      setTalkRatio(report.talk_ratio);
+    } catch (err) {
+      setReportError(err instanceof ApiError ? err.message : "Couldn't generate the report");
+    } finally {
+      setGeneratingReport(false);
+    }
+  }
+
+  async function onToggleActionItem(item: ActionItem) {
+    if (!meetingId) return;
+    const nextStatus = item.status === "open" ? "done" : "open";
+    setActionItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, status: nextStatus } : i)));
+    try {
+      await api.updateActionItem(meetingId, item.id, nextStatus);
+    } catch {
+      setActionItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, status: item.status } : i)));
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -149,6 +183,81 @@ export default function MeetingDetail() {
                   <track kind="captions" />
                 </audio>
               )}
+
+              <div className="card p-6">
+                <div className="mb-3 flex items-center justify-between">
+                  <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Report</h2>
+                  {(meeting.summary || actionItems.length > 0) && (
+                    <button
+                      onClick={onGenerateReport}
+                      disabled={generatingReport || providerConnected === false}
+                      className="text-xs text-ink-muted hover:text-ink dark:hover:text-ink-inverted"
+                    >
+                      {generatingReport ? "Regenerating…" : "Regenerate"}
+                    </button>
+                  )}
+                </div>
+
+                {reportError && <p className="mb-3 text-sm text-status-danger">{reportError}</p>}
+
+                {!meeting.summary && actionItems.length === 0 && (
+                  <>
+                    {providerConnected === false ? (
+                      <p className="text-sm text-ink-muted">
+                        Connect an LLM provider in Settings to generate a summary and action items.
+                      </p>
+                    ) : (
+                      <button
+                        onClick={onGenerateReport}
+                        disabled={generatingReport || providerConnected === null}
+                        className="btn-secondary"
+                      >
+                        {generatingReport ? "Generating…" : "Generate report"}
+                      </button>
+                    )}
+                  </>
+                )}
+
+                {meeting.summary && (
+                  <p className="text-sm text-ink dark:text-ink-inverted">{meeting.summary}</p>
+                )}
+
+                {talkRatio && (
+                  <div className="mt-4">
+                    <p className="label mb-1">Talk ratio</p>
+                    <div className="flex h-2 overflow-hidden rounded-full bg-border dark:bg-border-dark">
+                      <div className="bg-accent" style={{ width: `${talkRatio.me}%` }} />
+                    </div>
+                    <p className="mt-1 text-xs text-ink-subtle">
+                      Me {talkRatio.me}% · Them {talkRatio.them}%
+                    </p>
+                  </div>
+                )}
+
+                {actionItems.length > 0 && (
+                  <ul className="mt-4 space-y-1.5">
+                    {actionItems.map((item) => (
+                      <li key={item.id} className="flex items-start gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={item.status === "done"}
+                          onChange={() => onToggleActionItem(item)}
+                          className="mt-0.5"
+                        />
+                        <span
+                          className={
+                            item.status === "done"
+                              ? "text-ink-subtle line-through"
+                              : "text-ink dark:text-ink-inverted"
+                          }
+                        >
+                          {item.text}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
 
               {transcript === null && <p className="text-sm text-ink-muted">Loading transcript…</p>}
 

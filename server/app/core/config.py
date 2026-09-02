@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Corella"
     environment: str = "development"
+    log_level: str = "INFO"
 
     # Auth
     jwt_secret: str = "change-me-in-production"
@@ -67,6 +68,22 @@ class Settings(BaseSettings):
     live_vad_aggressiveness: int = 2  # webrtcvad mode 0-3; higher = more aggressive filtering
     live_max_utterance_seconds: int = 20  # force a flush even without a detected pause
     live_min_utterance_ms: int = 300  # ignore speech blips shorter than this
+
+    # Live copilot (app/services/copilot/live.py, app/ws/live_session.py)
+    copilot_trigger_segments: int = 4  # new transcript segments since the last cycle...
+    copilot_trigger_seconds: int = 20  # ...or this much elapsed time, whichever first
+    copilot_context_window_segments: int = 40  # how much recent transcript feeds each cycle
+    copilot_kb_top_k: int = 5
+
+    # Default model per provider, used unless the user picks otherwise (no
+    # CallProfile UI yet). The Anthropic default is a verified-current model
+    # ID; OpenAI/Gemini/Ollama defaults are my best knowledge without an
+    # authoritative source to check against — override these if they're
+    # stale by the time you're reading this.
+    default_model_anthropic: str = "claude-sonnet-5"
+    default_model_openai: str = "gpt-4o-mini"
+    default_model_gemini: str = "gemini-2.0-flash"
+    default_model_ollama: str = "llama3.2"
 
 
 @lru_cache

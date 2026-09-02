@@ -12,6 +12,13 @@ export interface TranscriptEvent {
   text: string;
 }
 
+export interface CopilotEvent {
+  suggestion: string | null;
+  blockers: string[];
+  action_items: string[];
+  coach_score: number | null;
+}
+
 export interface CaptureHandle {
   stop: () => void;
 }
@@ -61,6 +68,8 @@ export class LiveSessionClient {
   private readyPromise: Promise<void>;
 
   onTranscript: ((event: TranscriptEvent) => void) | null = null;
+  onCopilot: ((event: CopilotEvent) => void) | null = null;
+  onCopilotUnavailable: (() => void) | null = null;
   onStopped: (() => void) | null = null;
   onError: ((message: string) => void) | null = null;
 
@@ -75,7 +84,15 @@ export class LiveSessionClient {
       };
       this.ws.onmessage = (event) => {
         if (typeof event.data !== "string") return;
-        let msg: { type?: string; segment?: TranscriptEvent; message?: string };
+        let msg: {
+          type?: string;
+          segment?: TranscriptEvent;
+          message?: string;
+          suggestion?: string | null;
+          blockers?: string[];
+          action_items?: string[];
+          coach_score?: number | null;
+        };
         try {
           msg = JSON.parse(event.data);
         } catch {
@@ -83,6 +100,14 @@ export class LiveSessionClient {
         }
         if (msg.type === "ready") resolve();
         else if (msg.type === "transcript" && msg.segment) this.onTranscript?.(msg.segment);
+        else if (msg.type === "copilot") {
+          this.onCopilot?.({
+            suggestion: msg.suggestion ?? null,
+            blockers: msg.blockers ?? [],
+            action_items: msg.action_items ?? [],
+            coach_score: msg.coach_score ?? null,
+          });
+        } else if (msg.type === "copilot_unavailable") this.onCopilotUnavailable?.();
         else if (msg.type === "stopped") this.onStopped?.();
         else if (msg.type === "error") this.onError?.(msg.message ?? "Live session error");
       };

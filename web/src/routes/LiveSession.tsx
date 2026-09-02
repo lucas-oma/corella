@@ -2,7 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import { type CaptureHandle, LiveSessionClient, type TranscriptEvent, startCapture } from "@/lib/live";
+import {
+  type CaptureHandle,
+  type CopilotEvent,
+  LiveSessionClient,
+  type TranscriptEvent,
+  startCapture,
+} from "@/lib/live";
 
 type ConnectionState = "connecting" | "connected" | "error";
 
@@ -16,6 +22,8 @@ export default function LiveSession() {
   const [micActive, setMicActive] = useState(false);
   const [themActive, setThemActive] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [copilot, setCopilot] = useState<CopilotEvent | null>(null);
+  const [copilotAvailable, setCopilotAvailable] = useState(true);
 
   const clientRef = useRef<LiveSessionClient | null>(null);
   const micCaptureRef = useRef<CaptureHandle | null>(null);
@@ -30,6 +38,8 @@ export default function LiveSession() {
       const client = new LiveSessionClient(meetingId!);
       clientRef.current = client;
       client.onTranscript = (event) => setTranscript((prev) => [...prev, event]);
+      client.onCopilot = (event) => setCopilot(event);
+      client.onCopilotUnavailable = () => setCopilotAvailable(false);
       client.onError = (message) => setError(message);
       client.onStopped = () => navigate(`/meetings/${meetingId}`);
 
@@ -135,26 +145,89 @@ export default function LiveSession() {
         )}
       </div>
 
-      <div className="card min-h-[300px] space-y-3 p-6">
-        {transcript.length === 0 && (
-          <p className="text-sm text-ink-muted">Say something — your words will appear here.</p>
-        )}
-        {transcript.map((segment) => (
-          <div
-            key={segment.id}
-            className={`flex ${segment.channel === "me" ? "justify-end" : "justify-start"}`}
-          >
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
+        <div className="card min-h-[300px] space-y-3 p-6">
+          {transcript.length === 0 && (
+            <p className="text-sm text-ink-muted">Say something — your words will appear here.</p>
+          )}
+          {transcript.map((segment) => (
             <div
-              className={`max-w-[75%] rounded-lg px-4 py-2 text-sm ${
-                segment.channel === "me"
-                  ? "bg-accent text-accent-foreground"
-                  : "border border-border text-ink dark:border-border-dark dark:text-ink-inverted"
-              }`}
+              key={segment.id}
+              className={`flex ${segment.channel === "me" ? "justify-end" : "justify-start"}`}
             >
-              {segment.text}
+              <div
+                className={`max-w-[75%] rounded-lg px-4 py-2 text-sm ${
+                  segment.channel === "me"
+                    ? "bg-accent text-accent-foreground"
+                    : "border border-border text-ink dark:border-border-dark dark:text-ink-inverted"
+                }`}
+              >
+                {segment.text}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
+
+        <div className="card h-fit space-y-5 p-5">
+          <h2 className="font-serif text-base text-ink dark:text-ink-inverted">Copilot</h2>
+
+          {!copilotAvailable && (
+            <p className="text-xs text-ink-subtle">
+              No LLM provider connected — add one in Settings to enable live suggestions.
+            </p>
+          )}
+
+          {copilotAvailable && (
+            <>
+              {copilot?.coach_score !== null && copilot?.coach_score !== undefined && (
+                <div>
+                  <p className="label mb-1">Coach score</p>
+                  <p className="font-serif text-2xl text-ink dark:text-ink-inverted">
+                    {copilot.coach_score}
+                    <span className="text-sm text-ink-subtle">/100</span>
+                  </p>
+                </div>
+              )}
+
+              <div>
+                <p className="label mb-1">Suggestion</p>
+                <p className="text-sm text-ink dark:text-ink-inverted">
+                  {copilot?.suggestion ?? <span className="text-ink-subtle">Nothing yet.</span>}
+                </p>
+              </div>
+
+              <div>
+                <p className="label mb-1">Blockers</p>
+                {copilot?.blockers.length ? (
+                  <ul className="space-y-1">
+                    {copilot.blockers.map((b, i) => (
+                      <li key={i} className="text-sm text-status-danger">
+                        {b}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-ink-subtle">None.</p>
+                )}
+              </div>
+
+              <div>
+                <p className="label mb-1">Action items</p>
+                {copilot?.action_items.length ? (
+                  <ul className="space-y-1">
+                    {copilot.action_items.map((item, i) => (
+                      <li key={i} className="text-sm text-ink dark:text-ink-inverted">
+                        • {item}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-ink-subtle">None yet.</p>
+                )}
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </AppShell>
   );
