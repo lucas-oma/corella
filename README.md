@@ -7,7 +7,23 @@
 
 # Corella
 
-A self-hosted meeting assistant: it records a call from your browser, transcribes and speaker-labels it, keeps a live AI copilot grounded in your own documents, and turns the call into a searchable transcript plus a post-call summary and coaching report. Runs entirely on your own Linux box via Docker Compose — your own database, your own vector store, and (optionally) your own local LLM, with no required cloud dependency beyond whichever hosted LLM provider you choose to connect.
+A self-hosted meeting assistant: it records a call from your browser (or takes an upload), transcribes and speaker-labels it, keeps a live AI copilot grounded in your own documents, and turns the call into a searchable transcript plus a post-call summary and coaching report. Runs entirely on your own Linux box via Docker Compose — your own database, your own vector store, and (optionally) your own local LLM, with no required cloud dependency beyond whichever hosted LLM/STT provider you choose to connect.
+
+## Features
+
+- **Live in-browser recording** — captures your mic and, optionally, a shared browser tab's audio, transcribing both sides as the call happens.
+- **Upload-based transcription** — drop in an existing recording (most common audio formats, incl. `.caf`) for the same pipeline, offline.
+- **Speaker separation, live** — more than one voice on your own mic (an in-person meeting around one laptop) or on the shared tab audio gets split into "Speaker 1"/"Speaker 2" / "Them 1"/"Them 2" mid-call, not just after the fact.
+- **Cross-meeting voice recognition** — enroll your voice once and Corella recognizes you (and, within a group, your teammates) across future calls; unrecognized speakers get identified live from what they say ("Hi, this is Lucas") via your configured LLM.
+- **Pluggable speech-to-text** — local `faster-whisper` by default (zero config), or Deepgram if you connect an API key — per-user, per-provider model overrides available in Settings.
+- **Pluggable copilot LLM** — Anthropic, OpenAI, Gemini (bring your own key), or a self-hosted Ollama instance — live suggestions, blockers, action items, and a live coach score during the call.
+- **Post-call reports** — auto-generated the moment a call finishes: title, summary, key topics, sentiment, notable quotes, action items, talk ratio, and a coach score, tuned by call type (sales/support/interview/1:1/meeting).
+- **Knowledge base** — upload your own documents; the live copilot retrieves relevant snippets via semantic search.
+- **Semantic search** — across your own meeting history, across your group's shared reports, or (as an admin) system-wide.
+- **Groups** — a shared knowledge base and shared voice recognition across teammates, with report-only (not raw transcript) visibility into a group-mate's calls.
+- **Admin console** — user/group management, and a cost-analytics dashboard (per-user spend, daily trend, a trailing-average 7-day projection) built from a real per-call LLM usage ledger.
+- **Admin live debug panel** — while recording your own call as an admin, toggle a technical event stream (VAD flushes, STT/LLM request+response timing, diarization dispatch) for in-the-moment debugging.
+- **Per-call cost estimate** — a best-effort running total per meeting, from real token usage where the provider reports it.
 
 ## Architecture
 
@@ -30,17 +46,64 @@ A self-hosted meeting assistant: it records a call from your browser, transcribe
                                        │
                                 ┌──────▼──────┐
                                 │    qdrant   │  vector search (knowledge
-                                └─────────────┘   base + transcript search)
+                                └─────────────┘   base + meeting search)
 ```
 
-- **api** — FastAPI. Auth, meeting/notes/action-item CRUD, WebSocket audio ingestion and live event push.
-- **worker** — Celery. Runs the CPU/GPU-heavy jobs: transcription (faster-whisper), diarization (pyannote.audio), knowledge-base embedding, and post-call report generation, so they never block the API process.
-- **postgres** — structured data: users, meetings, transcript segments, notes, action items, call profiles, provider credentials.
-- **qdrant** — vector search: knowledge-base document chunks, transcript search, and speaker voice embeddings.
-- **redis** — Celery broker/result backend and live-session pub/sub.
+- **api** — FastAPI. Auth, meeting/KB/admin CRUD, WebSocket audio ingestion and live event push (transcript, copilot, diarization updates, admin debug events). Also runs `faster-whisper` directly for live transcription (it's torch-free, so it's light enough for this process) — everything torch-dependent (diarization, offline transcription's diarize step, voice-embedding extraction) stays worker-only.
+- **worker** — Celery. Runs the heavier/blocking jobs: offline transcription + diarization for uploads, live per-utterance diarization and voice-identity matching, knowledge-base/meeting-search embedding, report generation, and voice enrollment — so none of it blocks the API process or the live WebSocket loop.
+- **postgres** — structured data: users, groups, meetings, transcript segments, speakers, voice identities, action items, provider/STT credentials, per-call LLM usage ledger.
+- **qdrant** — vector search, three collections: knowledge-base document chunks, meeting-transcript chunks (search), and speaker voice embeddings (cross-meeting recognition).
+- **redis** — Celery broker/result backend, plus pub/sub for bridging worker-side events (diarization, live labels) back to the right live WebSocket connection.
 - **web** — React/TypeScript SPA, built static and served by nginx.
 
-The copilot's LLM is pluggable per user/call-profile: Anthropic, OpenAI, Gemini (bring your own API key), or a self-hosted Ollama instance.
+The copilot LLM and the speech-to-text engine are each pluggable per user: a per-user saved key takes priority, then an instance-wide `.env` fallback, then — for STT only — local `faster-whisper`, which needs no key at all. See [`BRANDING.md`](BRANDING.md) for the UI's visual language if you're touching `web/`.
+
+### Tech stack
+
+| | |
+|---|---|
+| Backend | Python, FastAPI, SQLAlchemy 2 (async) + Alembic, Celery |
+| Speech/ML | faster-whisper, Deepgram (optional), pyannote.audio (diarization + speaker embeddings), sentence-transformers / fastembed (KB + meeting search embeddings) |
+| LLM clients | Hand-rolled `httpx` clients for Anthropic, OpenAI, Gemini, Ollama — no SDK dependency |
+| Data | PostgreSQL, Qdrant (vectors), Redis (broker + pub/sub) |
+| Frontend | React, TypeScript, Vite, Tailwind CSS, react-router |
+| Infra | Docker Compose (CPU-first; optional NVIDIA override) |
+
+### Repository layout
+
+```
+corella/
+  server/
+    app/
+      api/          REST routers — auth, meetings, kb, settings, admin
+      ws/            WebSocket live-session handler
+      core/          config, security (JWT + secret encryption), db sessions
+      models/        SQLAlchemy models
+      schemas/       Pydantic request/response schemas
+      services/
+        asr/          faster-whisper + Deepgram clients, provider resolution
+        diarization/   pyannote.audio wrapper, online speaker clustering
+        alignment/     merges ASR output + diarization into labeled utterances
+        llm/           provider clients (anthropic/openai/gemini/ollama) + resolution
+        embeddings/    sentence-transformers/fastembed + Qdrant collections
+        copilot/       live suggestions, post-call report generation
+        admin/         cost-analytics aggregation
+        audio/         WAV I/O, channel mixing/windowing
+        vad/           speech/silence utterance detection
+      workers/       Celery task definitions
+      main.py
+    alembic/          DB migrations
+  web/
+    src/
+      routes/         one file per screen (Dashboard, MeetingDetail, LiveSession, Settings, Admin, …)
+      components/      shared UI (AppShell, …)
+      lib/             typed API client, live-session WS client, auth context
+    public/
+  docker-compose.yml         CPU-first stack
+  docker-compose.gpu.yml     optional NVIDIA runtime override
+  .env.example
+  BRANDING.md                UI visual language + component conventions
+```
 
 ## Running it
 
@@ -58,20 +121,46 @@ If you have an NVIDIA GPU + the NVIDIA Container Toolkit installed, layer on the
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 ```
 
-Speaker diarization uses a gated pyannote.audio pipeline. A valid `HF_TOKEN` alone isn't enough — the Hugging Face account behind it must also individually accept the terms on **each** gated model page the pipeline depends on internally (a separate, one-time click-through per repo — currently three, verified against a real account rather than assumed from docs):
+### Deploying an update
+
+```bash
+docker compose build api worker web
+docker compose up -d api worker web
+```
+
+Migrations run automatically on `api` startup. `postgres`/`redis`/`qdrant` don't need rebuilding for an app-code change.
+
+## Configuration
+
+See [`.env.example`](.env.example) for the full, documented list. Highlights:
+
+- **Core**: `JWT_SECRET` (required), `CORS_ORIGINS`, `ENVIRONMENT`.
+- **Access control**: `ALLOW_PUBLIC_REGISTRATION`, `ADMIN_EMAIL`/`ADMIN_PASSWORD` (bootstrap admin, see [Access control](#access-control) below).
+- **Data stores**: `DATABASE_URL`, `REDIS_URL`, `QDRANT_URL` — defaults match `docker-compose.yml`'s service names, only change these if you're pointing at externally-hosted stores.
+- **Speech**: `HF_TOKEN` (diarization, see below), `WHISPER_MODEL`/`WHISPER_COMPUTE_TYPE`, optional `DEEPGRAM_API_KEY`/`DEFAULT_MODEL_DEEPGRAM`.
+- **Storage**: `AUDIO_STORAGE_PATH`/`MAX_AUDIO_UPLOAD_MB`, `KB_STORAGE_PATH`/`MAX_KB_UPLOAD_MB`, `EMBEDDING_MODEL`.
+- **LLM providers** (all optional instance-wide fallbacks — every provider is also configurable per-user in Settings): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `OLLAMA_BASE_URL`.
+
+Every credential (LLM and STT alike) follows the same precedence: the signed-in user's own saved key first, then the instance-wide `.env` value, and — for speech-to-text specifically — local `faster-whisper` as a final, always-available fallback that needs no key at all. A user can also pin an explicit provider/model/language override in Settings instead of relying on that automatic priority order.
+
+### Speaker diarization setup
+
+Speaker diarization uses a gated `pyannote.audio` pipeline. A valid `HF_TOKEN` alone isn't enough — the Hugging Face account behind it must also individually accept the terms on **each** gated model page the pipeline depends on internally (a separate, one-time click-through per repo):
 
 - https://huggingface.co/pyannote/speaker-diarization-3.1
 - https://huggingface.co/pyannote/segmentation-3.0
 - https://huggingface.co/pyannote/speaker-diarization-community-1
 
-Skipping this doesn't break anything — transcription still works fine and the meeting still finishes, just without speaker labels for uploaded/offline recordings; the pipeline just fails per-file with a clear error in the worker logs instead of loading. Live same-room diarization during a recording (see below) uses a different, non-gated model and works regardless of `HF_TOKEN`/terms acceptance.
+Skipping this doesn't break anything — transcription still works fine and the meeting still finishes, just without speaker labels for uploaded/offline recordings; the pipeline just fails per-file with a clear error in the worker logs instead of loading. Live diarization during a recording uses the same gated pipeline for its embedding model, so it's subject to the same requirement — a session without it just skips live labeling and keeps showing "Me"/"Them".
 
 ## Recording a meeting
 
-Two ways to get a meeting transcribed:
+Two ways to get a meeting transcribed, both going through the same pipeline downstream:
 
-- **Upload**: on the Dashboard, "Upload recording" picks an audio file, which is transcribed (and, if `HF_TOKEN` is set and its gated-model terms are accepted, speaker-diarized) in the background — the meeting page polls and updates itself as processing finishes.
-- **Live recording**: "Record live" captures your mic (and, optionally, a shared browser tab's audio) directly in the browser, transcribing each side of the conversation as it happens, with live AI copilot suggestions (if an LLM provider is connected in Settings) and same-room speaker separation on your own mic channel — if more than one voice is detected talking into it, segments get labeled "Speaker 1"/"Speaker 2" live, mid-call, instead of just "Me".
+- **Upload**: on the Dashboard, "Upload recording" picks an audio file (most common formats, incl. `.caf`), which is transcribed — and, if `HF_TOKEN`'s terms are accepted, speaker-diarized — in the background. The meeting page polls and updates itself as processing finishes, and a summary report generates automatically once it's ready.
+- **Live recording**: "Record live" captures your mic (and, optionally, a shared browser tab's audio) directly in the browser, transcribing each side as it happens, with live AI copilot suggestions (if an LLM provider is connected) and live speaker separation on both channels. Stopping finalizes the recording the same way an upload does — including the automatic report.
+
+Speech-to-text uses whichever engine is currently resolved for the recording user (Deepgram if configured, else local) — see [Configuration](#configuration) above for the precedence, or Settings' "AI models in use" panel to see and change what's active.
 
 ## Access control
 
@@ -79,9 +168,15 @@ By default anyone can create their own account (`ALLOW_PUBLIC_REGISTRATION=true`
 
 1. Set `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env` — that account is created automatically on first startup with the `admin` role.
 2. Set `ALLOW_PUBLIC_REGISTRATION=false` to close self-serve sign-up.
-3. Sign in as the admin and create accounts for everyone else via `POST /api/admin/users` (or `/docs`).
+3. Sign in as the admin and manage users/groups from the **Admin** page in the UI (or `POST /api/admin/users` / `/docs` directly).
 
 `ADMIN_EMAIL`/`ADMIN_PASSWORD` only ever *create* the account — changing them later and restarting won't touch an existing admin's password.
+
+Admins additionally get read-only access to every user's full transcript/audio (not just group-mates' reports) via a dedicated "All meetings" view, and a cost-analytics dashboard aggregated across the whole instance. Every write path (delete, report generation, action-item edits) stays strictly owner-only regardless of role.
+
+## Design & branding
+
+The UI follows a deliberate, documented visual language — see [`BRANDING.md`](BRANDING.md) for the full color/type/component reference before making frontend changes. In short: near-white/charcoal surfaces, a single navy accent, a serif for headlines only, border-first cards with minimal shadow.
 
 ## Development
 
@@ -102,10 +197,21 @@ npm install
 npm run dev
 ```
 
+Type-check and build the frontend before committing:
+
+```bash
+cd web
+npx tsc -b && npx vite build
+```
+
+There's no automated test suite yet — changes are currently verified by hand against a running Docker stack (see any recent commit message for the pattern) rather than `pytest`/`vitest`. Contributions that add real test coverage are welcome.
+
 ## Status
 
-This is an early-stage build. See the repo's plan history for the phased roadmap. Done so far: auth and admin-managed accounts, the full data model and UI shell, upload-based transcription/diarization with a transcript + playback view, pluggable LLM providers (Anthropic/OpenAI/Gemini/Ollama) and knowledge-base ingestion, live in-browser recording with a live copilot (suggestions, blockers, action items, coach score) and post-call report generation, and live same-room speaker separation. Landing next: semantic meeting search, post-call re-transcription, admin/multi-user management, per-call cost tracking.
+Actively developed. Done so far: auth and admin-managed accounts with groups, upload and live in-browser recording with speaker-labeled transcripts, pluggable LLM copilot (live suggestions/blockers/action items/coach score) and pluggable STT (local or Deepgram), knowledge-base ingestion and semantic meeting search, auto-generated post-call reports (summary/topics/sentiment/quotes/coach score) tuned by call type, cross-meeting voice recognition with live LLM name-spotting, live same-room and same-tab speaker separation, an admin console (users/groups/cost analytics) plus a live debug panel, and per-call cost tracking against a real usage ledger.
 
-## Environment variables
+Not yet built: post-call "polish" re-transcription with a larger model, and an automated test suite.
 
-See `.env.example` for the full list: data store URLs, JWT secret, access control (`ALLOW_PUBLIC_REGISTRATION`, `ADMIN_EMAIL`/`ADMIN_PASSWORD`), audio storage path and upload size cap, Hugging Face token (for diarization models), default Whisper model/compute type, and optional instance-wide LLM provider keys.
+## License
+
+No license file yet — all rights reserved by default until one is added. If you intend to open-source this, add a `LICENSE` file before accepting outside contributions.
