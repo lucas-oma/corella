@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 
+import logoDark from "@/assets/logo-dark.svg";
+import logoLight from "@/assets/logo-light.svg";
 import { useAuth } from "@/lib/auth";
 
 const NAV = [
@@ -18,7 +20,11 @@ export default function AppShell({ children }: { children: ReactNode }) {
       <header className="border-b border-border dark:border-border-dark">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-8">
-            <span className="font-serif text-lg text-ink dark:text-ink-inverted">Corella</span>
+            <div className="flex items-center gap-2.5">
+              <img src={logoLight} alt="" className="h-7 dark:hidden" />
+              <img src={logoDark} alt="" className="hidden h-7 dark:block" />
+              <span className="font-serif text-lg text-ink dark:text-ink-inverted">Corella</span>
+            </div>
             <nav className="flex items-center gap-1">
               {NAV.map((item) => {
                 const active = location.pathname.startsWith(item.to);
