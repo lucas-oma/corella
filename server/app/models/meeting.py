@@ -10,6 +10,7 @@ from app.core.db import Base
 from app.models.enum_types import pg_enum
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.user import User
+from app.models.voice_identity import VoiceIdentity
 
 
 class MeetingStatus(str, enum.Enum):
@@ -87,8 +88,12 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class Speaker(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A speaker identity, scoped to the owning user so voices can be
-    recognized across meetings once diarization embeddings are wired up.
+    """A speaker identity, scoped to one meeting's own online clustering
+    (Phase F/F-2) — `label` ("Speaker 2"/"Them 3") is always set as the
+    anonymous fallback. `voice_identity_id` (Phase O) is set once this
+    cluster is matched or newly resolved against the durable,
+    cross-meeting VoiceIdentity library — when present, its
+    display_name takes precedence over `label` for rendering.
     """
 
     __tablename__ = "speakers"
@@ -103,9 +108,26 @@ class Speaker(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     channel: Mapped[Channel] = mapped_column(
         pg_enum(Channel, "speaker_channel"), default=Channel.UNKNOWN
     )
-    # Point ID of this speaker's voice embedding in the Qdrant speaker_embeddings
-    # collection, used for cross-meeting "remember voices" matching.
-    embedding_ref: Mapped[str | None] = mapped_column(String(64))
+    voice_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("voice_identities.id", ondelete="SET NULL")
+    )
+
+    voice_identity: Mapped[VoiceIdentity | None] = relationship(lazy="joined")
+
+    @property
+    def display_label(self) -> str:
+        """label, unless a resolved cross-meeting identity overrides it."""
+        if self.voice_identity is not None and self.voice_identity.display_name:
+            return self.voice_identity.display_name
+        return self.label
+
+    @property
+    def linked_user_id(self) -> uuid.UUID | None:
+        """Set only when this speaker's resolved identity is an enrolled
+        account, not an anonymous recognized-by-name guest — lets the
+        frontend render "Me" only for the viewer's own linked identity,
+        the real name otherwise (see TranscriptSegmentRead)."""
+        return self.voice_identity.linked_user_id if self.voice_identity else None
 
 
 class TranscriptSegment(UUIDPrimaryKeyMixin, Base):
@@ -133,9 +155,18 @@ class TranscriptSegment(UUIDPrimaryKeyMixin, Base):
     @property
     def speaker_label(self) -> str | None:
         """Not a column — lets TranscriptSegmentRead expose the speaker's
-        display name via the `speaker_id` relationship above.
+        display label via the `speaker_id` relationship above. Prefers a
+        resolved cross-meeting VoiceIdentity name (Phase O) over the
+        anonymous per-meeting "Speaker N"/"Them N" fallback.
         """
-        return self.speaker.label if self.speaker else None
+        return self.speaker.display_label if self.speaker else None
+
+    @property
+    def linked_user_id(self) -> uuid.UUID | None:
+        """Set only when this segment's resolved identity is an enrolled
+        account — lets the frontend render "Me" for the viewer's own
+        linked identity and the real name otherwise (Phase O)."""
+        return self.speaker.linked_user_id if self.speaker else None
 
 
 class Note(UUIDPrimaryKeyMixin, TimestampMixin, Base):

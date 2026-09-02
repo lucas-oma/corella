@@ -5,6 +5,7 @@ from app.models.kb_document import KBDocument
 from app.models.meeting import ActionItem, Meeting, Note, Speaker, TranscriptSegment
 from app.models.provider_credential import ProviderCredential
 from app.models.user import User
+from app.models.voice_identity import VoiceIdentity
 
 __all__ = [
     "User",
@@ -18,4 +19,5 @@ __all__ = [
     "KBDocument",
     "ProviderCredential",
     "LLMUsageEvent",
+    "VoiceIdentity",
 ]

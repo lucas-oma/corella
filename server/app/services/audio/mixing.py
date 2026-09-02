@@ -92,3 +92,14 @@ def write_wav(path: str, pcm: bytes, sample_rate: int = SAMPLE_RATE) -> None:
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
         wf.writeframes(pcm)
+
+
+def read_wav_pcm(path: str) -> bytes:
+    """The inverse of write_wav — raw PCM16LE frames from a mono WAV file,
+    for feeding into embed_utterance()/transcribe() style functions that
+    take raw PCM rather than a file path. Used by voice enrollment
+    (corella.enroll_voice), which normalizes an arbitrary upload to WAV via
+    ffmpeg first, same as every other audio-ingestion path.
+    """
+    with wave.open(path, "rb") as wf:
+        return wf.readframes(wf.getnframes())

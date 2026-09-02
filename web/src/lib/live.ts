@@ -26,6 +26,10 @@ export interface DiarizedSegment {
   end_ms: number;
   text: string;
   speaker_label: string;
+  // Set only when speaker_label resolves to an enrolled account, not an
+  // anonymous recognized-by-name guest — render "Me" only when this
+  // equals the viewer's own id.
+  linked_user_id: string | null;
 }
 
 export interface DiarizationUpdateEvent {
@@ -78,6 +82,42 @@ export async function startCapture(
       void audioContext.close();
     },
   };
+}
+
+/** Wraps raw 16-bit mono PCM samples into a playable/uploadable WAV Blob —
+ * used by Settings.tsx's voice enrollment recorder (the live WS protocol
+ * streams raw PCM frames directly and never needs this; a real file
+ * upload does).
+ */
+export function pcmToWavBlob(samples: Int16Array, sampleRate = 16000): Blob {
+  const dataSize = samples.length * 2; // 16-bit mono
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  function writeString(offset: number, s: string) {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+  }
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true); // fmt chunk size
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  writeString(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    view.setInt16(offset, samples[i], true);
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
 }
 
 /** WebSocket client for /ws/meetings/{id}/live — does the auth handshake,

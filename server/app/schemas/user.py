@@ -30,6 +30,13 @@ class UserLogin(BaseModel):
     password: str
 
 
+class ProfileUpdate(BaseModel):
+    """Self-service — PATCH /api/auth/me. Distinct from AdminUserUpdate,
+    which reassigns role/group on someone *else's* account."""
+
+    full_name: str
+
+
 class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -38,6 +45,11 @@ class UserRead(BaseModel):
     full_name: str
     role: UserRole
     group_id: UUID | None
+    # Not a column — always computed in the route (does a VoiceIdentity row
+    # with linked_user_id=self exist) rather than via an ORM relationship,
+    # so this schema still round-trips a plain User object via
+    # from_attributes everywhere except the one route that fills it in.
+    voice_enrolled: bool = False
 
 
 class Token(BaseModel):

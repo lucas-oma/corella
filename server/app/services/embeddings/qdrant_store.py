@@ -13,6 +13,7 @@ from app.services.embeddings.embed import EMBEDDING_DIM
 # manage and Qdrant filters on it cheaply.
 KB_COLLECTION = "kb_chunks"
 MEETING_COLLECTION = "meeting_chunks"
+SPEAKER_COLLECTION = "speaker_embeddings"
 
 
 @lru_cache
@@ -227,4 +228,109 @@ def delete_meeting_chunks(meeting_id: UUID) -> None:
                 ]
             )
         ),
+    )
+
+
+# --- Cross-meeting voice identity recognition (Phase O) -------------------
+
+
+def ensure_speaker_collection(vector_size: int) -> None:
+    """Idempotent, same 409-is-success race handling as ensure_kb_collection
+    — see there for why. vector_size comes from a real call to
+    embed_utterance() (pyannote/wespeaker-voxceleb-resnet34-LM), verified
+    empirically rather than hardcoded — a different model/dimension than
+    the text-embedding collections above.
+    """
+    client = _client()
+    if client.collection_exists(SPEAKER_COLLECTION):
+        return
+    try:
+        client.create_collection(
+            collection_name=SPEAKER_COLLECTION,
+            vectors_config=qmodels.VectorParams(size=vector_size, distance=qmodels.Distance.COSINE),
+        )
+    except UnexpectedResponse as e:
+        if e.status_code != 409:
+            raise
+
+
+def upsert_speaker_embedding(
+    voice_identity_id: UUID,
+    group_id: UUID | None,
+    linked_user_id: UUID | None,
+    embedding: list[float],
+) -> None:
+    """One point per VoiceIdentity — the identity's own id doubles as the
+    point id (see app/models/voice_identity.py), so a re-enrollment just
+    overwrites the same point rather than leaving an orphan behind.
+    """
+    ensure_speaker_collection(len(embedding))
+    _client().upsert(
+        collection_name=SPEAKER_COLLECTION,
+        points=[
+            qmodels.PointStruct(
+                id=str(voice_identity_id),
+                vector=embedding,
+                payload={
+                    "group_id": str(group_id) if group_id else None,
+                    "linked_user_id": str(linked_user_id) if linked_user_id else None,
+                },
+            )
+        ],
+    )
+
+
+def search_speaker_embeddings(
+    embedding: list[float],
+    score_threshold: float,
+    group_id: UUID | None = None,
+    linked_user_id: UUID | None = None,
+    top_k: int = 1,
+) -> list[dict]:
+    """Best match against the durable cross-meeting voice library, scoped
+    to whichever of group_id/linked_user_id is provided, combined with OR
+    (`should`) rather than two separate calls — the meeting owner's own
+    enrolled identity and their group's shared pool are searched in one
+    pass, and cosine similarity to the *true* speaker naturally dominates
+    over any other candidate, so top-1 already behaves like the intended
+    "check my own identity first, then the group" priority without a
+    second round-trip (see app/workers/tasks.py:diarize_utterance).
+    Empty if the collection doesn't exist yet (nobody's ever enrolled or
+    been recognized) — normal, not an error.
+    """
+    client = _client()
+    if not client.collection_exists(SPEAKER_COLLECTION):
+        return []
+    conditions = []
+    if group_id is not None:
+        conditions.append(
+            qmodels.FieldCondition(key="group_id", match=qmodels.MatchValue(value=str(group_id)))
+        )
+    if linked_user_id is not None:
+        conditions.append(
+            qmodels.FieldCondition(
+                key="linked_user_id", match=qmodels.MatchValue(value=str(linked_user_id))
+            )
+        )
+    if not conditions:
+        return []
+    result = client.query_points(
+        collection_name=SPEAKER_COLLECTION,
+        query=embedding,
+        query_filter=qmodels.Filter(should=conditions),
+        limit=top_k,
+        score_threshold=score_threshold,
+    )
+    return [{"voice_identity_id": point.id, "score": point.score} for point in result.points]
+
+
+def delete_speaker_embedding(voice_identity_id: UUID) -> None:
+    """Best-effort — a not-yet-created collection (nobody's ever enrolled)
+    is a no-op, not an error."""
+    client = _client()
+    if not client.collection_exists(SPEAKER_COLLECTION):
+        return
+    client.delete(
+        collection_name=SPEAKER_COLLECTION,
+        points_selector=qmodels.PointIdsList(points=[str(voice_identity_id)]),
     )

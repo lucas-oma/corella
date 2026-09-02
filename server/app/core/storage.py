@@ -104,6 +104,37 @@ def delete_kb_document_files(document_id: UUID) -> None:
     shutil.rmtree(kb_document_dir(document_id), ignore_errors=True)
 
 
+# --- Profile voice enrollment (Phase O) ---------------------------------
+# Shares the audio_data volume/root rather than a new setting/mount — a
+# voice sample is a few seconds of audio, no different in kind from
+# meeting recordings, just under a separate "voice_samples" subpath so it
+# never collides with a real UUID-keyed meeting directory.
+
+
+def voice_sample_dir(user_id: UUID) -> Path:
+    return Path(get_settings().audio_storage_path) / "voice_samples" / str(user_id)
+
+
+async def save_voice_upload(user_id: UUID, upload: UploadFile) -> str:
+    settings = get_settings()
+    return await _save_upload(voice_sample_dir(user_id), upload, settings.max_audio_upload_mb)
+
+
+def delete_voice_sample_files(user_id: UUID) -> None:
+    """Best-effort cleanup of a user's stored voice sample. Never raises."""
+    shutil.rmtree(voice_sample_dir(user_id), ignore_errors=True)
+
+
+def find_voice_sample_path(user_id: UUID) -> str | None:
+    """The API route saves under a variable extension (original.wav,
+    original.webm, ...) without recording it anywhere else — the worker
+    task (corella.enroll_voice) locates it by globbing this same
+    convention, same "original.<ext>" pattern _save_upload always writes.
+    """
+    matches = sorted(voice_sample_dir(user_id).glob("original.*"))
+    return str(matches[0]) if matches else None
+
+
 # --- Range-aware file serving (meeting audio playback) ------------------
 
 

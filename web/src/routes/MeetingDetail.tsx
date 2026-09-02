@@ -29,9 +29,17 @@ function formatCost(usd: number): string {
 }
 
 /** Live-recorded segments have no Speaker row (channel already says who) —
- * fall back to "Me"/"Them" so they aren't unlabeled. */
-function speakerLabel(segment: TranscriptSegment): string | null {
-  if (segment.speaker_label) return segment.speaker_label;
+ * fall back to "Me"/"Them" so they aren't unlabeled. A resolved identity
+ * linked to an enrolled account (segment.linked_user_id) is viewer-
+ * relative: the account owner sees "Me" here (first person, their own
+ * meeting), anyone else with legitimate access (an admin, per Phase J —
+ * a group member never reaches this view at all) sees the real name. */
+function speakerLabel(segment: TranscriptSegment, viewerId: string | undefined): string | null {
+  if (segment.speaker_label) {
+    return segment.linked_user_id && segment.linked_user_id === viewerId
+      ? "Me"
+      : segment.speaker_label;
+  }
   if (segment.channel === "me") return "Me";
   if (segment.channel === "them") return "Them";
   return null;
@@ -417,9 +425,9 @@ export default function MeetingDetail() {
                           {formatTimestamp(segment.start_ms)}
                         </span>
                         <span>
-                          {speakerLabel(segment) && (
+                          {speakerLabel(segment, user?.id) && (
                             <span className="mr-2 text-xs font-medium text-ink-muted">
-                              {speakerLabel(segment)}
+                              {speakerLabel(segment, user?.id)}
                             </span>
                           )}
                           <span className="text-sm text-ink dark:text-ink-inverted">{segment.text}</span>

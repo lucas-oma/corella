@@ -70,6 +70,7 @@ export interface User {
   full_name: string;
   role: "admin" | "member";
   group_id: string | null;
+  voice_enrolled: boolean;
 }
 
 export interface AuthConfig {
@@ -142,6 +143,9 @@ export interface Report {
 export interface TranscriptSegment {
   id: string;
   speaker_label: string | null;
+  // Set only when speaker_label resolves to an enrolled account — render
+  // "Me" only when this equals the viewer's own id, the real name otherwise.
+  linked_user_id: string | null;
   channel: "me" | "them" | "unknown";
   start_ms: number;
   end_ms: number;
@@ -235,6 +239,14 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
   me: () => request<User>("/api/auth/me"),
+  updateProfile: (fullName: string) =>
+    request<User>("/api/auth/me", { method: "PATCH", body: JSON.stringify({ full_name: fullName }) }),
+  enrollVoice: (wavBlob: Blob) => {
+    const form = new FormData();
+    form.append("file", wavBlob, "voice-sample.wav");
+    return request<User>("/api/auth/me/voice", { method: "POST", body: form });
+  },
+  removeVoiceEnrollment: () => request<User>("/api/auth/me/voice", { method: "DELETE" }),
   listMeetings: () => request<Meeting[]>("/api/meetings"),
   listGroupMeetings: () => request<GroupMeeting[]>("/api/meetings/group"),
   listAllMeetings: () => request<GroupMeeting[]>("/api/meetings/all"),

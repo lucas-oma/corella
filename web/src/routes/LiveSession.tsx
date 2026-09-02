@@ -10,26 +10,37 @@ import {
   type TranscriptEvent,
   startCapture,
 } from "@/lib/live";
+import { useAuth } from "@/lib/auth";
 
 type ConnectionState = "connecting" | "connected" | "error";
 
-// Speaker labels arrive live, after the fact, once a second distinct voice
-// is confirmed *on that channel* — "Me" (one mic, possibly several people
-// around it) and "Them" (one shared tab/system-audio track, possibly
-// several remote participants) gate and label independently, see
-// app/services/diarization/cluster.py. A small stable color per speaker
-// number helps them read as distinct people at a glance rather than just
-// more text.
+interface SpeakerInfo {
+  label: string;
+  linkedUserId: string | null;
+}
+
+// Speaker labels arrive live, after the fact — either the moment a voice is
+// recognized (the viewer's own enrolled voice, or someone already known in
+// their group) or once a second distinct voice is confirmed *on that
+// channel* (see app/services/diarization/cluster.py — Me and Them gate
+// independently) or once an unrecognized voice's name is spotted live from
+// what it said (corella.identify_speaker_name). A small stable color per
+// label helps them read as distinct people at a glance rather than just
+// more text — hashed from the label itself, not parsed as a number, since a
+// resolved name ("Lucas") has no digit to key off of the way "Speaker 2"
+// did.
 const SPEAKER_DOT_COLORS = ["bg-accent", "bg-status-success", "bg-status-danger", "bg-ink-subtle"];
 
 function speakerDotColor(label: string): string {
-  const n = parseInt(label.replace(/\D/g, ""), 10) || 1;
-  return SPEAKER_DOT_COLORS[(n - 1) % SPEAKER_DOT_COLORS.length];
+  let hash = 0;
+  for (let i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) >>> 0;
+  return SPEAKER_DOT_COLORS[hash % SPEAKER_DOT_COLORS.length];
 }
 
 export default function LiveSession() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +50,18 @@ export default function LiveSession() {
   const [stopping, setStopping] = useState(false);
   const [copilot, setCopilot] = useState<CopilotEvent | null>(null);
   const [copilotAvailable, setCopilotAvailable] = useState(true);
-  const [speakerLabels, setSpeakerLabels] = useState<Record<string, string>>({});
+  const [speakerLabels, setSpeakerLabels] = useState<Record<string, SpeakerInfo>>({});
+
+  /** "Me" is viewer-relative, not baked into the stored label — the
+   * viewer's own enrolled voice reads as "Me" to themselves, and by their
+   * real name to anyone else with legitimate access to this transcript
+   * (an admin, per Phase J; never a regular group member — that boundary
+   * is unchanged). */
+  function displayLabel(segmentId: string): string | null {
+    const info = speakerLabels[segmentId];
+    if (!info) return null;
+    return info.linkedUserId && info.linkedUserId === user?.id ? "Me" : info.label;
+  }
 
   const clientRef = useRef<LiveSessionClient | null>(null);
   const micCaptureRef = useRef<CaptureHandle | null>(null);
@@ -62,7 +84,9 @@ export default function LiveSession() {
   function applyDiarizationUpdate(event: DiarizationUpdateEvent) {
     setSpeakerLabels((prev) => {
       const next = { ...prev };
-      for (const seg of event.segments) next[seg.id] = seg.speaker_label;
+      for (const seg of event.segments) {
+        next[seg.id] = { label: seg.speaker_label, linkedUserId: seg.linked_user_id };
+      }
       return next;
     });
     setTranscript((prev) => {
@@ -203,17 +227,17 @@ export default function LiveSession() {
             <p className="text-sm text-ink-muted">Say something — your words will appear here.</p>
           )}
           {transcript.map((segment) => {
-            const speakerLabel = speakerLabels[segment.id];
+            const label = displayLabel(segment.id);
             return (
               <div
                 key={segment.id}
                 className={`flex ${segment.channel === "me" ? "justify-end" : "justify-start"}`}
               >
                 <div className={`max-w-[75%] ${segment.channel === "me" ? "text-right" : "text-left"}`}>
-                  {speakerLabel && (
+                  {label && (
                     <p className="mb-0.5 flex items-center gap-1.5 text-xs text-ink-subtle">
-                      <span className={`h-1.5 w-1.5 rounded-full ${speakerDotColor(speakerLabel)}`} />
-                      {speakerLabel}
+                      <span className={`h-1.5 w-1.5 rounded-full ${speakerDotColor(label)}`} />
+                      {label}
                     </p>
                   )}
                   <div
