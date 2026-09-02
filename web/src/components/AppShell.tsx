@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 
 import logoDark from "@/assets/logo-dark.svg";
 import logoLight from "@/assets/logo-light.svg";
+import Footer from "@/components/Footer";
 import { useAuth } from "@/lib/auth";
 
 const NAV = [
@@ -54,6 +55,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
         </div>
       </header>
       <main className="mx-auto max-w-5xl px-6 py-10">{children}</main>
+      <Footer />
     </div>
   );
 }
