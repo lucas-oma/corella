@@ -23,5 +23,6 @@ class ReportResponse(BaseModel):
     key_topics: list[str]
     sentiment: str | None
     notable_quotes: list[str]
+    coach_score: int | None
     action_items: list[ActionItemRead]
     talk_ratio: dict[str, int] | None

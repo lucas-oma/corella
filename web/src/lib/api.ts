@@ -100,6 +100,7 @@ export interface Meeting {
   key_topics: string[] | null;
   sentiment: string | null;
   notable_quotes: string[] | null;
+  coach_score: number | null;
   created_at: string;
   owner_id: string;
   owner_name: string;
@@ -129,6 +130,7 @@ export interface Report {
   key_topics: string[];
   sentiment: string | null;
   notable_quotes: string[];
+  coach_score: number | null;
   action_items: ActionItem[];
   talk_ratio: { me: number; them: number } | null;
 }

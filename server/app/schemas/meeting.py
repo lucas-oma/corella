@@ -27,6 +27,7 @@ class MeetingRead(BaseModel):
     key_topics: list[str] | None
     sentiment: str | None
     notable_quotes: list[str] | None
+    coach_score: int | None
     created_at: datetime
     owner_id: UUID
     owner_name: str

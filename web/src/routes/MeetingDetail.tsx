@@ -129,6 +129,7 @@ export default function MeetingDetail() {
               key_topics: report.key_topics,
               sentiment: report.sentiment,
               notable_quotes: report.notable_quotes,
+              coach_score: report.coach_score,
             }
           : prev,
       );
@@ -267,6 +268,11 @@ export default function MeetingDetail() {
                     {meeting.sentiment && (
                       <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
                         {meeting.sentiment}
+                      </span>
+                    )}
+                    {meeting.coach_score !== null && meeting.coach_score !== undefined && (
+                      <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                        Score: {meeting.coach_score}/100
                       </span>
                     )}
                   </div>
