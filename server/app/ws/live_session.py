@@ -15,7 +15,7 @@ from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.core.security import decode_access_token
 from app.models.meeting import Channel, Meeting, MeetingStatus, TranscriptSegment
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services.asr import deepgram
 from app.services.asr.resolve import ResolvedStt, resolve_stt_provider
 from app.services.asr.whisper import transcribe as whisper_transcribe
@@ -76,12 +76,20 @@ class LiveSession:
         owner_id: UUID,
         provider: ResolvedProvider | None,
         stt: ResolvedStt,
+        is_admin: bool = False,
     ):
         self.meeting_id = meeting_id
         self.owner_id = owner_id
         self.provider = provider
         self.stt = stt
         self._start = time.monotonic()
+        # Admin-only live debug panel (own session only — see the plan's
+        # Phase R). Off by default and toggled by an explicit control frame;
+        # `debug()` is a no-op (one `if` check) when disabled, so a normal
+        # session pays nothing for this existing.
+        self.is_admin = is_admin
+        self.debug_enabled = False
+        self.debug_queue: asyncio.Queue = asyncio.Queue()
         settings = get_settings()
         self.detectors = {
             channel: UtteranceDetector(
@@ -102,6 +110,21 @@ class LiveSession:
     def elapsed_ms(self) -> int:
         return int((time.monotonic() - self._start) * 1000)
 
+    def debug(self, stage: str, **detail) -> None:
+        """Push a debug event to the admin-only live panel, if enabled for
+        this session — see the plan's Phase R. Cheap when disabled (one
+        `if`); never raises (a debug-instrumentation bug must never break
+        the actual live session).
+        """
+        if not self.debug_enabled:
+            return
+        try:
+            self.debug_queue.put_nowait(
+                {"type": "debug_event", "stage": stage, "at_ms": self.elapsed_ms(), "detail": detail}
+            )
+        except Exception:
+            logger.exception("Live session %s: failed to enqueue debug event %r", self.meeting_id, stage)
+
     def on_audio(self, channel: Channel, pcm: bytes) -> None:
         """Feeds the VAD detector and enqueues any utterances it completes.
         Timestamps are captured now (flush time), not when the queue
@@ -110,6 +133,9 @@ class LiveSession:
         self.recordings[_CHANNEL_KEY[channel]].append((self.elapsed_ms(), pcm))
         for utterance_pcm in self.detectors[channel].feed(pcm):
             end_ms = self.elapsed_ms()
+            self.debug(
+                "vad_utterance_flushed", channel=channel.value, duration_ms=_duration_ms(utterance_pcm)
+            )
             self.queue.put_nowait(
                 _Utterance(channel, utterance_pcm, max(0, end_ms - _duration_ms(utterance_pcm)), end_ms)
             )
@@ -156,9 +182,10 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
     # already be ready, not cold-loading mid-call.
     await asyncio.get_running_loop().run_in_executor(None, warm_up)
 
-    session = LiveSession(meeting_id, user.id, provider, stt)
+    session = LiveSession(meeting_id, user.id, provider, stt, is_admin=user.role == UserRole.ADMIN)
     consumer_task = asyncio.create_task(_consume_utterances(websocket, session))
     diarization_poll_task = asyncio.create_task(_poll_diarization_updates(websocket, session))
+    debug_pump_task = asyncio.create_task(_pump_debug_events(websocket, session))
 
     await websocket.send_json({"type": "ready"})
     if provider is None:
@@ -179,6 +206,7 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
                 if _is_stop(message["text"]):
                     stopped_gracefully = True
                     break
+                _handle_control_frame(session, message["text"])
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -200,9 +228,10 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         await _mark_processing(meeting_id)
 
         # Unlike consumer_task, nothing left to push events to once the
-        # connection is ending — stop it here rather than surviving into
+        # connection is ending — stop them here rather than surviving into
         # the background _drain_and_finalize task.
         diarization_poll_task.cancel()
+        debug_pump_task.cancel()
 
         if stopped_gracefully:
             try:
@@ -253,6 +282,24 @@ def _is_stop(raw: str) -> bool:
         return json.loads(raw).get("type") == "stop"
     except json.JSONDecodeError:
         return False
+
+
+def _handle_control_frame(session: LiveSession, raw: str) -> None:
+    """Non-stop text control frames — currently just the admin-only debug
+    toggle: {"type": "debug", "enabled": true|false}. Server-side gated on
+    session.is_admin (set once at session start from the real DB role) —
+    never trust the client's own claim, same as every other permission
+    check in this codebase.
+    """
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if payload.get("type") != "debug":
+        return
+    if not session.is_admin:
+        return
+    session.debug_enabled = bool(payload.get("enabled"))
 
 
 def _handle_audio_frame(session: LiveSession, data: bytes) -> None:
@@ -313,6 +360,20 @@ async def _poll_diarization_updates(websocket: WebSocket, session: LiveSession) 
                 pass  # client may already be gone
 
 
+async def _pump_debug_events(websocket: WebSocket, session: LiveSession) -> None:
+    """Forwards session.debug_queue events to the client verbatim. Runs for
+    the life of the connection, cancelled in the main handler's `finally`
+    alongside diarization_poll_task — nothing left to push to once the
+    connection is ending, same reasoning as that task.
+    """
+    while True:
+        event = await session.debug_queue.get()
+        try:
+            await websocket.send_json(event)
+        except Exception:
+            pass  # client may already be gone
+
+
 async def _maybe_trigger_copilot(websocket: WebSocket, session: LiveSession) -> None:
     settings = get_settings()
     elapsed = time.monotonic() - session.last_cycle_at
@@ -332,6 +393,8 @@ async def _maybe_trigger_copilot(websocket: WebSocket, session: LiveSession) -> 
 
 
 async def _run_copilot_and_send(websocket: WebSocket, session: LiveSession) -> None:
+    session.debug("copilot_cycle_started")
+    started = time.monotonic()
     try:
         async with SessionLocal() as db:
             result = await run_copilot_cycle(db, session.meeting_id, session.owner_id, session.provider)
@@ -340,6 +403,9 @@ async def _run_copilot_and_send(websocket: WebSocket, session: LiveSession) -> N
         result = None
     finally:
         session.copilot_running = False
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    session.debug("copilot_cycle_result", ok=result is not None, elapsed_ms=elapsed_ms)
 
     if result is None:
         return
@@ -364,8 +430,13 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
     # this WS path (_CHANNEL_BY_BYTE only maps 0/1 to ME/THEM), deliberately
     # excluded rather than assuming every channel needs it.
     needs_diarization = utterance.channel in (Channel.ME, Channel.THEM)
-    text, words = await _transcribe_pcm(utterance.pcm, session.stt, word_timestamps=needs_diarization)
+    text, words = await _transcribe_pcm(
+        utterance.pcm, session.stt, word_timestamps=needs_diarization, debug=session.debug
+    )
     if not text:
+        session.debug(
+            "transcript_empty", channel=utterance.channel.value, duration_ms=_duration_ms(utterance.pcm)
+        )
         return False
 
     async with SessionLocal() as db:
@@ -399,6 +470,12 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
         window_pcm = extract_channel_window(
             session.recordings[channel_key], window_start_ms, utterance.end_ms
         )
+        session.debug(
+            "diarization_dispatched",
+            segment_id=str(row.id),
+            channel=utterance.channel.value,
+            window_ms=utterance.end_ms - window_start_ms,
+        )
         celery_app.send_task(
             "corella.diarize_utterance",
             args=[
@@ -430,25 +507,49 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
     return True
 
 
-async def _transcribe_pcm(pcm: bytes, stt: ResolvedStt, word_timestamps: bool = False) -> tuple[str, list]:
+def _noop_debug(stage: str, **detail) -> None:
+    pass
+
+
+async def _transcribe_pcm(
+    pcm: bytes, stt: ResolvedStt, word_timestamps: bool = False, debug=_noop_debug
+) -> tuple[str, list]:
     """Deepgram (if resolved for this session) or local faster-whisper —
     see app/services/asr/resolve.py. A Deepgram failure mid-session falls
     back to local whisper for *that* utterance rather than dropping it,
     same graceful-degradation spirit as the upload path's equivalent
     fallback (app/workers/tasks.py:_resolve_and_maybe_transcribe_deepgram).
+
+    `debug` is session.debug (or a no-op default for callers that don't
+    care, e.g. the upload path never reaches this function at all) — see
+    the plan's Phase R admin debug panel.
     """
     if stt.provider == "deepgram":
+        pcm_duration_ms = _duration_ms(pcm)
+        debug("stt_request", provider="deepgram", model=stt.model, language=stt.language, pcm_duration_ms=pcm_duration_ms)
+        started = time.monotonic()
         try:
-            segments = await deepgram.transcribe(_wav_bytes(pcm), stt.model, stt.api_key, word_timestamps)
-            return _segments_to_text_words(segments)
-        except deepgram.SttError:
+            segments = await deepgram.transcribe(
+                _wav_bytes(pcm), stt.model, stt.api_key, word_timestamps, language=stt.language
+            )
+            text, words = _segments_to_text_words(segments)
+            debug(
+                "stt_response",
+                provider="deepgram",
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                char_count=len(text),
+                text_preview=text[:120],
+            )
+            return text, words
+        except deepgram.SttError as e:
             logger.exception(
                 "Deepgram live transcription failed; falling back to local whisper for this utterance"
             )
-    return await _transcribe_pcm_whisper(pcm, word_timestamps)
+            debug("stt_fallback", provider="deepgram", reason=str(e))
+    return await _transcribe_pcm_whisper(pcm, word_timestamps, debug)
 
 
-async def _transcribe_pcm_whisper(pcm: bytes, word_timestamps: bool) -> tuple[str, list]:
+async def _transcribe_pcm_whisper(pcm: bytes, word_timestamps: bool, debug=_noop_debug) -> tuple[str, list]:
     def _run() -> tuple[str, list]:
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
@@ -459,7 +560,17 @@ async def _transcribe_pcm_whisper(pcm: bytes, word_timestamps: bool) -> tuple[st
         finally:
             os.unlink(path)
 
-    return await asyncio.get_running_loop().run_in_executor(None, _run)
+    debug("stt_request", provider="whisper", pcm_duration_ms=_duration_ms(pcm))
+    started = time.monotonic()
+    text, words = await asyncio.get_running_loop().run_in_executor(None, _run)
+    debug(
+        "stt_response",
+        provider="whisper",
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+        char_count=len(text),
+        text_preview=text[:120],
+    )
+    return text, words
 
 
 def _segments_to_text_words(segments) -> tuple[str, list]:

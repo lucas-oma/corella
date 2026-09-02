@@ -32,6 +32,15 @@ export interface DiarizedSegment {
   linked_user_id: string | null;
 }
 
+/** Admin-only live debug panel event — see the plan's Phase R. Only ever
+ * sent for a session where the connected user is an admin *and* has
+ * toggled debug on for that session (LiveSessionClient.setDebug). */
+export interface DebugEvent {
+  stage: string;
+  atMs: number;
+  detail: Record<string, unknown>;
+}
+
 export interface DiarizationUpdateEvent {
   /** True the first time 2+ distinct speakers are confirmed *on one
    * channel* (Me and Them gate independently): a full authoritative
@@ -131,6 +140,7 @@ export class LiveSessionClient {
   onCopilot: ((event: CopilotEvent) => void) | null = null;
   onCopilotUnavailable: (() => void) | null = null;
   onDiarizationUpdate: ((event: DiarizationUpdateEvent) => void) | null = null;
+  onDebugEvent: ((event: DebugEvent) => void) | null = null;
   onStopped: (() => void) | null = null;
   onError: ((message: string) => void) | null = null;
 
@@ -156,6 +166,9 @@ export class LiveSessionClient {
           is_snapshot?: boolean;
           removed_segment_ids?: string[];
           segments?: DiarizedSegment[];
+          stage?: string;
+          at_ms?: number;
+          detail?: Record<string, unknown>;
         };
         try {
           msg = JSON.parse(event.data);
@@ -178,6 +191,8 @@ export class LiveSessionClient {
             removedSegmentIds: msg.removed_segment_ids ?? [],
             segments: msg.segments ?? [],
           });
+        } else if (msg.type === "debug_event" && msg.stage) {
+          this.onDebugEvent?.({ stage: msg.stage, atMs: msg.at_ms ?? 0, detail: msg.detail ?? {} });
         } else if (msg.type === "stopped") this.onStopped?.();
         else if (msg.type === "error") this.onError?.(msg.message ?? "Live session error");
       };
@@ -203,6 +218,14 @@ export class LiveSessionClient {
   stop(): void {
     if (this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: "stop" }));
+    }
+  }
+
+  /** Toggles the admin-only live debug panel for this session — silently
+   * ignored server-side unless the connected user is actually an admin. */
+  setDebug(enabled: boolean): void {
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "debug", enabled }));
     }
   }
 

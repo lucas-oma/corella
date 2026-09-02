@@ -5,6 +5,7 @@ import AppShell from "@/components/AppShell";
 import {
   type CaptureHandle,
   type CopilotEvent,
+  type DebugEvent,
   type DiarizationUpdateEvent,
   LiveSessionClient,
   type TranscriptEvent,
@@ -31,6 +32,11 @@ interface SpeakerInfo {
 // did.
 const SPEAKER_DOT_COLORS = ["bg-accent", "bg-status-success", "bg-status-danger", "bg-ink-subtle"];
 
+// Debug aid, not a durable record — nothing persisted server-side, so
+// capping client-side is enough to keep the panel from growing unbounded
+// on a long call.
+const MAX_DEBUG_EVENTS = 200;
+
 function speakerDotColor(label: string): string {
   let hash = 0;
   for (let i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) >>> 0;
@@ -51,6 +57,9 @@ export default function LiveSession() {
   const [copilot, setCopilot] = useState<CopilotEvent | null>(null);
   const [copilotAvailable, setCopilotAvailable] = useState(true);
   const [speakerLabels, setSpeakerLabels] = useState<Record<string, SpeakerInfo>>({});
+  const [debugEnabled, setDebugEnabled] = useState(false);
+  const [debugEvents, setDebugEvents] = useState<DebugEvent[]>([]);
+  const debugEndRef = useRef<HTMLDivElement>(null);
 
   /** "Me" is viewer-relative, not baked into the stored label — the
    * viewer's own enrolled voice reads as "Me" to themselves, and by their
@@ -72,6 +81,10 @@ export default function LiveSession() {
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ block: "end" });
   }, [transcript]);
+
+  useEffect(() => {
+    debugEndRef.current?.scrollIntoView({ block: "end" });
+  }, [debugEvents]);
 
   // A speaker change mid-utterance means the server deletes the one coarse
   // bubble it first sent (on whichever channel it was) and replaces it with
@@ -116,6 +129,8 @@ export default function LiveSession() {
       client.onCopilot = (event) => setCopilot(event);
       client.onCopilotUnavailable = () => setCopilotAvailable(false);
       client.onDiarizationUpdate = (event) => applyDiarizationUpdate(event);
+      client.onDebugEvent = (event) =>
+        setDebugEvents((prev) => [...prev, event].slice(-MAX_DEBUG_EVENTS));
       client.onError = (message) => setError(message);
       client.onStopped = () => navigate(`/meetings/${meetingId}`);
 
@@ -187,6 +202,13 @@ export default function LiveSession() {
     clientRef.current?.stop();
   }
 
+  function onToggleDebug() {
+    const next = !debugEnabled;
+    setDebugEnabled(next);
+    clientRef.current?.setDebug(next);
+    if (!next) setDebugEvents([]);
+  }
+
   return (
     <AppShell>
       <div className="mb-6 flex items-center justify-between">
@@ -217,6 +239,15 @@ export default function LiveSession() {
         {!themActive && connection === "connected" && (
           <button onClick={onShareTabAudio} className="btn-secondary ml-auto">
             Share tab audio
+          </button>
+        )}
+        {user?.role === "admin" && connection === "connected" && (
+          <button
+            onClick={onToggleDebug}
+            className={`btn-secondary ${themActive ? "" : "ml-auto"}`}
+            title="Admin-only: live technical events (VAD flushes, STT/LLM requests, diarization dispatch)"
+          >
+            {debugEnabled ? "Debug: on" : "Debug"}
           </button>
         )}
       </div>
@@ -317,6 +348,25 @@ export default function LiveSession() {
           )}
         </div>
       </div>
+
+      {debugEnabled && (
+        <div className="card mt-6 flex h-64 flex-col overflow-y-auto p-4">
+          <h2 className="mb-2 font-serif text-base text-ink dark:text-ink-inverted">Debug log</h2>
+          {debugEvents.length === 0 && (
+            <p className="text-xs text-ink-subtle">Waiting for events…</p>
+          )}
+          <div className="space-y-1 font-mono text-xs text-ink-subtle">
+            {debugEvents.map((event, i) => (
+              <p key={i}>
+                <span className="text-ink-subtle/70">[+{event.atMs}ms]</span>{" "}
+                <span className="text-ink dark:text-ink-inverted">{event.stage}</span>{" "}
+                {Object.keys(event.detail).length > 0 && JSON.stringify(event.detail)}
+              </p>
+            ))}
+          </div>
+          <div ref={debugEndRef} />
+        </div>
+      )}
     </AppShell>
   );
 }

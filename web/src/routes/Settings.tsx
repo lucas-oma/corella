@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type AiOverview, type ProviderStatus, type SttStatus } from "@/lib/api";
+import { ApiError, api, type AiOverview, type Preferences, type ProviderStatus, type SttStatus } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { type CaptureHandle, pcmToWavBlob, startCapture } from "@/lib/live";
 
@@ -29,6 +29,7 @@ export default function Settings() {
   const [providers, setProviders] = useState<ProviderStatus[] | null>(null);
   const [sttStatus, setSttStatus] = useState<SttStatus | null>(null);
   const [aiOverview, setAiOverview] = useState<AiOverview | null>(null);
+  const [preferences, setPreferences] = useState<Preferences | null>(null);
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +48,15 @@ export default function Settings() {
     api.getProviderStatus().then(setProviders);
     api.getSttStatus().then(setSttStatus);
     api.getAiOverview().then(setAiOverview);
+    api.getPreferences().then((prefs) => {
+      setPreferences(prefs);
+      setInputs((prev) => ({
+        ...prev,
+        llmModel: prefs.llm_model ?? "",
+        sttModel: prefs.stt_model ?? "",
+        sttLanguage: prefs.stt_language ?? "",
+      }));
+    });
   }, []);
 
   useEffect(() => {
@@ -198,6 +208,39 @@ export default function Settings() {
     }
   }
 
+  async function savePrefs(payload: Partial<Preferences>, busyKey: string) {
+    setError(null);
+    setBusy(busyKey);
+    try {
+      setPreferences(await api.savePreferences(payload));
+      api.getAiOverview().then(setAiOverview);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't save preference");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function onLlmProviderChange(value: string) {
+    savePrefs({ llm_provider: (value || null) as Preferences["llm_provider"] }, "llm-pref");
+  }
+
+  function onSttProviderChange(value: string) {
+    savePrefs({ stt_provider: (value || null) as Preferences["stt_provider"] }, "stt-pref");
+  }
+
+  function onSaveLlmModel() {
+    savePrefs({ llm_model: inputs.llmModel?.trim() || null }, "llm-model");
+  }
+
+  function onSaveSttModel() {
+    savePrefs({ stt_model: inputs.sttModel?.trim() || null }, "stt-model");
+  }
+
+  function onSaveSttLanguage() {
+    savePrefs({ stt_language: inputs.sttLanguage?.trim() || null }, "stt-language");
+  }
+
   return (
     <AppShell>
       <div className="mb-8">
@@ -282,6 +325,40 @@ export default function Settings() {
           The LLM(s) that will power live suggestions and post-call reports once those land. Your
           key is stored encrypted and never shown again after saving.
         </p>
+
+        <div className="mt-5">
+          <p className="label mb-1">Preferred provider</p>
+          <select
+            value={preferences?.llm_provider ?? ""}
+            onChange={(e) => onLlmProviderChange(e.target.value)}
+            disabled={busy === "llm-pref" || providers === null}
+            className="field w-full text-sm"
+          >
+            <option value="">Auto (recommended — first connected provider)</option>
+            {providers
+              ?.filter((p) => p.connected)
+              .map((p) => (
+                <option key={p.provider} value={p.provider}>
+                  {PROVIDER_META[p.provider].name}
+                </option>
+              ))}
+          </select>
+          {preferences?.llm_provider && (
+            <div className="mt-2 flex gap-2">
+              <input
+                type="text"
+                placeholder={aiOverview?.language_model.model ?? "Model name"}
+                value={inputs.llmModel ?? ""}
+                onChange={(e) => setInputs((prev) => ({ ...prev, llmModel: e.target.value }))}
+                className="field flex-1 text-sm"
+              />
+              <button onClick={onSaveLlmModel} disabled={busy === "llm-model"} className="btn-secondary shrink-0">
+                {busy === "llm-model" ? "Saving…" : "Save model"}
+              </button>
+            </div>
+          )}
+        </div>
+
         <ul className="mt-5 divide-y divide-border dark:divide-border-dark">
           {providers === null && <li className="py-3 text-sm text-ink-muted">Loading…</li>}
           {providers?.map((status) => {
@@ -351,6 +428,56 @@ export default function Settings() {
           switches transcription (both live and uploaded recordings) to it whenever it's reachable,
           falling back to local automatically if it isn't.
         </p>
+
+        <div className="mt-5">
+          <p className="label mb-1">Preferred engine</p>
+          <select
+            value={preferences?.stt_provider ?? ""}
+            onChange={(e) => onSttProviderChange(e.target.value)}
+            disabled={busy === "stt-pref"}
+            className="field w-full text-sm"
+          >
+            <option value="">Auto (recommended — Deepgram if connected, else local)</option>
+            <option value="deepgram" disabled={!sttStatus?.connected}>
+              Deepgram{!sttStatus?.connected ? " (not connected)" : ""}
+            </option>
+            <option value="whisper">Local (faster-whisper)</option>
+          </select>
+          {(preferences?.stt_provider === "deepgram" ||
+            (!preferences?.stt_provider && sttStatus?.connected)) && (
+            <div className="mt-2 space-y-2">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder={aiOverview?.speech_to_text.model ?? "nova-3"}
+                  value={inputs.sttModel ?? ""}
+                  onChange={(e) => setInputs((prev) => ({ ...prev, sttModel: e.target.value }))}
+                  className="field flex-1 text-sm"
+                />
+                <button onClick={onSaveSttModel} disabled={busy === "stt-model"} className="btn-secondary shrink-0">
+                  {busy === "stt-model" ? "Saving…" : "Save model"}
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="multi (auto-detect — recommended)"
+                  value={inputs.sttLanguage ?? ""}
+                  onChange={(e) => setInputs((prev) => ({ ...prev, sttLanguage: e.target.value }))}
+                  className="field flex-1 text-sm"
+                />
+                <button
+                  onClick={onSaveSttLanguage}
+                  disabled={busy === "stt-language"}
+                  className="btn-secondary shrink-0"
+                >
+                  {busy === "stt-language" ? "Saving…" : "Save language"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
         {sttStatus === null ? (
           <p className="mt-5 text-sm text-ink-muted">Loading…</p>
         ) : (

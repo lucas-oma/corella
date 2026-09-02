@@ -174,6 +174,14 @@ export interface AiOverview {
   diarization: { pipeline: string; speaker_embedding: string; available: boolean };
 }
 
+export interface Preferences {
+  llm_provider: ProviderStatus["provider"] | null;
+  llm_model: string | null;
+  stt_provider: "deepgram" | "whisper" | null;
+  stt_model: string | null;
+  stt_language: string | null;
+}
+
 export interface MeetingSearchResult {
   meeting_id: string;
   title: string;
@@ -297,6 +305,9 @@ export const api = {
     request<SttStatus>("/api/settings/stt", { method: "PUT", body: JSON.stringify({ api_key: apiKey }) }),
   removeSttCredential: () => request<SttStatus>("/api/settings/stt", { method: "DELETE" }),
   getAiOverview: () => request<AiOverview>("/api/settings/ai-overview"),
+  getPreferences: () => request<Preferences>("/api/settings/preferences"),
+  savePreferences: (payload: Partial<Preferences>) =>
+    request<Preferences>("/api/settings/preferences", { method: "PUT", body: JSON.stringify(payload) }),
   listKBDocuments: () => request<KBDocument[]>("/api/kb/documents"),
   uploadKBDocument: (file: File) => {
     const form = new FormData();

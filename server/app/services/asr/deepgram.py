@@ -14,7 +14,11 @@ class SttError(Exception):
 
 
 async def transcribe(
-    pcm_wav_bytes: bytes, model: str, api_key: str | None, word_timestamps: bool = False
+    pcm_wav_bytes: bytes,
+    model: str,
+    api_key: str | None,
+    word_timestamps: bool = False,
+    language: str = "multi",
 ) -> list[WhisperSegment]:
     """Deepgram's prerecorded /v1/listen REST endpoint — used for both
     upload processing and live per-utterance transcription (never their
@@ -31,12 +35,20 @@ async def transcribe(
     the same WhisperSegment/WhisperWord shape whisper.py produces, so
     nothing downstream (align.py, live_session.py) needs to know which
     engine actually ran.
+
+    `language` defaults to Deepgram's "multi" automatic multi-language/
+    code-switching detection. Leaving Deepgram's `language` param entirely
+    unset makes it silently assume English — confirmed empirically (a real
+    request against real non-English audio came back a genuine `200 OK`
+    with an *empty* transcript, no error at all) — so this function always
+    sends an explicit value rather than omitting the param.
     """
     if not api_key:
         raise SttError("No Deepgram API key configured")
 
     params = {
         "model": model,
+        "language": language,
         "smart_format": "true",
         "punctuate": "true",
         "utterances": "true",

@@ -16,6 +16,8 @@ from app.schemas.settings import (
     DiarizationOverview,
     EmbeddingsOverview,
     LanguageModelOverview,
+    PreferencesRead,
+    PreferencesUpdate,
     ProviderCredentialUpdate,
     ProviderStatus,
     SttCredentialUpdate,
@@ -212,4 +214,54 @@ async def ai_overview(
             speaker_embedding="pyannote/wespeaker-voxceleb-resnet34-LM",
             available=bool(settings.hf_token),
         ),
+    )
+
+
+@router.get("/preferences", response_model=PreferencesRead)
+async def get_preferences(current_user: User = Depends(get_current_user)) -> PreferencesRead:
+    return PreferencesRead(
+        llm_provider=current_user.preferred_llm_provider,
+        llm_model=current_user.preferred_llm_model,
+        stt_provider=current_user.preferred_stt_provider,
+        stt_model=current_user.preferred_stt_model,
+        stt_language=current_user.preferred_stt_language,
+    )
+
+
+@router.put("/preferences", response_model=PreferencesRead)
+async def save_preferences(
+    payload: PreferencesUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PreferencesRead:
+    """Only fields actually present in the request body are applied — a
+    sent `null` clears that override back to automatic, an omitted field is
+    left exactly as it was. `model_fields_set` (not just checking for
+    non-None) is what makes that distinction possible.
+    """
+    if "stt_provider" in payload.model_fields_set and payload.stt_provider not in (None, "deepgram", "whisper"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='stt_provider must be "deepgram", "whisper", or null',
+        )
+
+    field_map = {
+        "llm_provider": "preferred_llm_provider",
+        "llm_model": "preferred_llm_model",
+        "stt_provider": "preferred_stt_provider",
+        "stt_model": "preferred_stt_model",
+        "stt_language": "preferred_stt_language",
+    }
+    for payload_field, column in field_map.items():
+        if payload_field in payload.model_fields_set:
+            setattr(current_user, column, getattr(payload, payload_field))
+
+    await db.commit()
+    await db.refresh(current_user)
+    return PreferencesRead(
+        llm_provider=current_user.preferred_llm_provider,
+        llm_model=current_user.preferred_llm_model,
+        stt_provider=current_user.preferred_stt_provider,
+        stt_model=current_user.preferred_stt_model,
+        stt_language=current_user.preferred_stt_language,
     )

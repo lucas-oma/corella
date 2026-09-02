@@ -65,3 +65,31 @@ class AiOverview(BaseModel):
     language_model: LanguageModelOverview
     embeddings: EmbeddingsOverview
     diarization: DiarizationOverview
+
+
+class PreferencesRead(BaseModel):
+    """GET/PUT /api/settings/preferences — explicit overrides of the
+    otherwise-automatic provider/model resolution
+    (app/services/llm/resolve.py, app/services/asr/resolve.py). Every field
+    null means "keep the automatic behavior" — this is never required
+    reading, just an optional override.
+    """
+
+    llm_provider: LLMProvider | None
+    llm_model: str | None
+    stt_provider: str | None  # "deepgram" | "whisper" | None
+    stt_model: str | None
+    stt_language: str | None
+
+
+class PreferencesUpdate(BaseModel):
+    """Body for PUT /api/settings/preferences. Every field is optional and
+    explicitly nullable — send `null` for a field to clear that override
+    back to automatic; omit a field to leave it unchanged.
+    """
+
+    llm_provider: LLMProvider | None = None
+    llm_model: str | None = None
+    stt_provider: str | None = None
+    stt_model: str | None = None
+    stt_language: str | None = None

@@ -95,7 +95,9 @@ async def _resolve_and_maybe_transcribe_deepgram(owner_id: str, wav_path: str, w
     with open(wav_path, "rb") as f:
         wav_bytes = f.read()
     try:
-        segments = await deepgram.transcribe(wav_bytes, stt.model, stt.api_key, word_timestamps)
+        segments = await deepgram.transcribe(
+            wav_bytes, stt.model, stt.api_key, word_timestamps, language=stt.language
+        )
         return stt, segments
     except deepgram.SttError:
         logger.exception("Deepgram transcription failed for owner %s; falling back to local whisper", owner_id)

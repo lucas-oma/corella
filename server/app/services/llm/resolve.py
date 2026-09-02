@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.core.security import decrypt_secret
 from app.models.provider_credential import LLMProvider, ProviderCredential
+from app.models.user import User
 
 # No CallProfile UI yet (that model stays unused, as it already is today) —
 # a fixed priority order stands in for per-user/per-profile provider choice.
@@ -44,8 +45,45 @@ def _env_credential(provider: LLMProvider, settings: Settings) -> tuple[str | No
     return None, None
 
 
+def _resolve_one(
+    provider: LLMProvider,
+    user_credentials: dict[LLMProvider, ProviderCredential],
+    settings: Settings,
+    model_override: str | None = None,
+) -> ResolvedProvider | None:
+    """One provider's connection status, user-credential-first then env
+    fallback — None if neither is configured. Shared by the explicit-
+    preference check and the priority-order loop below so both apply the
+    exact same "is this provider actually usable" logic.
+    """
+    credential = user_credentials.get(provider)
+    if credential is not None:
+        api_key = (
+            decrypt_secret(credential.api_key_encrypted) if credential.api_key_encrypted else None
+        )
+        return ResolvedProvider(
+            provider=provider,
+            model=model_override or _default_model(provider, settings),
+            api_key=api_key,
+            base_url=credential.base_url,
+        )
+
+    env_api_key, env_base_url = _env_credential(provider, settings)
+    if env_api_key or env_base_url:
+        return ResolvedProvider(
+            provider=provider,
+            model=model_override or _default_model(provider, settings),
+            api_key=env_api_key,
+            base_url=env_base_url,
+        )
+
+    return None
+
+
 async def resolve_provider(db: AsyncSession, owner_id: UUID) -> ResolvedProvider | None:
-    """Picks the first connected provider in priority order — the user's
+    """Picks the user's explicit preference if they've set one and it's
+    actually connected (app/api/settings.py's preferences endpoints),
+    otherwise the first connected provider in priority order — the user's
     own saved credential first, falling back to the instance-wide .env
     value. Returns None if nothing is connected at all.
     """
@@ -58,28 +96,21 @@ async def resolve_provider(db: AsyncSession, owner_id: UUID) -> ResolvedProvider
         )
     }
 
-    for provider in _PRIORITY:
-        credential = user_credentials.get(provider)
-        if credential is not None:
-            api_key = (
-                decrypt_secret(credential.api_key_encrypted)
-                if credential.api_key_encrypted
-                else None
-            )
-            return ResolvedProvider(
-                provider=provider,
-                model=_default_model(provider, settings),
-                api_key=api_key,
-                base_url=credential.base_url,
-            )
+    user = await db.get(User, owner_id)
+    preferred = user.preferred_llm_provider if user else None
+    if preferred is not None:
+        resolved = _resolve_one(preferred, user_credentials, settings, user.preferred_llm_model)
+        if resolved is not None:
+            return resolved
+        # Preferred but not actually connected (no saved key, no env
+        # fallback) — fall through to auto rather than hard-failing, same
+        # graceful-degradation philosophy as every other resolution path in
+        # this codebase; a stale preference self-heals instead of blocking
+        # the copilot entirely.
 
-        env_api_key, env_base_url = _env_credential(provider, settings)
-        if env_api_key or env_base_url:
-            return ResolvedProvider(
-                provider=provider,
-                model=_default_model(provider, settings),
-                api_key=env_api_key,
-                base_url=env_base_url,
-            )
+    for provider in _PRIORITY:
+        resolved = _resolve_one(provider, user_credentials, settings)
+        if resolved is not None:
+            return resolved
 
     return None
