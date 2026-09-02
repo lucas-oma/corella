@@ -19,7 +19,9 @@ from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, Transcr
 from app.models.user import User
 from app.models.voice_identity import VoiceIdentity
 from app.services.alignment.align import align
-from app.services.asr.whisper import transcribe
+from app.services.asr import deepgram
+from app.services.asr.resolve import resolve_stt_provider
+from app.services.asr.whisper import transcribe as whisper_transcribe
 from app.services.audio.mixing import read_wav_pcm, slice_pcm, write_wav
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import parse_json_response
@@ -76,6 +78,30 @@ def _wav_duration_seconds(path: str) -> int:
         return round(wf.getnframes() / wf.getframerate())
 
 
+async def _resolve_and_maybe_transcribe_deepgram(owner_id: str, wav_path: str, word_timestamps: bool):
+    """Resolves which STT engine this owner should use, and — if it's
+    Deepgram — runs the actual transcription too, in the same short-lived
+    async session/call. Returns (ResolvedStt, segments-or-None); None
+    means "not Deepgram, or Deepgram failed" — the sync caller falls back
+    to local whisper.transcribe() either way, so a Deepgram outage never
+    breaks the meeting, same graceful-degradation spirit as the
+    diarization skip right next to this call site.
+    """
+    async with SessionLocal() as db:
+        stt = await resolve_stt_provider(db, UUID(owner_id))
+    if stt.provider != "deepgram":
+        return stt, None
+
+    with open(wav_path, "rb") as f:
+        wav_bytes = f.read()
+    try:
+        segments = await deepgram.transcribe(wav_bytes, stt.model, stt.api_key, word_timestamps)
+        return stt, segments
+    except deepgram.SttError:
+        logger.exception("Deepgram transcription failed for owner %s; falling back to local whisper", owner_id)
+        return stt, None
+
+
 @celery_app.task(name="corella.process_meeting_audio")
 def process_meeting_audio(meeting_id: str) -> None:
     with get_sync_db() as db:
@@ -92,7 +118,21 @@ def process_meeting_audio(meeting_id: str) -> None:
                 normalized_path = str(Path(tmp) / "normalized.wav")
                 _normalize_audio(meeting.audio_path, normalized_path)
 
-                whisper_segments = transcribe(normalized_path)
+                # Deepgram (if the owner has it configured) or local
+                # faster-whisper otherwise — see
+                # app/services/asr/resolve.py. Any Deepgram failure falls
+                # back to local Whisper rather than failing the meeting,
+                # same graceful-degradation spirit as the diarization skip
+                # right below.
+                _stt, asr_segments = asyncio.run(
+                    _with_engine_cleanup(
+                        _resolve_and_maybe_transcribe_deepgram(
+                            str(meeting.owner_id), normalized_path, word_timestamps=False
+                        )
+                    )
+                )
+                if asr_segments is None:
+                    asr_segments = whisper_transcribe(normalized_path)
 
                 diarization_turns = []
                 try:
@@ -105,7 +145,7 @@ def process_meeting_audio(meeting_id: str) -> None:
                         meeting_id,
                     )
 
-                aligned = align(whisper_segments, diarization_turns)
+                aligned = align(asr_segments, diarization_turns)
 
                 # First-seen diarization labels become per-meeting Speaker rows,
                 # in chronological order of first appearance.
@@ -683,7 +723,7 @@ def identify_speaker_name(meeting_id: str, speaker_id: str, embedding_json: str)
         )
 
 
-async def _with_engine_cleanup(coro) -> None:
+async def _with_engine_cleanup(coro):
     """asyncio.run() gives each call its own fresh event loop — but
     SessionLocal's async engine (app/core/db.py) is a module-level
     singleton whose connection pool holds asyncpg connections bound to
@@ -691,14 +731,15 @@ async def _with_engine_cleanup(coro) -> None:
     asyncio.run() call in the same long-lived worker process, that pooled
     connection is bound to a now-dead loop — reproduced live:
     "RuntimeError: ... attached to a different loop" (identify_speaker_name
-    was the first task to hit this; generate_report_task reuses the same
-    fix rather than re-discovering it). Disposing the engine's pool here,
-    at the end of every call (success or failure), means the next call
-    always opens fresh connections against the current loop instead of
-    reusing stale ones.
+    was the first task to hit this; every other asyncio.run()-based task
+    reuses the same fix rather than re-discovering it). Disposing the
+    engine's pool here, at the end of every call (success or failure),
+    means the next call always opens fresh connections against the
+    current loop instead of reusing stale ones. Returns whatever `coro`
+    returns — plain fire-and-forget callers just don't capture it.
     """
     try:
-        await coro
+        return await coro
     finally:
         await engine.dispose()
 

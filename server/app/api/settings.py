@@ -7,8 +7,21 @@ from app.core.config import Settings, get_settings
 from app.core.db import get_db
 from app.core.security import encrypt_secret
 from app.models.provider_credential import LLMProvider, ProviderCredential
+from app.models.stt_credential import SttCredential
 from app.models.user import User
-from app.schemas.settings import ProviderCredentialUpdate, ProviderStatus
+from app.services.asr.resolve import resolve_stt_provider
+from app.services.llm.resolve import resolve_provider
+from app.schemas.settings import (
+    AiOverview,
+    DiarizationOverview,
+    EmbeddingsOverview,
+    LanguageModelOverview,
+    ProviderCredentialUpdate,
+    ProviderStatus,
+    SttCredentialUpdate,
+    SttOverview,
+    SttStatus,
+)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -108,3 +121,95 @@ async def delete_provider_credential(
     if _env_configured(provider, settings):
         return ProviderStatus(provider=provider, connected=True, source="env")
     return ProviderStatus(provider=provider, connected=False, source=None)
+
+
+@router.get("/stt", response_model=SttStatus)
+async def stt_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SttStatus:
+    credential = await db.scalar(
+        select(SttCredential).where(SttCredential.owner_id == current_user.id)
+    )
+    if credential is not None:
+        return SttStatus(connected=True, source="user")
+    if get_settings().deepgram_api_key:
+        return SttStatus(connected=True, source="env")
+    return SttStatus(connected=False, source=None)
+
+
+@router.put("/stt", response_model=SttStatus)
+async def save_stt_credential(
+    payload: SttCredentialUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SttStatus:
+    credential = await db.scalar(
+        select(SttCredential).where(SttCredential.owner_id == current_user.id)
+    )
+    if credential is None:
+        credential = SttCredential(owner_id=current_user.id, api_key_encrypted="")
+        db.add(credential)
+
+    credential.api_key_encrypted = encrypt_secret(payload.api_key)
+    await db.commit()
+    return SttStatus(connected=True, source="user")
+
+
+@router.delete("/stt", response_model=SttStatus)
+async def delete_stt_credential(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SttStatus:
+    credential = await db.scalar(
+        select(SttCredential).where(SttCredential.owner_id == current_user.id)
+    )
+    if credential is not None:
+        await db.delete(credential)
+        await db.commit()
+
+    if get_settings().deepgram_api_key:
+        return SttStatus(connected=True, source="env")
+    return SttStatus(connected=False, source=None)
+
+
+@router.get("/ai-overview", response_model=AiOverview)
+async def ai_overview(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AiOverview:
+    """What's actually powering each part of the app right now, for this
+    user — computed from the same resolution functions the app itself
+    calls at runtime (resolve_stt_provider/resolve_provider), not
+    re-derived guesses. Embeddings/diarization are fixed, not
+    user-configurable, so those two rows are just informational.
+    """
+    settings = get_settings()
+
+    stt = await resolve_stt_provider(db, current_user.id)
+    llm = await resolve_provider(db, current_user.id)
+
+    llm_source = None
+    if llm is not None:
+        has_user_credential = await db.scalar(
+            select(ProviderCredential.id).where(
+                ProviderCredential.owner_id == current_user.id,
+                ProviderCredential.provider == llm.provider,
+            )
+        )
+        llm_source = "user" if has_user_credential else "env"
+
+    return AiOverview(
+        speech_to_text=SttOverview(active=stt.provider, model=stt.model, source=stt.source),
+        language_model=LanguageModelOverview(
+            active=llm.provider if llm else None,
+            model=llm.model if llm else None,
+            source=llm_source,
+        ),
+        embeddings=EmbeddingsOverview(model=settings.embedding_model),
+        diarization=DiarizationOverview(
+            pipeline="pyannote/speaker-diarization-3.1",
+            speaker_embedding="pyannote/wespeaker-voxceleb-resnet34-LM",
+            available=bool(settings.hf_token),
+        ),
+    )

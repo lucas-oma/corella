@@ -4,6 +4,7 @@ from app.models.group import Group
 from app.models.kb_document import KBDocument
 from app.models.meeting import ActionItem, Meeting, Note, Speaker, TranscriptSegment
 from app.models.provider_credential import ProviderCredential
+from app.models.stt_credential import SttCredential
 from app.models.user import User
 from app.models.voice_identity import VoiceIdentity
 
@@ -20,4 +21,5 @@ __all__ = [
     "ProviderCredential",
     "LLMUsageEvent",
     "VoiceIdentity",
+    "SttCredential",
 ]

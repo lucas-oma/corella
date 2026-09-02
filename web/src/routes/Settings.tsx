@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type ProviderStatus } from "@/lib/api";
+import { ApiError, api, type AiOverview, type ProviderStatus, type SttStatus } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { type CaptureHandle, pcmToWavBlob, startCapture } from "@/lib/live";
 
@@ -27,6 +27,8 @@ function statusLabel(status: ProviderStatus): string {
 export default function Settings() {
   const { user, refreshUser } = useAuth();
   const [providers, setProviders] = useState<ProviderStatus[] | null>(null);
+  const [sttStatus, setSttStatus] = useState<SttStatus | null>(null);
+  const [aiOverview, setAiOverview] = useState<AiOverview | null>(null);
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +45,8 @@ export default function Settings() {
 
   useEffect(() => {
     api.getProviderStatus().then(setProviders);
+    api.getSttStatus().then(setSttStatus);
+    api.getAiOverview().then(setAiOverview);
   }, []);
 
   useEffect(() => {
@@ -158,6 +162,35 @@ export default function Settings() {
     try {
       const next = await api.removeProviderCredential(provider);
       updateStatus(next);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't remove");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onSaveStt() {
+    const value = inputs.stt?.trim();
+    if (!value) return;
+    setError(null);
+    setBusy("stt");
+    try {
+      setSttStatus(await api.saveSttCredential(value));
+      setInputs((prev) => ({ ...prev, stt: "" }));
+      api.getAiOverview().then(setAiOverview);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't save");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onRemoveStt() {
+    setError(null);
+    setBusy("stt");
+    try {
+      setSttStatus(await api.removeSttCredential());
+      api.getAiOverview().then(setAiOverview);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't remove");
     } finally {
@@ -309,6 +342,108 @@ export default function Settings() {
             );
           })}
         </ul>
+      </section>
+
+      <section className="card mt-6 p-6">
+        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Speech-to-text</h2>
+        <p className="mt-1 text-sm text-ink-muted">
+          Local faster-whisper is always the default, zero-config — connecting Deepgram here
+          switches transcription (both live and uploaded recordings) to it whenever it's reachable,
+          falling back to local automatically if it isn't.
+        </p>
+        {sttStatus === null ? (
+          <p className="mt-5 text-sm text-ink-muted">Loading…</p>
+        ) : (
+          <div className="mt-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-ink dark:text-ink-inverted">Deepgram</p>
+                <p className="text-xs text-ink-subtle">Cloud speech-to-text via your own API key</p>
+              </div>
+              <span
+                className={`rounded-sm border px-2 py-0.5 text-xs ${
+                  sttStatus.connected
+                    ? "border-status-success/30 text-status-success"
+                    : "border-border text-ink-subtle dark:border-border-dark"
+                }`}
+              >
+                {!sttStatus.connected
+                  ? "Not connected"
+                  : sttStatus.source === "env"
+                    ? "Connected via .env"
+                    : "Connected"}
+              </span>
+            </div>
+
+            {sttStatus.source === "user" ? (
+              <div className="mt-2">
+                <button
+                  onClick={onRemoveStt}
+                  disabled={busy === "stt"}
+                  className="text-xs text-ink-subtle hover:text-status-danger"
+                >
+                  {busy === "stt" ? "Removing…" : "Remove your key"}
+                </button>
+              </div>
+            ) : (
+              <div className="mt-2 flex gap-2">
+                <input
+                  type="password"
+                  placeholder="API key"
+                  value={inputs.stt ?? ""}
+                  onChange={(e) => setInputs((prev) => ({ ...prev, stt: e.target.value }))}
+                  className="field flex-1 text-sm"
+                />
+                <button
+                  onClick={onSaveStt}
+                  disabled={busy === "stt" || !inputs.stt?.trim()}
+                  className="btn-secondary shrink-0"
+                >
+                  {busy === "stt" ? "Saving…" : "Save"}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="card mt-6 p-6">
+        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">AI models in use</h2>
+        <p className="mt-1 text-sm text-ink-muted">
+          What's actually powering each part of the app for your account right now.
+        </p>
+        {aiOverview === null ? (
+          <p className="mt-5 text-sm text-ink-muted">Loading…</p>
+        ) : (
+          <ul className="mt-5 space-y-3">
+            <li className="flex items-center justify-between">
+              <p className="text-sm text-ink dark:text-ink-inverted">Speech-to-text</p>
+              <p className="text-right text-xs text-ink-subtle">
+                {aiOverview.speech_to_text.active === "deepgram" ? "Deepgram" : "Local (faster-whisper)"}
+                {" · "}
+                {aiOverview.speech_to_text.model}
+              </p>
+            </li>
+            <li className="flex items-center justify-between">
+              <p className="text-sm text-ink dark:text-ink-inverted">Copilot / reports</p>
+              <p className="text-right text-xs text-ink-subtle">
+                {aiOverview.language_model.active
+                  ? `${aiOverview.language_model.active} · ${aiOverview.language_model.model}`
+                  : "Not connected"}
+              </p>
+            </li>
+            <li className="flex items-center justify-between">
+              <p className="text-sm text-ink dark:text-ink-inverted">Knowledge base / meeting search</p>
+              <p className="text-right text-xs text-ink-subtle">{aiOverview.embeddings.model}</p>
+            </li>
+            <li className="flex items-center justify-between">
+              <p className="text-sm text-ink dark:text-ink-inverted">Speaker diarization</p>
+              <p className="text-right text-xs text-ink-subtle">
+                {aiOverview.diarization.available ? aiOverview.diarization.pipeline : "Not configured (needs HF_TOKEN)"}
+              </p>
+            </li>
+          </ul>
+        )}
       </section>
     </AppShell>
   );

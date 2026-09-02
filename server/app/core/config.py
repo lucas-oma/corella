@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     whisper_model: str = "small"
     whisper_compute_type: str = "int8"  # CPU-friendly default
 
+    # Optional cloud STT — instance-wide fallback used when a user hasn't
+    # saved their own key via PUT /api/settings/stt. Local faster-whisper
+    # above is always the zero-config default either way; this is strictly
+    # an opt-in enhancement (see app/services/asr/resolve.py).
+    deepgram_api_key: str | None = None
+    default_model_deepgram: str = "nova-2"
+
     # CORS
     cors_origins: list[str] = ["http://localhost:5173"]
 

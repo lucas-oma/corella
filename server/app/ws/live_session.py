@@ -16,7 +16,10 @@ from app.core.db import SessionLocal
 from app.core.security import decode_access_token
 from app.models.meeting import Channel, Meeting, MeetingStatus, TranscriptSegment
 from app.models.user import User
-from app.services.asr.whisper import transcribe, warm_up
+from app.services.asr import deepgram
+from app.services.asr.resolve import ResolvedStt, resolve_stt_provider
+from app.services.asr.whisper import transcribe as whisper_transcribe
+from app.services.asr.whisper import warm_up
 from app.services.audio.mixing import extract_channel_window, mix_channel_recordings, write_wav
 from app.services.copilot.live import run_cycle as run_copilot_cycle
 from app.services.diarization import events as diar_events
@@ -67,10 +70,17 @@ class LiveSession:
     blocked *all* further messages, including `stop`, from being processed.
     """
 
-    def __init__(self, meeting_id: UUID, owner_id: UUID, provider: ResolvedProvider | None):
+    def __init__(
+        self,
+        meeting_id: UUID,
+        owner_id: UUID,
+        provider: ResolvedProvider | None,
+        stt: ResolvedStt,
+    ):
         self.meeting_id = meeting_id
         self.owner_id = owner_id
         self.provider = provider
+        self.stt = stt
         self._start = time.monotonic()
         settings = get_settings()
         self.detectors = {
@@ -135,13 +145,18 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         meeting.started_at = datetime.now(timezone.utc)
         await db.commit()
         provider = await resolve_provider(db, user.id)
+        stt = await resolve_stt_provider(db, user.id)
 
-    # Load the model *before* saying "ready" — better a few extra seconds of
-    # "Connecting…" on first use than a session that looks live but silently
-    # stalls partway through waiting on a cold model load.
+    # Load the local model *before* saying "ready" regardless of which STT
+    # engine is preferred — better a few extra seconds of "Connecting…" on
+    # first use than a session that looks live but silently stalls partway
+    # through waiting on a cold model load. Kept warm even when Deepgram is
+    # preferred: a per-utterance Deepgram failure falls back to local
+    # whisper for that utterance (see _transcribe_pcm), so it needs to
+    # already be ready, not cold-loading mid-call.
     await asyncio.get_running_loop().run_in_executor(None, warm_up)
 
-    session = LiveSession(meeting_id, user.id, provider)
+    session = LiveSession(meeting_id, user.id, provider, stt)
     consumer_task = asyncio.create_task(_consume_utterances(websocket, session))
     diarization_poll_task = asyncio.create_task(_poll_diarization_updates(websocket, session))
 
@@ -349,7 +364,7 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
     # this WS path (_CHANNEL_BY_BYTE only maps 0/1 to ME/THEM), deliberately
     # excluded rather than assuming every channel needs it.
     needs_diarization = utterance.channel in (Channel.ME, Channel.THEM)
-    text, words = await _transcribe_pcm(utterance.pcm, word_timestamps=needs_diarization)
+    text, words = await _transcribe_pcm(utterance.pcm, session.stt, word_timestamps=needs_diarization)
     if not text:
         return False
 
@@ -415,20 +430,58 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
     return True
 
 
-async def _transcribe_pcm(pcm: bytes, word_timestamps: bool = False) -> tuple[str, list]:
+async def _transcribe_pcm(pcm: bytes, stt: ResolvedStt, word_timestamps: bool = False) -> tuple[str, list]:
+    """Deepgram (if resolved for this session) or local faster-whisper —
+    see app/services/asr/resolve.py. A Deepgram failure mid-session falls
+    back to local whisper for *that* utterance rather than dropping it,
+    same graceful-degradation spirit as the upload path's equivalent
+    fallback (app/workers/tasks.py:_resolve_and_maybe_transcribe_deepgram).
+    """
+    if stt.provider == "deepgram":
+        try:
+            segments = await deepgram.transcribe(_wav_bytes(pcm), stt.model, stt.api_key, word_timestamps)
+            return _segments_to_text_words(segments)
+        except deepgram.SttError:
+            logger.exception(
+                "Deepgram live transcription failed; falling back to local whisper for this utterance"
+            )
+    return await _transcribe_pcm_whisper(pcm, word_timestamps)
+
+
+async def _transcribe_pcm_whisper(pcm: bytes, word_timestamps: bool) -> tuple[str, list]:
     def _run() -> tuple[str, list]:
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         try:
             write_wav(path, pcm)
-            segments = transcribe(path, word_timestamps=word_timestamps)
-            text = " ".join(s.text for s in segments).strip()
-            words = [w for s in segments for w in s.words]
-            return text, words
+            segments = whisper_transcribe(path, word_timestamps=word_timestamps)
+            return _segments_to_text_words(segments)
         finally:
             os.unlink(path)
 
     return await asyncio.get_running_loop().run_in_executor(None, _run)
+
+
+def _segments_to_text_words(segments) -> tuple[str, list]:
+    text = " ".join(s.text for s in segments).strip()
+    words = [w for s in segments for w in s.words]
+    return text, words
+
+
+def _wav_bytes(pcm: bytes) -> bytes:
+    """Deepgram's REST API takes a real audio payload, not raw PCM — a
+    small, fast (milliseconds, not the multi-second cost transcription
+    itself has) file round-trip reusing the same write_wav() every other
+    audio path already writes through.
+    """
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        write_wav(path, pcm)
+        with open(path, "rb") as f:
+            return f.read()
+    finally:
+        os.unlink(path)
 
 
 def _duration_ms(pcm: bytes, sample_rate: int = SAMPLE_RATE) -> int:

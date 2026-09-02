@@ -158,6 +158,22 @@ export interface ProviderStatus {
   source: "user" | "env" | null;
 }
 
+export interface SttStatus {
+  connected: boolean;
+  source: "user" | "env" | null;
+}
+
+export interface AiOverview {
+  speech_to_text: { active: "deepgram" | "whisper"; model: string; source: "user" | "env" | "local" };
+  language_model: {
+    active: ProviderStatus["provider"] | null;
+    model: string | null;
+    source: "user" | "env" | null;
+  };
+  embeddings: { model: string };
+  diarization: { pipeline: string; speaker_embedding: string; available: boolean };
+}
+
 export interface MeetingSearchResult {
   meeting_id: string;
   title: string;
@@ -276,6 +292,11 @@ export const api = {
     }),
   removeProviderCredential: (provider: ProviderStatus["provider"]) =>
     request<ProviderStatus>(`/api/settings/providers/${provider}`, { method: "DELETE" }),
+  getSttStatus: () => request<SttStatus>("/api/settings/stt"),
+  saveSttCredential: (apiKey: string) =>
+    request<SttStatus>("/api/settings/stt", { method: "PUT", body: JSON.stringify({ api_key: apiKey }) }),
+  removeSttCredential: () => request<SttStatus>("/api/settings/stt", { method: "DELETE" }),
+  getAiOverview: () => request<AiOverview>("/api/settings/ai-overview"),
   listKBDocuments: () => request<KBDocument[]>("/api/kb/documents"),
   uploadKBDocument: (file: File) => {
     const form = new FormData();
