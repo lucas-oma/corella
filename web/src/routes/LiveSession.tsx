@@ -13,10 +13,13 @@ import {
 
 type ConnectionState = "connecting" | "connected" | "error";
 
-// Same-room speaker labels arrive live, after the fact, once a second
-// distinct voice on the "Me" channel is confirmed (see _poll_speaker_labels
-// server-side) — a small stable color per speaker number helps them read as
-// distinct people at a glance rather than just more text.
+// Speaker labels arrive live, after the fact, once a second distinct voice
+// is confirmed *on that channel* — "Me" (one mic, possibly several people
+// around it) and "Them" (one shared tab/system-audio track, possibly
+// several remote participants) gate and label independently, see
+// app/services/diarization/cluster.py. A small stable color per speaker
+// number helps them read as distinct people at a glance rather than just
+// more text.
 const SPEAKER_DOT_COLORS = ["bg-accent", "bg-status-success", "bg-status-danger", "bg-ink-subtle"];
 
 function speakerDotColor(label: string): string {
@@ -48,12 +51,14 @@ export default function LiveSession() {
     transcriptEndRef.current?.scrollIntoView({ block: "end" });
   }, [transcript]);
 
-  // A same-room speaker change mid-utterance means the server deletes the
-  // one coarse "Me" bubble it first sent and replaces it with several
-  // speaker-labeled ones — removedSegmentIds/segments is always a complete,
-  // correct diff (accumulated server-side across the whole meeting, not
-  // just this event), so removal + upsert here doesn't need to special-case
-  // the first-time "snapshot" backfill vs. a later incremental update.
+  // A speaker change mid-utterance means the server deletes the one coarse
+  // bubble it first sent (on whichever channel it was) and replaces it with
+  // several speaker-labeled ones — removedSegmentIds/segments is always a
+  // complete, correct diff (accumulated server-side across the whole
+  // meeting, not just this event), so removal + upsert here doesn't need to
+  // special-case the first-time "snapshot" backfill vs. a later incremental
+  // update. seg.channel (not a hardcoded "me") is what keeps a Them-side
+  // split rendering as a Them bubble, not a Me one.
   function applyDiarizationUpdate(event: DiarizationUpdateEvent) {
     setSpeakerLabels((prev) => {
       const next = { ...prev };
@@ -66,7 +71,7 @@ export default function LiveSession() {
       for (const seg of event.segments) {
         byId.set(seg.id, {
           id: seg.id,
-          channel: "me",
+          channel: seg.channel,
           start_ms: seg.start_ms,
           end_ms: seg.end_ms,
           text: seg.text,

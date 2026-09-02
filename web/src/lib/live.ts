@@ -21,6 +21,7 @@ export interface CopilotEvent {
 
 export interface DiarizedSegment {
   id: string;
+  channel: LiveChannel;
   start_ms: number;
   end_ms: number;
   text: string;
@@ -28,10 +29,11 @@ export interface DiarizedSegment {
 }
 
 export interface DiarizationUpdateEvent {
-  /** True the first time 2+ distinct same-room speakers are confirmed for
-   * this meeting: a full authoritative snapshot of every labeled "Me"
-   * segment so far, not just this cycle's change (an earlier speaker-change
-   * split could have happened before anything was ever reported). */
+  /** True the first time 2+ distinct speakers are confirmed *on one
+   * channel* (Me and Them gate independently): a full authoritative
+   * snapshot of every labeled segment on that channel so far, not just
+   * this cycle's change (an earlier speaker-change split could have
+   * happened before anything was ever reported on that channel). */
   isSnapshot: boolean;
   removedSegmentIds: string[];
   segments: DiarizedSegment[];

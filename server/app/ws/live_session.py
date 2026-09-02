@@ -343,8 +343,13 @@ async def _run_copilot_and_send(websocket: WebSocket, session: LiveSession) -> N
 
 
 async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utterance: _Utterance) -> bool:
-    is_me = utterance.channel == Channel.ME
-    text, words = await _transcribe_pcm(utterance.pcm, word_timestamps=is_me)
+    # Both Me (one mic, possibly several people around it) and Them (one
+    # shared tab/system-audio track, possibly several remote participants)
+    # get live diarization — Channel.UNKNOWN, never actually reachable from
+    # this WS path (_CHANNEL_BY_BYTE only maps 0/1 to ME/THEM), deliberately
+    # excluded rather than assuming every channel needs it.
+    needs_diarization = utterance.channel in (Channel.ME, Channel.THEM)
+    text, words = await _transcribe_pcm(utterance.pcm, word_timestamps=needs_diarization)
     if not text:
         return False
 
@@ -362,17 +367,23 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
         await db.commit()
         await db.refresh(row)
 
-    if is_me:
-        # Same-room diarization: fire-and-forget, never delays the
-        # transcript itself. See app/workers/tasks.py:diarize_utterance and
+    if needs_diarization:
+        # Live diarization: fire-and-forget, never delays the transcript
+        # itself. See app/workers/tasks.py:diarize_utterance and
         # _poll_diarization_updates below for how a label eventually comes
         # back. The dispatched audio is a wider window of already-received
-        # "Me" audio, not just this utterance — diarize()'s pipeline needs
-        # several seconds of context to reliably place a speaker-change
-        # point (verified empirically: unreliable well under ~10s).
+        # audio on *this utterance's own channel*, not just this utterance
+        # — diarize()'s pipeline needs several seconds of context to
+        # reliably place a speaker-change point (verified empirically:
+        # unreliable well under ~10s). session.recordings already
+        # accumulates both channels regardless (needed for the final
+        # mixdown either way), so this is just reading the matching one.
         settings = get_settings()
         window_start_ms = max(0, utterance.end_ms - settings.diarization_context_window_ms)
-        window_pcm = extract_channel_window(session.recordings["me"], window_start_ms, utterance.end_ms)
+        channel_key = _CHANNEL_KEY[utterance.channel]
+        window_pcm = extract_channel_window(
+            session.recordings[channel_key], window_start_ms, utterance.end_ms
+        )
         celery_app.send_task(
             "corella.diarize_utterance",
             args=[

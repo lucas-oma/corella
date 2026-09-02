@@ -7,6 +7,7 @@ import numpy as np
 import redis
 
 from app.core.config import get_settings
+from app.models.meeting import Channel
 
 # Verified against pyannote/wespeaker-voxceleb-resnet34-LM using real
 # recorded conversation (not synthetic TTS, which this model doesn't
@@ -40,16 +41,20 @@ class Cluster:
 
 
 @contextmanager
-def locked_state(meeting_id: UUID):
-    """Per-meeting lock around one read-decide-write cycle of online speaker
-    clustering — without it, two utterances dispatched close together could
-    both see no matching cluster and both decide "new speaker" for what's
-    actually the same one. Yields a mutable list[Cluster]; mutate it in
-    place, it's saved back to Redis when the block exits.
+def locked_state(meeting_id: UUID, channel: Channel):
+    """Per-meeting-per-channel lock around one read-decide-write cycle of
+    online speaker clustering — without it, two utterances dispatched close
+    together could both see no matching cluster and both decide "new
+    speaker" for what's actually the same one. Scoped by channel (not just
+    meeting) so a "Me" voice and a "Them" voice never get clustered against
+    each other's centroids — Me and Them are unrelated pools of people, one
+    a local mic capture, the other a shared tab/system-audio track. Yields
+    a mutable list[Cluster]; mutate it in place, it's saved back to Redis
+    when the block exits.
     """
     r = _redis()
-    key = f"diar:{meeting_id}"
-    with r.lock(f"diar-lock:{meeting_id}", timeout=10):
+    key = f"diar:{meeting_id}:{channel.value}"
+    with r.lock(f"diar-lock:{meeting_id}:{channel.value}", timeout=10):
         raw = r.get(key)
         clusters = [Cluster(**c) for c in json.loads(raw)] if raw else []
         yield clusters

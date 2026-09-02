@@ -183,16 +183,30 @@ def _merge_adjacent_same_speaker(turns: list) -> list[tuple[float, float, str]]:
     return merged
 
 
-def _cluster_and_assign(db, meeting: Meeting, clusters: list[Cluster], embedding) -> str:
+_SPEAKER_LABEL_FORMAT = {
+    # "Speaker N" is the original, already-shipped Me-side format —
+    # unchanged, so nothing that already depends on it (frontend dot-color
+    # parsing, existing meetings' persisted labels) breaks. Them gets its
+    # own distinct prefix, not the same "Speaker N": MeetingDetail.tsx lists
+    # every segment's speaker_label in one flat list with no channel
+    # column, so two unrelated people (one from each pool) both reading as
+    # "Speaker 1" would be a real, avoidable ambiguity.
+    Channel.ME: "Speaker {n}",
+    Channel.THEM: "Them {n}",
+}
+
+
+def _cluster_and_assign(db, meeting: Meeting, clusters: list[Cluster], embedding, channel: Channel) -> str:
     """One pre-computed embedding -> one clustering decision -> that
     cluster's Speaker.label. Shared by both the simple (no-split) and split
     paths below. Takes an embedding, not raw PCM: extraction is slow on a
     cold model load (the first call in a worker process), and this runs
-    inside the per-meeting Redis lock (locked_state) — embedding *before*
-    acquiring the lock, not during, is what keeps that lock's hold time
-    short (verified this mattered: a cold-start extraction held inside the
-    lock outlasted its 10s timeout, so the lock auto-expired mid-hold and
-    releasing it at the end raised redis.exceptions.LockNotOwnedError)."""
+    inside the per-meeting-per-channel Redis lock (locked_state) —
+    embedding *before* acquiring the lock, not during, is what keeps that
+    lock's hold time short (verified this mattered: a cold-start extraction
+    held inside the lock outlasted its 10s timeout, so the lock
+    auto-expired mid-hold and releasing it at the end raised
+    redis.exceptions.LockNotOwnedError)."""
     idx, similarity = best_match(clusters, embedding)
     if idx is not None and similarity >= SIMILARITY_THRESHOLD:
         cluster = clusters[idx]
@@ -202,8 +216,8 @@ def _cluster_and_assign(db, meeting: Meeting, clusters: list[Cluster], embedding
         speaker = Speaker(
             owner_id=meeting.owner_id,
             meeting_id=meeting.id,
-            label=f"Speaker {len(clusters) + 1}",
-            channel=Channel.ME,
+            label=_SPEAKER_LABEL_FORMAT[channel].format(n=len(clusters) + 1),
+            channel=channel,
         )
         db.add(speaker)
         db.flush()  # assign speaker.id before the cluster references it
@@ -214,6 +228,7 @@ def _cluster_and_assign(db, meeting: Meeting, clusters: list[Cluster], embedding
 def _segment_payload(segment: TranscriptSegment, speaker_label: str) -> dict:
     return {
         "id": str(segment.id),
+        "channel": segment.channel.value,
         "start_ms": segment.start_ms,
         "end_ms": segment.end_ms,
         "text": segment.text,
@@ -298,6 +313,10 @@ def diarize_utterance(
         segment = db.get(TranscriptSegment, UUID(segment_id))
         if meeting is None or segment is None:
             return
+        # Read off the segment itself, not passed as a task arg — can't
+        # drift from the real value. Captured before any possible deletion
+        # below (the split path deletes `segment`).
+        channel = segment.channel
 
         # Embedding extraction happens here, before the per-meeting lock
         # below is acquired — it's the slow part (a cold model load can take
@@ -328,11 +347,11 @@ def diarize_utterance(
             whole_embedding = embed_utterance(pcm)
 
         try:
-            with locked_state(meeting.id) as clusters:
+            with locked_state(meeting.id, channel) as clusters:
                 resulting: list[tuple[TranscriptSegment, str]] = []
 
                 if not did_split:
-                    speaker = _cluster_and_assign(db, meeting, clusters, whole_embedding)
+                    speaker = _cluster_and_assign(db, meeting, clusters, whole_embedding, channel)
                     # Assign the relationship object, not just the FK column
                     # — segment.speaker was already loaded (as None) when it
                     # was fetched above, and setting speaker_id alone doesn't
@@ -344,11 +363,11 @@ def diarize_utterance(
                 else:
                     base_start_ms = segment.start_ms
                     for rel_start, rel_end, text, embedding in split_turns:
-                        speaker = _cluster_and_assign(db, meeting, clusters, embedding)
+                        speaker = _cluster_and_assign(db, meeting, clusters, embedding, channel)
                         new_row = TranscriptSegment(
                             meeting_id=meeting.id,
                             speaker_id=speaker.id,
-                            channel=Channel.ME,
+                            channel=channel,
                             start_ms=base_start_ms + round(rel_start * 1000),
                             end_ms=base_start_ms + round(rel_end * 1000),
                             text=text,
@@ -360,21 +379,22 @@ def diarize_utterance(
                     # Recorded regardless of whether the gate is open yet —
                     # if it opens later, the backfill snapshot below still
                     # needs to know this id is gone, not just future ones.
-                    diar_events.record_removed(meeting.id, str(segment.id))
+                    diar_events.record_removed(meeting.id, str(segment.id), channel)
 
                 db.flush()  # assign ids to any new rows before building the WS payload
 
                 if len(clusters) >= 2:
-                    if not diar_events.has_reported_anything(meeting.id):
-                        # First time the gate has ever opened for this meeting —
-                        # a full authoritative snapshot, not an incremental diff,
-                        # so the frontend can't miss an earlier split that
-                        # happened before anything was ever reported.
+                    if not diar_events.has_reported_anything(meeting.id, channel):
+                        # First time the gate has ever opened for this
+                        # meeting *on this channel* — a full authoritative
+                        # snapshot, not an incremental diff, so the frontend
+                        # can't miss an earlier split that happened before
+                        # anything was ever reported on this channel.
                         all_labeled = list(
                             db.scalars(
                                 select(TranscriptSegment).where(
                                     TranscriptSegment.meeting_id == meeting.id,
-                                    TranscriptSegment.channel == Channel.ME,
+                                    TranscriptSegment.channel == channel,
                                     TranscriptSegment.speaker_id.is_not(None),
                                 )
                             )
@@ -385,10 +405,11 @@ def diarize_utterance(
                             {
                                 "type": "diarization_update",
                                 "is_snapshot": True,
-                                "removed_segment_ids": diar_events.all_removed(meeting.id),
+                                "removed_segment_ids": diar_events.all_removed(meeting.id, channel),
                                 "segments": payload,
                             },
                             [str(s.id) for s in all_labeled],
+                            channel,
                         )
                     else:
                         payload = [_segment_payload(s, label) for s, label in resulting]
@@ -402,6 +423,7 @@ def diarize_utterance(
                                 "segments": payload,
                             },
                             [str(s.id) for s, _ in resulting],
+                            channel,
                         )
             db.commit()
         except Exception:
