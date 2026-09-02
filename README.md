@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="web/src/assets/logo-dark.svg" />
+    <img alt="Corella" src="web/src/assets/logo-light.svg" height="72" />
+  </picture>
+</p>
+
 # Corella
 
 A self-hosted meeting assistant: it records a call from your browser, transcribes and speaker-labels it, keeps a live AI copilot grounded in your own documents, and turns the call into a searchable transcript plus a post-call summary and coaching report. Runs entirely on your own Linux box via Docker Compose — your own database, your own vector store, and (optionally) your own local LLM, with no required cloud dependency beyond whichever hosted LLM provider you choose to connect.
