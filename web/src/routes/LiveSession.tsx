@@ -5,6 +5,7 @@ import AppShell from "@/components/AppShell";
 import {
   type CaptureHandle,
   type CopilotEvent,
+  type DiarizationUpdateEvent,
   LiveSessionClient,
   type TranscriptEvent,
   startCapture,
@@ -41,6 +42,39 @@ export default function LiveSession() {
   const micCaptureRef = useRef<CaptureHandle | null>(null);
   const themCaptureRef = useRef<CaptureHandle | null>(null);
   const streamsRef = useRef<MediaStream[]>([]);
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ block: "end" });
+  }, [transcript]);
+
+  // A same-room speaker change mid-utterance means the server deletes the
+  // one coarse "Me" bubble it first sent and replaces it with several
+  // speaker-labeled ones — removedSegmentIds/segments is always a complete,
+  // correct diff (accumulated server-side across the whole meeting, not
+  // just this event), so removal + upsert here doesn't need to special-case
+  // the first-time "snapshot" backfill vs. a later incremental update.
+  function applyDiarizationUpdate(event: DiarizationUpdateEvent) {
+    setSpeakerLabels((prev) => {
+      const next = { ...prev };
+      for (const seg of event.segments) next[seg.id] = seg.speaker_label;
+      return next;
+    });
+    setTranscript((prev) => {
+      const removed = new Set(event.removedSegmentIds);
+      const byId = new Map(prev.filter((s) => !removed.has(s.id)).map((s) => [s.id, s]));
+      for (const seg of event.segments) {
+        byId.set(seg.id, {
+          id: seg.id,
+          channel: "me",
+          start_ms: seg.start_ms,
+          end_ms: seg.end_ms,
+          text: seg.text,
+        });
+      }
+      return Array.from(byId.values()).sort((a, b) => a.start_ms - b.start_ms);
+    });
+  }
 
   useEffect(() => {
     if (!meetingId) return;
@@ -52,8 +86,7 @@ export default function LiveSession() {
       client.onTranscript = (event) => setTranscript((prev) => [...prev, event]);
       client.onCopilot = (event) => setCopilot(event);
       client.onCopilotUnavailable = () => setCopilotAvailable(false);
-      client.onSpeakerLabeled = (event) =>
-        setSpeakerLabels((prev) => ({ ...prev, [event.segment_id]: event.speaker_label }));
+      client.onDiarizationUpdate = (event) => applyDiarizationUpdate(event);
       client.onError = (message) => setError(message);
       client.onStopped = () => navigate(`/meetings/${meetingId}`);
 
@@ -160,7 +193,7 @@ export default function LiveSession() {
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
-        <div className="card min-h-[300px] space-y-3 p-6">
+        <div className="card flex h-[70vh] flex-col space-y-3 overflow-y-auto p-6">
           {transcript.length === 0 && (
             <p className="text-sm text-ink-muted">Say something — your words will appear here.</p>
           )}
@@ -191,6 +224,7 @@ export default function LiveSession() {
               </div>
             );
           })}
+          <div ref={transcriptEndRef} />
         </div>
 
         <div className="card h-fit space-y-5 p-5">

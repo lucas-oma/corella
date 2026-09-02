@@ -1,16 +1,22 @@
 import base64
+import json
 import logging
+import os
 import subprocess
 import tempfile
 import wave
 from pathlib import Path
 from uuid import UUID
 
+from sqlalchemy import select
+
 from app.core.db import get_sync_db
 from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.services.alignment.align import align
 from app.services.asr.whisper import transcribe
+from app.services.audio.mixing import slice_pcm, write_wav
+from app.services.diarization import events as diar_events
 from app.services.diarization.cluster import (
     SIMILARITY_THRESHOLD,
     Cluster,
@@ -20,6 +26,7 @@ from app.services.diarization.cluster import (
 )
 from app.services.diarization.embedding import embed_utterance
 from app.services.diarization.pyannote import DiarizationUnavailable, diarize
+from app.services.diarization.text_split import words_in_range
 from app.services.embeddings.chunking import chunk_text
 from app.services.embeddings.embed import embed_texts
 from app.services.embeddings.extract import extract_text
@@ -154,24 +161,129 @@ def process_kb_document(document_id: str) -> None:
             db.commit()
 
 
+def _merge_adjacent_same_speaker(turns: list) -> list[tuple[float, float, str]]:
+    """diarize() can return several short turns for one continuous person
+    (a brief internal pause isn't a speaker change) — collapse consecutive
+    same-label turns into one span before deciding how many segments this
+    utterance actually needs."""
+    merged: list[tuple[float, float, str]] = []
+    for t in turns:
+        if merged and merged[-1][2] == t.speaker:
+            merged[-1] = (merged[-1][0], t.end, t.speaker)
+        else:
+            merged.append((t.start, t.end, t.speaker))
+    return merged
+
+
+def _cluster_and_assign(db, meeting: Meeting, clusters: list[Cluster], embedding) -> str:
+    """One pre-computed embedding -> one clustering decision -> that
+    cluster's Speaker.label. Shared by both the simple (no-split) and split
+    paths below. Takes an embedding, not raw PCM: extraction is slow on a
+    cold model load (the first call in a worker process), and this runs
+    inside the per-meeting Redis lock (locked_state) — embedding *before*
+    acquiring the lock, not during, is what keeps that lock's hold time
+    short (verified this mattered: a cold-start extraction held inside the
+    lock outlasted its 10s timeout, so the lock auto-expired mid-hold and
+    releasing it at the end raised redis.exceptions.LockNotOwnedError)."""
+    idx, similarity = best_match(clusters, embedding)
+    if idx is not None and similarity >= SIMILARITY_THRESHOLD:
+        cluster = clusters[idx]
+        update_centroid(cluster, embedding)
+        speaker = db.get(Speaker, UUID(cluster.speaker_id))
+    else:
+        speaker = Speaker(
+            owner_id=meeting.owner_id,
+            meeting_id=meeting.id,
+            label=f"Speaker {len(clusters) + 1}",
+            channel=Channel.ME,
+        )
+        db.add(speaker)
+        db.flush()  # assign speaker.id before the cluster references it
+        clusters.append(Cluster(centroid=embedding.tolist(), count=1, speaker_id=str(speaker.id)))
+    return speaker
+
+
+def _segment_payload(segment: TranscriptSegment, speaker_label: str) -> dict:
+    return {
+        "id": str(segment.id),
+        "start_ms": segment.start_ms,
+        "end_ms": segment.end_ms,
+        "text": segment.text,
+        "speaker_label": speaker_label,
+    }
+
+
 @celery_app.task(name="corella.diarize_utterance")
-def diarize_utterance(meeting_id: str, segment_id: str, pcm_b64: str) -> None:
+def diarize_utterance(
+    meeting_id: str,
+    segment_id: str,
+    window_pcm_b64: str,
+    utterance_offset_ms: int,
+    utterance_duration_ms: int,
+    words_json: str,
+) -> None:
     """Same-room live diarization: one call per "Me"-channel utterance,
     dispatched right after live_session.py persists its TranscriptSegment.
-    Extracts a speaker embedding and does online cosine-similarity
-    clustering scoped to this meeting (app/services/diarization/cluster.py)
-    — a different, incremental building block than diarize()'s whole-file
-    batch Pipeline, which has no notion of "here's one more utterance."
+
+    `window_pcm_b64` is not just this utterance's own audio — it's a wider
+    window of already-received "Me"-channel audio ending at the utterance's
+    end (app/services/audio/mixing.py:extract_channel_window, built in
+    live_session.py). diarize()'s pipeline is unreliable well under ~10s
+    (verified empirically — an isolated ~4s two-speaker clip missed the
+    speaker change entirely); the window gives it enough context to reliably
+    place a speaker-change point *within* this one utterance, something the
+    whole-file batch Pipeline was never designed to do incrementally.
+    `utterance_offset_ms`/`utterance_duration_ms` locate the utterance
+    itself inside that window; `words_json` (faster-whisper word timestamps,
+    utterance-relative) is used to attribute text if a split happens.
+
     Never touches Meeting.status — a failure here just leaves this one
     segment unlabeled (falls back to generic "Me"), not a reason to fail
-    the meeting; live_session.py's own polling bridge is what decides when
-    (and whether) to surface labels to the browser, not this task.
+    the meeting.
     """
-    try:
-        embedding = embed_utterance(base64.b64decode(pcm_b64))
-    except Exception:
-        logger.exception("diarize_utterance: embedding failed for segment %s", segment_id)
-        return
+    window_pcm = base64.b64decode(window_pcm_b64)
+    words = json.loads(words_json)
+    u_start_s = utterance_offset_ms / 1000
+    u_end_s = u_start_s + utterance_duration_ms / 1000
+
+    # diarize()'s pipeline is only reliable well above ~10s of audio
+    # (verified empirically — an isolated ~4-6s clip either missed a real
+    # speaker change entirely or produced garbage overlapping turns, both
+    # reproduced live). live_session.py *asks* for settings.
+    # diarization_context_window_ms (default 12000) of context, but early in
+    # a session there may not be that much "Me" audio yet to satisfy it with
+    # — checking the window it actually got, not the size requested, avoids
+    # trusting a split decision the pipeline was never reliable enough to
+    # make; falls back to the simple whole-utterance path instead.
+    window_duration_ms = len(window_pcm) / 2 / 16000 * 1000
+    if window_duration_ms < 9000:
+        turns = []
+    else:
+        window_wav = None
+        try:
+            fd, window_wav = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            write_wav(window_wav, window_pcm)
+            turns = diarize(window_wav)
+        except DiarizationUnavailable:
+            turns = []
+        except Exception:
+            logger.exception("diarize_utterance: within-utterance segmentation failed for %s", segment_id)
+            turns = []
+        finally:
+            if window_wav:
+                try:
+                    os.unlink(window_wav)
+                except OSError:
+                    pass
+
+    clipped: list[tuple[float, float, str]] = []
+    for start, end, speaker in _merge_adjacent_same_speaker(turns):
+        clip_start, clip_end = max(start, u_start_s), min(end, u_end_s)
+        if clip_end > clip_start:
+            clipped.append((clip_start - u_start_s, clip_end - u_start_s, speaker))
+
+    distinct_local_speakers = {c[2] for c in clipped}
 
     with get_sync_db() as db:
         meeting = db.get(Meeting, UUID(meeting_id))
@@ -179,26 +291,110 @@ def diarize_utterance(meeting_id: str, segment_id: str, pcm_b64: str) -> None:
         if meeting is None or segment is None:
             return
 
+        # Embedding extraction happens here, before the per-meeting lock
+        # below is acquired — it's the slow part (a cold model load can take
+        # several seconds) and doesn't need cross-task exclusivity; only the
+        # actual cluster-decision-and-write does. Verified this ordering
+        # matters: a cold-start extraction held *inside* the lock outlasted
+        # its 10s timeout, so Redis auto-expired it mid-hold and releasing
+        # it at the end raised redis.exceptions.LockNotOwnedError.
+        split_turns: list[tuple[float, float, str, object]] = []
+        if len(distinct_local_speakers) > 1:
+            for rel_start, rel_end, _local_label in clipped:
+                text = words_in_range(words, rel_start, rel_end)
+                if not text:
+                    continue
+                turn_pcm = slice_pcm(
+                    window_pcm,
+                    utterance_offset_ms + round(rel_start * 1000),
+                    round((rel_end - rel_start) * 1000),
+                )
+                split_turns.append((rel_start, rel_end, text, embed_utterance(turn_pcm)))
+
+        # A "split" that loses every turn but one to empty text-attribution
+        # isn't a split — fall back to the whole utterance rather than
+        # silently dropping it.
+        did_split = len(split_turns) >= 2
+        if not did_split:
+            pcm = slice_pcm(window_pcm, utterance_offset_ms, utterance_duration_ms)
+            whole_embedding = embed_utterance(pcm)
+
         try:
             with locked_state(meeting.id) as clusters:
-                idx, similarity = best_match(clusters, embedding)
-                if idx is not None and similarity >= SIMILARITY_THRESHOLD:
-                    cluster = clusters[idx]
-                    update_centroid(cluster, embedding)
-                    segment.speaker_id = UUID(cluster.speaker_id)
+                resulting: list[tuple[TranscriptSegment, str]] = []
+
+                if not did_split:
+                    speaker = _cluster_and_assign(db, meeting, clusters, whole_embedding)
+                    # Assign the relationship object, not just the FK column
+                    # — segment.speaker was already loaded (as None) when it
+                    # was fetched above, and setting speaker_id alone doesn't
+                    # refresh that already-cached relationship. Matters here
+                    # because the backfill query below can re-select this
+                    # exact row later in the same session/identity map.
+                    segment.speaker = speaker
+                    resulting.append((segment, speaker.label))
                 else:
-                    speaker = Speaker(
-                        owner_id=meeting.owner_id,
-                        meeting_id=meeting.id,
-                        label=f"Speaker {len(clusters) + 1}",
-                        channel=Channel.ME,
-                    )
-                    db.add(speaker)
-                    db.flush()  # assign speaker.id before the cluster/segment reference it
-                    clusters.append(
-                        Cluster(centroid=embedding.tolist(), count=1, speaker_id=str(speaker.id))
-                    )
-                    segment.speaker_id = speaker.id
+                    base_start_ms = segment.start_ms
+                    for rel_start, rel_end, text, embedding in split_turns:
+                        speaker = _cluster_and_assign(db, meeting, clusters, embedding)
+                        new_row = TranscriptSegment(
+                            meeting_id=meeting.id,
+                            speaker_id=speaker.id,
+                            channel=Channel.ME,
+                            start_ms=base_start_ms + round(rel_start * 1000),
+                            end_ms=base_start_ms + round(rel_end * 1000),
+                            text=text,
+                            is_partial=False,
+                        )
+                        db.add(new_row)
+                        resulting.append((new_row, speaker.label))
+                    db.delete(segment)
+                    # Recorded regardless of whether the gate is open yet —
+                    # if it opens later, the backfill snapshot below still
+                    # needs to know this id is gone, not just future ones.
+                    diar_events.record_removed(meeting.id, str(segment.id))
+
+                db.flush()  # assign ids to any new rows before building the WS payload
+
+                if len(clusters) >= 2:
+                    if not diar_events.has_reported_anything(meeting.id):
+                        # First time the gate has ever opened for this meeting —
+                        # a full authoritative snapshot, not an incremental diff,
+                        # so the frontend can't miss an earlier split that
+                        # happened before anything was ever reported.
+                        all_labeled = list(
+                            db.scalars(
+                                select(TranscriptSegment).where(
+                                    TranscriptSegment.meeting_id == meeting.id,
+                                    TranscriptSegment.channel == Channel.ME,
+                                    TranscriptSegment.speaker_id.is_not(None),
+                                )
+                            )
+                        )
+                        payload = [_segment_payload(s, s.speaker.label) for s in all_labeled]
+                        diar_events.push_event(
+                            meeting.id,
+                            {
+                                "type": "diarization_update",
+                                "is_snapshot": True,
+                                "removed_segment_ids": diar_events.all_removed(meeting.id),
+                                "segments": payload,
+                            },
+                            [str(s.id) for s in all_labeled],
+                        )
+                    else:
+                        payload = [_segment_payload(s, label) for s, label in resulting]
+                        removed = [str(segment.id)] if did_split else []
+                        diar_events.push_event(
+                            meeting.id,
+                            {
+                                "type": "diarization_update",
+                                "is_snapshot": False,
+                                "removed_segment_ids": removed,
+                                "segments": payload,
+                            },
+                            [str(s.id) for s, _ in resulting],
+                        )
             db.commit()
         except Exception:
             logger.exception("diarize_utterance: clustering failed for segment %s", segment_id)

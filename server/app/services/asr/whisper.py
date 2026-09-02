@@ -8,10 +8,18 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class WhisperWord:
+    start: float  # seconds, relative to the transcribed audio
+    end: float  # seconds
+    word: str
+
+
+@dataclass
 class WhisperSegment:
     start: float  # seconds
     end: float  # seconds
     text: str
+    words: list[WhisperWord]  # empty unless transcribe(word_timestamps=True)
 
 
 @lru_cache
@@ -35,14 +43,27 @@ def warm_up() -> None:
     _model()
 
 
-def transcribe(audio_path: str) -> list[WhisperSegment]:
+def transcribe(audio_path: str, word_timestamps: bool = False) -> list[WhisperSegment]:
     """Transcribe a mono 16kHz WAV file. Loads the model once per worker
     process (module-level lazy singleton) — reloading it per task would
     dominate processing time.
+
+    word_timestamps=True is needed by the live "Me" channel path
+    (app/ws/live_session.py) to attribute text to a specific speaker-turn
+    span once same-room diarization splits one utterance into several
+    (app/workers/tasks.py:diarize_utterance) — off by default since nothing
+    else needs the extra decode cost.
     """
-    segments, _info = _model().transcribe(audio_path, vad_filter=True)
-    return [
-        WhisperSegment(start=s.start, end=s.end, text=s.text.strip())
-        for s in segments
-        if s.text.strip()
-    ]
+    segments, _info = _model().transcribe(audio_path, vad_filter=True, word_timestamps=word_timestamps)
+    result = []
+    for s in segments:
+        text = s.text.strip()
+        if not text:
+            continue
+        words = (
+            [WhisperWord(start=w.start, end=w.end, word=w.word) for w in s.words]
+            if word_timestamps and s.words
+            else []
+        )
+        result.append(WhisperSegment(start=s.start, end=s.end, text=text, words=words))
+    return result

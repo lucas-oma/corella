@@ -40,6 +40,52 @@ def mix_channel_recordings(
     return np.clip(mixed, -32768, 32767).astype(np.int16).tobytes()
 
 
+def extract_channel_window(
+    chunks: list[tuple[int, bytes]], start_ms: int, end_ms: int, sample_rate: int = SAMPLE_RATE
+) -> bytes:
+    """A bounded slice of one channel's timestamped chunks as contiguous
+    mono PCM16LE, [start_ms, end_ms) — silence-padded over any gaps.
+
+    Used to give same-room diarization (app/workers/tasks.py:diarize_utterance)
+    a wider window of *already-received* audio than just one VAD utterance —
+    the pyannote pipeline needs several seconds of context to reliably place
+    a speaker-change point (verified empirically: unreliable well under 10s).
+    Reuses the same recordings buffer mix_channel_recordings() reads at
+    session end, just for one channel and a bounded range instead of the
+    whole session.
+    """
+    if end_ms <= start_ms:
+        return b""
+
+    total_samples = int((end_ms - start_ms) / 1000 * sample_rate)
+    window = np.zeros(total_samples, dtype=np.int16)
+
+    for offset_ms, chunk in chunks:
+        chunk_duration_ms = int(len(chunk) / 2 / sample_rate * 1000)
+        if offset_ms + chunk_duration_ms <= start_ms or offset_ms >= end_ms:
+            continue
+        samples = np.frombuffer(chunk, dtype=np.int16)
+        dest_start = int((offset_ms - start_ms) / 1000 * sample_rate)
+        src_start = max(0, -dest_start)
+        dest_start = max(0, dest_start)
+        dest_end = min(len(window), dest_start + len(samples) - src_start)
+        if dest_end <= dest_start:
+            continue
+        window[dest_start:dest_end] = samples[src_start : src_start + (dest_end - dest_start)]
+
+    return window.tobytes()
+
+
+def slice_pcm(pcm: bytes, start_ms: int, duration_ms: int, sample_rate: int = SAMPLE_RATE) -> bytes:
+    """A [start_ms, start_ms + duration_ms) byte-offset slice of a mono
+    PCM16LE buffer, clamped to the buffer's actual bounds."""
+    start_sample = max(0, int(start_ms / 1000 * sample_rate))
+    end_sample = max(start_sample, int((start_ms + duration_ms) / 1000 * sample_rate))
+    start_byte = start_sample * 2
+    end_byte = min(len(pcm), end_sample * 2)
+    return pcm[start_byte:end_byte]
+
+
 def write_wav(path: str, pcm: bytes, sample_rate: int = SAMPLE_RATE) -> None:
     with wave.open(path, "wb") as wf:
         wf.setnchannels(1)

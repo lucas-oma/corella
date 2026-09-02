@@ -19,9 +19,22 @@ export interface CopilotEvent {
   coach_score: number | null;
 }
 
-export interface SpeakerLabeledEvent {
-  segment_id: string;
+export interface DiarizedSegment {
+  id: string;
+  start_ms: number;
+  end_ms: number;
+  text: string;
   speaker_label: string;
+}
+
+export interface DiarizationUpdateEvent {
+  /** True the first time 2+ distinct same-room speakers are confirmed for
+   * this meeting: a full authoritative snapshot of every labeled "Me"
+   * segment so far, not just this cycle's change (an earlier speaker-change
+   * split could have happened before anything was ever reported). */
+  isSnapshot: boolean;
+  removedSegmentIds: string[];
+  segments: DiarizedSegment[];
 }
 
 export interface CaptureHandle {
@@ -75,7 +88,7 @@ export class LiveSessionClient {
   onTranscript: ((event: TranscriptEvent) => void) | null = null;
   onCopilot: ((event: CopilotEvent) => void) | null = null;
   onCopilotUnavailable: (() => void) | null = null;
-  onSpeakerLabeled: ((event: SpeakerLabeledEvent) => void) | null = null;
+  onDiarizationUpdate: ((event: DiarizationUpdateEvent) => void) | null = null;
   onStopped: (() => void) | null = null;
   onError: ((message: string) => void) | null = null;
 
@@ -98,8 +111,9 @@ export class LiveSessionClient {
           blockers?: string[];
           action_items?: string[];
           coach_score?: number | null;
-          segment_id?: string;
-          speaker_label?: string;
+          is_snapshot?: boolean;
+          removed_segment_ids?: string[];
+          segments?: DiarizedSegment[];
         };
         try {
           msg = JSON.parse(event.data);
@@ -116,8 +130,12 @@ export class LiveSessionClient {
             coach_score: msg.coach_score ?? null,
           });
         } else if (msg.type === "copilot_unavailable") this.onCopilotUnavailable?.();
-        else if (msg.type === "speaker_labeled" && msg.segment_id && msg.speaker_label) {
-          this.onSpeakerLabeled?.({ segment_id: msg.segment_id, speaker_label: msg.speaker_label });
+        else if (msg.type === "diarization_update") {
+          this.onDiarizationUpdate?.({
+            isSnapshot: msg.is_snapshot ?? false,
+            removedSegmentIds: msg.removed_segment_ids ?? [],
+            segments: msg.segments ?? [],
+          });
         } else if (msg.type === "stopped") this.onStopped?.();
         else if (msg.type === "error") this.onError?.(msg.message ?? "Live session error");
       };

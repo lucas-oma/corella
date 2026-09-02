@@ -69,6 +69,15 @@ class Settings(BaseSettings):
     live_max_utterance_seconds: int = 20  # force a flush even without a detected pause
     live_min_utterance_ms: int = 300  # ignore speech blips shorter than this
 
+    # Same-room live diarization (app/workers/tasks.py:diarize_utterance) — how
+    # much *already-received* "Me"-channel audio to feed the pipeline for
+    # within-utterance speaker-change detection, ending at the utterance's own
+    # end (no forward padding needed/available at dispatch time). Verified
+    # empirically: pyannote/speaker-diarization-3.1 is unreliable well under
+    # 10s (an isolated ~4s clip missed a real speaker change entirely); 12s
+    # gives comfortable margin above that floor.
+    diarization_context_window_ms: int = 12000
+
     # Live copilot (app/services/copilot/live.py, app/ws/live_session.py)
     copilot_trigger_segments: int = 4  # new transcript segments since the last cycle...
     copilot_trigger_seconds: int = 20  # ...or this much elapsed time, whichever first
