@@ -187,7 +187,15 @@ export default function Dashboard() {
           <input
             ref={fileInputRef}
             type="file"
-            accept="audio/*"
+            // "audio/*" alone isn't enough — the OS file picker filters by
+            // MIME type first, and several accepted extensions (.caf
+            // especially) aren't reliably mapped to an audio/* type in
+            // every OS's file-type database, so the picker hides them even
+            // though the backend (_ALLOWED_AUDIO_EXTENSIONS in
+            // api/meetings.py) happily accepts them. Listing the exact
+            // extensions alongside the wildcard covers both cases — a
+            // browser matches on *either*.
+            accept="audio/*,.mp3,.wav,.m4a,.mp4,.webm,.ogg,.oga,.flac,.aac,.opus,.caf"
             className="hidden"
             onChange={onFileSelected}
           />
