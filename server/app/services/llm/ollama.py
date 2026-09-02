@@ -1,9 +1,11 @@
 import httpx
 
-from app.services.llm.base import LLMError, LLMMessage
+from app.services.llm.base import LLMError, LLMMessage, LLMResponse
 
 
-async def complete(model: str, messages: list[LLMMessage], base_url: str | None, max_tokens: int) -> str:
+async def complete(
+    model: str, messages: list[LLMMessage], base_url: str | None, max_tokens: int
+) -> LLMResponse:
     """Hand-rolled against Ollama's /api/chat REST endpoint — this is the
     one provider client verified against a real running instance (see
     Phase E verification), not just documented-shape review.
@@ -31,6 +33,12 @@ async def complete(model: str, messages: list[LLMMessage], base_url: str | None,
 
     try:
         data = response.json()
-        return data["message"]["content"].strip()
+        text = data["message"]["content"].strip()
     except (KeyError, ValueError) as e:
         raise LLMError(f"Unexpected Ollama response shape: {e}") from e
+
+    return LLMResponse(
+        text=text,
+        input_tokens=data.get("prompt_eval_count"),
+        output_tokens=data.get("eval_count"),
+    )

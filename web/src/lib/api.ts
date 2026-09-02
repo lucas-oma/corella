@@ -101,6 +101,7 @@ export interface Meeting {
   sentiment: string | null;
   notable_quotes: string[] | null;
   coach_score: number | null;
+  estimated_cost_usd: number | null;
   created_at: string;
   owner_id: string;
   owner_name: string;
@@ -131,6 +132,7 @@ export interface Report {
   sentiment: string | null;
   notable_quotes: string[];
   coach_score: number | null;
+  estimated_cost_usd: number | null;
   action_items: ActionItem[];
   talk_ratio: { me: number; them: number } | null;
 }

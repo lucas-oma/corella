@@ -9,6 +9,13 @@ class LLMMessage:
     content: str
 
 
+@dataclass
+class LLMResponse:
+    text: str
+    input_tokens: int | None
+    output_tokens: int | None
+
+
 class LLMError(Exception):
     """Raised by any provider client on a request failure — auth, rate
     limit, network, or an unexpected response shape. Callers (the live
@@ -24,9 +31,11 @@ async def complete(
     api_key: str | None,
     base_url: str | None,
     max_tokens: int = 1024,
-) -> str:
+) -> LLMResponse:
     """Dispatch a non-streaming completion to the right provider client.
-    Returns the response text, or raises LLMError.
+    Returns the response text plus token usage (for cost tracking, see
+    app/services/llm/pricing.py — either count can be None if the
+    provider's response didn't include it), or raises LLMError.
     """
     if provider == LLMProvider.ANTHROPIC:
         from app.services.llm.anthropic import complete as anthropic_complete

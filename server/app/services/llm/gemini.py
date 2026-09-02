@@ -1,6 +1,6 @@
 import httpx
 
-from app.services.llm.base import LLMError, LLMMessage
+from app.services.llm.base import LLMError, LLMMessage, LLMResponse
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
@@ -8,7 +8,9 @@ API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:gener
 _ROLE_MAP = {"user": "user", "assistant": "model"}
 
 
-async def complete(model: str, messages: list[LLMMessage], api_key: str | None, max_tokens: int) -> str:
+async def complete(
+    model: str, messages: list[LLMMessage], api_key: str | None, max_tokens: int
+) -> LLMResponse:
     """Hand-rolled against the generateContent REST endpoint — same
     rationale as openai.py: a stable, well-documented JSON shape I can
     implement confidently without a live key to verify SDK specifics against.
@@ -61,6 +63,15 @@ async def complete(model: str, messages: list[LLMMessage], api_key: str | None, 
     try:
         data = response.json()
         parts = data["candidates"][0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in parts).strip()
+        text = "".join(p.get("text", "") for p in parts).strip()
     except (KeyError, IndexError, ValueError) as e:
         raise LLMError(f"Unexpected Gemini response shape: {e}") from e
+
+    usage = data.get("usageMetadata") or {}
+    input_tokens = usage.get("promptTokenCount")
+    # Thinking tokens are billed as output too (thinkingBudget=1 above still
+    # produces some), so fold them in when present rather than undercounting.
+    output_tokens = usage.get("candidatesTokenCount")
+    if output_tokens is not None:
+        output_tokens += usage.get("thoughtsTokenCount") or 0
+    return LLMResponse(text=text, input_tokens=input_tokens, output_tokens=output_tokens)

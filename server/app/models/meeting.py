@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ARRAY, Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import ARRAY, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -68,6 +68,7 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     sentiment: Mapped[str | None] = mapped_column(String(255))
     notable_quotes: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     coach_score: Mapped[int | None] = mapped_column(Integer)
+    estimated_cost_usd: Mapped[float | None] = mapped_column(Float)
 
     owner: Mapped[User] = relationship(lazy="joined")
 

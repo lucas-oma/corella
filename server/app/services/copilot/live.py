@@ -9,12 +9,14 @@ from app.core.config import get_settings
 from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import ActionItem, ActionItemStatus, Channel, TranscriptSegment
 from app.services.copilot.action_items import persist_new_action_items
+from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import as_str_list, parse_json_response
 from app.services.access import searchable_owner_ids
 from app.services.copilot.talk_ratio import talk_ratio
 from app.services.embeddings.qdrant_store import search_kb
 from app.services.embeddings.query import embed_query
 from app.services.llm.base import LLMError, LLMMessage, complete
+from app.services.llm.pricing import estimate_cost_usd
 from app.services.llm.resolve import ResolvedProvider
 
 logger = logging.getLogger(__name__)
@@ -78,7 +80,7 @@ async def run_cycle(
     ]
 
     try:
-        raw = await complete(
+        response = await complete(
             provider.provider,
             provider.model,
             messages,
@@ -86,8 +88,22 @@ async def run_cycle(
             provider.base_url,
             max_tokens=220,
         )
-        parsed = parse_json_response(raw)
-    except (LLMError, ValueError) as e:
+    except LLMError as e:
+        logger.info("Copilot cycle skipped for meeting %s: %s", meeting_id, e)
+        return None
+
+    # The call itself cost money regardless of whether the JSON below parses
+    # cleanly, so track it before parsing can fail.
+    cost = estimate_cost_usd(
+        provider.provider, provider.model, response.input_tokens, response.output_tokens
+    )
+    if cost is not None:
+        await add_meeting_cost(db, meeting_id, cost)
+        await db.commit()
+
+    try:
+        parsed = parse_json_response(response.text)
+    except ValueError as e:
         logger.info("Copilot cycle skipped for meeting %s: %s", meeting_id, e)
         return None
 

@@ -329,6 +329,7 @@ async def create_meeting_report(
         sentiment=result.sentiment,
         notable_quotes=result.notable_quotes,
         coach_score=result.coach_score,
+        estimated_cost_usd=result.estimated_cost_usd,
         action_items=[ActionItemRead.model_validate(item) for item in result.action_items],
         talk_ratio=result.talk_ratio,
     )

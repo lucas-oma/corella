@@ -28,6 +28,7 @@ class MeetingRead(BaseModel):
     sentiment: str | None
     notable_quotes: list[str] | None
     coach_score: int | None
+    estimated_cost_usd: float | None
     created_at: datetime
     owner_id: UUID
     owner_name: str

@@ -21,6 +21,13 @@ function formatTimestamp(ms: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+/** Per-meeting LLM cost is usually a few tenths of a cent — "$0.00" at two
+ * decimal places would misleadingly read as free, so show more precision
+ * below a cent. */
+function formatCost(usd: number): string {
+  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
 /** Live-recorded segments have no Speaker row (channel already says who) —
  * fall back to "Me"/"Them" so they aren't unlabeled. */
 function speakerLabel(segment: TranscriptSegment): string | null {
@@ -130,6 +137,7 @@ export default function MeetingDetail() {
               sentiment: report.sentiment,
               notable_quotes: report.notable_quotes,
               coach_score: report.coach_score,
+              estimated_cost_usd: report.estimated_cost_usd,
             }
           : prev,
       );
@@ -273,6 +281,14 @@ export default function MeetingDetail() {
                     {meeting.coach_score !== null && meeting.coach_score !== undefined && (
                       <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
                         Score: {meeting.coach_score}/100
+                      </span>
+                    )}
+                    {meeting.estimated_cost_usd !== null && meeting.estimated_cost_usd !== undefined && (
+                      <span
+                        className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark"
+                        title="Best-effort estimate based on token usage, not an authoritative bill"
+                      >
+                        Est. cost: {formatCost(meeting.estimated_cost_usd)}
                       </span>
                     )}
                   </div>

@@ -1,11 +1,13 @@
 import httpx
 
-from app.services.llm.base import LLMError, LLMMessage
+from app.services.llm.base import LLMError, LLMMessage, LLMResponse
 
 API_URL = "https://api.openai.com/v1/chat/completions"
 
 
-async def complete(model: str, messages: list[LLMMessage], api_key: str | None, max_tokens: int) -> str:
+async def complete(
+    model: str, messages: list[LLMMessage], api_key: str | None, max_tokens: int
+) -> LLMResponse:
     """Hand-rolled against the Chat Completions REST endpoint rather than
     the official SDK — its long-stable JSON shape is lower-risk for me to
     get right without a live key to verify against than guessing at SDK
@@ -40,6 +42,13 @@ async def complete(model: str, messages: list[LLMMessage], api_key: str | None, 
 
     try:
         data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
+        text = data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, ValueError) as e:
         raise LLMError(f"Unexpected OpenAI response shape: {e}") from e
+
+    usage = data.get("usage") or {}
+    return LLMResponse(
+        text=text,
+        input_tokens=usage.get("prompt_tokens"),
+        output_tokens=usage.get("completion_tokens"),
+    )

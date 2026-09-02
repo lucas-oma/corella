@@ -1,7 +1,9 @@
-from app.services.llm.base import LLMError, LLMMessage
+from app.services.llm.base import LLMError, LLMMessage, LLMResponse
 
 
-async def complete(model: str, messages: list[LLMMessage], api_key: str | None, max_tokens: int) -> str:
+async def complete(
+    model: str, messages: list[LLMMessage], api_key: str | None, max_tokens: int
+) -> LLMResponse:
     """Uses the official `anthropic` SDK (not raw HTTP) per house convention
     for Claude/Anthropic integrations. `effort: low` since this is called
     from the live copilot loop every ~20s — a fast, cheap structured-output
@@ -36,4 +38,10 @@ async def complete(model: str, messages: list[LLMMessage], api_key: str | None, 
     if response.stop_reason == "refusal":
         raise LLMError("Anthropic declined the request")
 
-    return "".join(block.text for block in response.content if block.type == "text").strip()
+    text = "".join(block.text for block in response.content if block.type == "text").strip()
+    usage = getattr(response, "usage", None)
+    return LLMResponse(
+        text=text,
+        input_tokens=getattr(usage, "input_tokens", None),
+        output_tokens=getattr(usage, "output_tokens", None),
+    )
