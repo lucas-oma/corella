@@ -202,7 +202,7 @@ async def ai_overview(
         llm_source = "user" if has_user_credential else "env"
 
     return AiOverview(
-        speech_to_text=SttOverview(active=stt.provider, model=stt.model, source=stt.source),
+        speech_to_text=SttOverview(active=stt.provider, model=stt.model, source=stt.source, language=stt.language),
         language_model=LanguageModelOverview(
             active=llm.provider if llm else None,
             model=llm.model if llm else None,

@@ -519,6 +519,12 @@ export default function Settings() {
                       {aiOverview.speech_to_text.active === "deepgram" ? "Deepgram" : "Local (faster-whisper)"}
                       {" · "}
                       {aiOverview.speech_to_text.model}
+                      {aiOverview.speech_to_text.active === "deepgram" && (
+                        <>
+                          {" · "}
+                          {aiOverview.speech_to_text.language}
+                        </>
+                      )}
                     </p>
                     <button onClick={() => onEditRow("stt")} className="text-xs text-accent hover:underline">
                       Edit

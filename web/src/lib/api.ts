@@ -176,7 +176,12 @@ export interface SttStatus {
 }
 
 export interface AiOverview {
-  speech_to_text: { active: "deepgram" | "whisper"; model: string; source: "user" | "env" | "local" };
+  speech_to_text: {
+    active: "deepgram" | "whisper";
+    model: string;
+    source: "user" | "env" | "local";
+    language: string;
+  };
   language_model: {
     active: ProviderStatus["provider"] | null;
     model: string | null;

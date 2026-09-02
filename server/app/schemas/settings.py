@@ -37,6 +37,10 @@ class SttOverview(BaseModel):
     active: str  # "deepgram" | "whisper"
     model: str
     source: str  # "user" | "env" | "local"
+    # Only meaningful when active == "deepgram" (ResolvedStt.language) —
+    # whisper.py never reads this field, so the frontend only displays it
+    # for the Deepgram case.
+    language: str
 
 
 class LanguageModelOverview(BaseModel):
