@@ -12,24 +12,24 @@ A self-hosted meeting assistant: it records a call from your browser, transcribe
 ## Architecture
 
 ```
-                    ┌─────────────┐
-   Browser  ───────▶│   web       │  React SPA (nginx)
+                     ┌─────────────┐
+   Browser  ───────▶ │     web     │  React SPA (nginx)
   (mic + tab audio)  └──────┬──────┘
-                             │ REST + WebSocket
-                    ┌────────▼────────┐
+                            │ REST + WebSocket
+                    ┌───────▼─────────┐
                     │      api        │  FastAPI
                     └───┬────────┬────┘
                         │        │
               ┌─────────▼──┐   ┌─▼──────────┐
-              │  postgres  │   │   redis     │  queue + pub/sub
-              └────────────┘   └──────┬──────┘
+              │  postgres  │   │   redis    │  queue + pub/sub
+              └────────────┘   └───────┬────┘
                                        │
                               ┌────────▼────────┐
-                              │     worker       │  Celery: faster-whisper,
-                              └────────┬─────────┘  pyannote.audio, embeddings
+                              │      worker     │  Celery: faster-whisper,
+                              └────────┬────────┘  pyannote.audio, embeddings
                                        │
                                 ┌──────▼──────┐
-                                │   qdrant     │  vector search (knowledge
+                                │    qdrant   │  vector search (knowledge
                                 └─────────────┘   base + transcript search)
 ```
 
