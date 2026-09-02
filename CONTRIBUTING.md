@@ -6,7 +6,7 @@ Before touching any UI code, read [`BRANDING.md`](./BRANDING.md) — it's the si
 
 ## Branching
 
-**Target `dev`, not `main`, for every feature and fix.** `dev` is the integration branch — it's where all ongoing work lands, like a nightly build. `main` only moves forward periodically, via a `dev` → `main` PR once `dev` has accumulated a substantial batch of changes, not per-feature. Unless a maintainer tells you otherwise, branch off `dev` and open your PR against `dev`.
+**Target `main` for every feature and fix.** `main` is the integration branch — it's where all ongoing work lands, like a nightly build, and it's what people fork from. Stable cut points live on `release`, which only moves forward periodically via a `main` → `release` PR once `main` has accumulated a substantial batch of changes worth shipping, not per-feature. Unless a maintainer tells you otherwise, branch off `main` and open your PR against `main`.
 
 ## Getting set up
 
@@ -38,7 +38,7 @@ You'll want real infrastructure to do anything meaningful — `docker compose up
 
 ```bash
 cd web && npx tsc -b && npx vite build
-cd server && python -m py_compile $(git diff --name-only dev -- '*.py')
+cd server && python -m py_compile $(git diff --name-only main -- '*.py')
 ```
 
 There's no automated test suite yet (see [README's Status section](./README.md#status) — this is a real, open gap, not an oversight, and a PR that adds real `pytest`/`vitest` coverage is welcome on its own). In its absence, every change in this project's history has been verified against a **real, isolated Docker stack** before merging — not the developer's own running instance, and never mocked away. If you're touching backend behavior, do the same:
