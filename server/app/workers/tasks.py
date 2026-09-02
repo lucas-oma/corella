@@ -1,3 +1,4 @@
+import base64
 import logging
 import subprocess
 import tempfile
@@ -10,6 +11,14 @@ from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.services.alignment.align import align
 from app.services.asr.whisper import transcribe
+from app.services.diarization.cluster import (
+    SIMILARITY_THRESHOLD,
+    Cluster,
+    best_match,
+    locked_state,
+    update_centroid,
+)
+from app.services.diarization.embedding import embed_utterance
 from app.services.diarization.pyannote import DiarizationUnavailable, diarize
 from app.services.embeddings.chunking import chunk_text
 from app.services.embeddings.embed import embed_texts
@@ -143,3 +152,54 @@ def process_kb_document(document_id: str) -> None:
             document.status = KBDocumentStatus.FAILED
             document.error = str(e)[:2000]
             db.commit()
+
+
+@celery_app.task(name="corella.diarize_utterance")
+def diarize_utterance(meeting_id: str, segment_id: str, pcm_b64: str) -> None:
+    """Same-room live diarization: one call per "Me"-channel utterance,
+    dispatched right after live_session.py persists its TranscriptSegment.
+    Extracts a speaker embedding and does online cosine-similarity
+    clustering scoped to this meeting (app/services/diarization/cluster.py)
+    — a different, incremental building block than diarize()'s whole-file
+    batch Pipeline, which has no notion of "here's one more utterance."
+    Never touches Meeting.status — a failure here just leaves this one
+    segment unlabeled (falls back to generic "Me"), not a reason to fail
+    the meeting; live_session.py's own polling bridge is what decides when
+    (and whether) to surface labels to the browser, not this task.
+    """
+    try:
+        embedding = embed_utterance(base64.b64decode(pcm_b64))
+    except Exception:
+        logger.exception("diarize_utterance: embedding failed for segment %s", segment_id)
+        return
+
+    with get_sync_db() as db:
+        meeting = db.get(Meeting, UUID(meeting_id))
+        segment = db.get(TranscriptSegment, UUID(segment_id))
+        if meeting is None or segment is None:
+            return
+
+        try:
+            with locked_state(meeting.id) as clusters:
+                idx, similarity = best_match(clusters, embedding)
+                if idx is not None and similarity >= SIMILARITY_THRESHOLD:
+                    cluster = clusters[idx]
+                    update_centroid(cluster, embedding)
+                    segment.speaker_id = UUID(cluster.speaker_id)
+                else:
+                    speaker = Speaker(
+                        owner_id=meeting.owner_id,
+                        meeting_id=meeting.id,
+                        label=f"Speaker {len(clusters) + 1}",
+                        channel=Channel.ME,
+                    )
+                    db.add(speaker)
+                    db.flush()  # assign speaker.id before the cluster/segment reference it
+                    clusters.append(
+                        Cluster(centroid=embedding.tolist(), count=1, speaker_id=str(speaker.id))
+                    )
+                    segment.speaker_id = speaker.id
+            db.commit()
+        except Exception:
+            logger.exception("diarize_utterance: clustering failed for segment %s", segment_id)
+            db.rollback()

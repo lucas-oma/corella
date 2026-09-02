@@ -29,7 +29,12 @@ dependencies = [
     "faster-whisper==1.1.0",
     "requests==2.32.3",  # faster-whisper's own model-download path needs it directly
     "webrtcvad==2.0.10",
-    "numpy==2.2.1",
+    # A range, not an exact pin: mixing.py's numpy usage (zeros/frombuffer/
+    # astype/clip/tobytes) is trivial and version-agnostic, and an exact pin
+    # here was needlessly fighting the worker extras' own numpy constraints
+    # (onnxruntime, ctranslate2, qdrant-client, matplotlib all want a say)
+    # during dependency resolution — let pip actually solve the whole graph.
+    "numpy>=1.26,<3",
     # Live copilot (app/services/llm/, app/services/copilot/): official SDK
     # for Anthropic per house convention; openai/gemini/ollama are hand-rolled
     # httpx clients against their stable REST shapes (see app/services/llm/).
@@ -43,7 +48,16 @@ dependencies = [
 
 [project.optional-dependencies]
 worker = [
-    "pyannote.audio==3.3.2",
+    # 3.3.2 is broken as installed: it declares torchaudio>=2.2.0 with no
+    # upper bound, pip resolves the latest torch (2.14.0) but torchaudio's
+    # release cadence lags behind, landing on torchaudio 2.11.0 — which
+    # already dropped the top-level `torchaudio.AudioMetaData` attribute
+    # 3.3.2's own io.py references, so the import itself fails. 4.x is the
+    # pyannote maintainers' own fix: it drops the torchaudio audio-IO
+    # backend entirely in favor of torchcodec/ffmpeg. Verified empirically
+    # against this project's actual diarize() usage before pinning.
+    "pyannote.audio==4.0.7",
+    "torchcodec",
     "sentence-transformers==3.3.1",
     "pypdf==5.1.0",
 ]

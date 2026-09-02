@@ -51,11 +51,20 @@ If you have an NVIDIA GPU + the NVIDIA Container Toolkit installed, layer on the
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 ```
 
-Speaker diarization uses a gated pyannote.audio pipeline — accept its terms on Hugging Face and set `HF_TOKEN` in `.env` before the worker can download it. Without `HF_TOKEN`, transcription still works fine; the transcript just won't have speaker labels.
+Speaker diarization uses a gated pyannote.audio pipeline. A valid `HF_TOKEN` alone isn't enough — the Hugging Face account behind it must also individually accept the terms on **each** gated model page the pipeline depends on internally (a separate, one-time click-through per repo — currently three, verified against a real account rather than assumed from docs):
+
+- https://huggingface.co/pyannote/speaker-diarization-3.1
+- https://huggingface.co/pyannote/segmentation-3.0
+- https://huggingface.co/pyannote/speaker-diarization-community-1
+
+Skipping this doesn't break anything — transcription still works fine and the meeting still finishes, just without speaker labels for uploaded/offline recordings; the pipeline just fails per-file with a clear error in the worker logs instead of loading. Live same-room diarization during a recording (see below) uses a different, non-gated model and works regardless of `HF_TOKEN`/terms acceptance.
 
 ## Recording a meeting
 
-Today this is upload-based: on the Dashboard, "Upload recording" picks an audio file, which is transcribed (and, if `HF_TOKEN` is set, speaker-diarized) in the background — the meeting page polls and updates itself as processing finishes. Live in-browser recording is on the roadmap (see Status).
+Two ways to get a meeting transcribed:
+
+- **Upload**: on the Dashboard, "Upload recording" picks an audio file, which is transcribed (and, if `HF_TOKEN` is set and its gated-model terms are accepted, speaker-diarized) in the background — the meeting page polls and updates itself as processing finishes.
+- **Live recording**: "Record live" captures your mic (and, optionally, a shared browser tab's audio) directly in the browser, transcribing each side of the conversation as it happens, with live AI copilot suggestions (if an LLM provider is connected in Settings) and same-room speaker separation on your own mic channel — if more than one voice is detected talking into it, segments get labeled "Speaker 1"/"Speaker 2" live, mid-call, instead of just "Me".
 
 ## Access control
 
@@ -88,7 +97,7 @@ npm run dev
 
 ## Status
 
-This is an early-stage build. See the repo's plan history for the phased roadmap. Done so far: auth and admin-managed accounts, the full data model, the UI shell, and upload-based transcription/diarization with a transcript + playback view. Landing next: pluggable LLM providers, the knowledge base, live in-browser recording, and the live copilot.
+This is an early-stage build. See the repo's plan history for the phased roadmap. Done so far: auth and admin-managed accounts, the full data model and UI shell, upload-based transcription/diarization with a transcript + playback view, pluggable LLM providers (Anthropic/OpenAI/Gemini/Ollama) and knowledge-base ingestion, live in-browser recording with a live copilot (suggestions, blockers, action items, coach score) and post-call report generation, and live same-room speaker separation. Landing next: semantic meeting search, post-call re-transcription, admin/multi-user management, per-call cost tracking.
 
 ## Environment variables
 

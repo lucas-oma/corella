@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 
 from app.core import storage
 from app.core.config import get_settings
@@ -20,6 +22,7 @@ from app.services.audio.mixing import mix_channel_recordings, write_wav
 from app.services.copilot.live import run_cycle as run_copilot_cycle
 from app.services.llm.resolve import ResolvedProvider, resolve_provider
 from app.services.vad.vad import UtteranceDetector
+from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +143,7 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
 
     session = LiveSession(meeting_id, user.id, provider)
     consumer_task = asyncio.create_task(_consume_utterances(websocket, session))
+    speaker_poll_task = asyncio.create_task(_poll_speaker_labels(websocket, session))
 
     await websocket.send_json({"type": "ready"})
     if provider is None:
@@ -179,6 +183,11 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         # connection.
         session.enqueue_leftovers()
         await _mark_processing(meeting_id)
+
+        # Unlike consumer_task, nothing left to push events to once the
+        # connection is ending — stop it here rather than surviving into
+        # the background _drain_and_finalize task.
+        speaker_poll_task.cancel()
 
         if stopped_gracefully:
             try:
@@ -258,6 +267,57 @@ async def _consume_utterances(websocket: WebSocket, session: LiveSession) -> Non
             session.queue.task_done()
 
 
+async def _poll_speaker_labels(websocket: WebSocket, session: LiveSession) -> None:
+    """Bridges the worker's per-utterance diarize_utterance task (a separate
+    Celery process) back to this live connection. Runs for the life of the
+    connection — cancelled directly in the main handler's `finally`, unlike
+    `consumer_task` which deliberately survives into the background; there's
+    nothing left to push events to once the connection is gone.
+
+    Gated on 2+ distinct speakers actually having appeared on the "Me"
+    channel: with only one cluster so far, nothing is reported at all, so a
+    single-person call never flashes a needless "Speaker 1". The moment a
+    second distinct speaker is first detected, every already-labeled
+    segment (including earlier ones from the now-confirmed first speaker)
+    is reported at once, and new ones as they're labeled from then on.
+    """
+    reported: set[UUID] = set()
+    while True:
+        await asyncio.sleep(1)
+        try:
+            async with SessionLocal() as db:
+                rows = list(
+                    await db.scalars(
+                        select(TranscriptSegment).where(
+                            TranscriptSegment.meeting_id == session.meeting_id,
+                            TranscriptSegment.channel == Channel.ME,
+                            TranscriptSegment.speaker_id.is_not(None),
+                        )
+                    )
+                )
+        except Exception:
+            logger.exception("Live session %s: speaker-label poll failed", session.meeting_id)
+            continue
+
+        if len({row.speaker_id for row in rows}) < 2:
+            continue
+
+        for row in rows:
+            if row.id in reported:
+                continue
+            reported.add(row.id)
+            try:
+                await websocket.send_json(
+                    {
+                        "type": "speaker_labeled",
+                        "segment_id": str(row.id),
+                        "speaker_label": row.speaker_label,
+                    }
+                )
+            except Exception:
+                pass  # client may already be gone
+
+
 async def _maybe_trigger_copilot(websocket: WebSocket, session: LiveSession) -> None:
     settings = get_settings()
     elapsed = time.monotonic() - session.last_cycle_at
@@ -320,6 +380,15 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
         db.add(row)
         await db.commit()
         await db.refresh(row)
+
+    if utterance.channel == Channel.ME:
+        # Same-room diarization: fire-and-forget, never delays the
+        # transcript itself. See app/workers/tasks.py:diarize_utterance and
+        # _poll_speaker_labels below for how a label eventually comes back.
+        celery_app.send_task(
+            "corella.diarize_utterance",
+            args=[str(session.meeting_id), str(row.id), base64.b64encode(utterance.pcm).decode()],
+        )
 
     try:
         await websocket.send_json(

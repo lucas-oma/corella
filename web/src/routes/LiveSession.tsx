@@ -12,6 +12,17 @@ import {
 
 type ConnectionState = "connecting" | "connected" | "error";
 
+// Same-room speaker labels arrive live, after the fact, once a second
+// distinct voice on the "Me" channel is confirmed (see _poll_speaker_labels
+// server-side) — a small stable color per speaker number helps them read as
+// distinct people at a glance rather than just more text.
+const SPEAKER_DOT_COLORS = ["bg-accent", "bg-status-success", "bg-status-danger", "bg-ink-subtle"];
+
+function speakerDotColor(label: string): string {
+  const n = parseInt(label.replace(/\D/g, ""), 10) || 1;
+  return SPEAKER_DOT_COLORS[(n - 1) % SPEAKER_DOT_COLORS.length];
+}
+
 export default function LiveSession() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
@@ -24,6 +35,7 @@ export default function LiveSession() {
   const [stopping, setStopping] = useState(false);
   const [copilot, setCopilot] = useState<CopilotEvent | null>(null);
   const [copilotAvailable, setCopilotAvailable] = useState(true);
+  const [speakerLabels, setSpeakerLabels] = useState<Record<string, string>>({});
 
   const clientRef = useRef<LiveSessionClient | null>(null);
   const micCaptureRef = useRef<CaptureHandle | null>(null);
@@ -40,6 +52,8 @@ export default function LiveSession() {
       client.onTranscript = (event) => setTranscript((prev) => [...prev, event]);
       client.onCopilot = (event) => setCopilot(event);
       client.onCopilotUnavailable = () => setCopilotAvailable(false);
+      client.onSpeakerLabeled = (event) =>
+        setSpeakerLabels((prev) => ({ ...prev, [event.segment_id]: event.speaker_label }));
       client.onError = (message) => setError(message);
       client.onStopped = () => navigate(`/meetings/${meetingId}`);
 
@@ -150,22 +164,33 @@ export default function LiveSession() {
           {transcript.length === 0 && (
             <p className="text-sm text-ink-muted">Say something — your words will appear here.</p>
           )}
-          {transcript.map((segment) => (
-            <div
-              key={segment.id}
-              className={`flex ${segment.channel === "me" ? "justify-end" : "justify-start"}`}
-            >
+          {transcript.map((segment) => {
+            const speakerLabel = speakerLabels[segment.id];
+            return (
               <div
-                className={`max-w-[75%] rounded-lg px-4 py-2 text-sm ${
-                  segment.channel === "me"
-                    ? "bg-accent text-accent-foreground"
-                    : "border border-border text-ink dark:border-border-dark dark:text-ink-inverted"
-                }`}
+                key={segment.id}
+                className={`flex ${segment.channel === "me" ? "justify-end" : "justify-start"}`}
               >
-                {segment.text}
+                <div className={`max-w-[75%] ${segment.channel === "me" ? "text-right" : "text-left"}`}>
+                  {speakerLabel && (
+                    <p className="mb-0.5 flex items-center gap-1.5 text-xs text-ink-subtle">
+                      <span className={`h-1.5 w-1.5 rounded-full ${speakerDotColor(speakerLabel)}`} />
+                      {speakerLabel}
+                    </p>
+                  )}
+                  <div
+                    className={`rounded-lg px-4 py-2 text-sm ${
+                      segment.channel === "me"
+                        ? "bg-accent text-accent-foreground"
+                        : "border border-border text-ink dark:border-border-dark dark:text-ink-inverted"
+                    }`}
+                  >
+                    {segment.text}
+                  </div>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="card h-fit space-y-5 p-5">

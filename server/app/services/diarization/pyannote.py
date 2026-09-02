@@ -33,9 +33,8 @@ def _pipeline():
     from pyannote.audio import Pipeline  # heavy import — deferred to first use
 
     logger.info("Loading pyannote/speaker-diarization-3.1 pipeline")
-    return Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1", use_auth_token=settings.hf_token
-    )
+    # pyannote.audio 4.x renamed use_auth_token= to token=.
+    return Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=settings.hf_token)
 
 
 def diarize(audio_path: str) -> list[DiarizationTurn]:
@@ -43,7 +42,11 @@ def diarize(audio_path: str) -> list[DiarizationTurn]:
     once per worker process (module-level lazy singleton).
     """
     pipeline = _pipeline()
-    annotation = pipeline(audio_path)
+    result = pipeline(audio_path)
+    # pyannote.audio 4.x wraps the result in a DiarizeOutput dataclass
+    # instead of returning the pyannote.core.Annotation directly (3.x) —
+    # the Annotation with the .itertracks() this needs is now one field on it.
+    annotation = result.speaker_diarization
     return [
         DiarizationTurn(start=turn.start, end=turn.end, speaker=speaker)
         for turn, _, speaker in annotation.itertracks(yield_label=True)

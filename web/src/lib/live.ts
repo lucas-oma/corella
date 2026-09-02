@@ -19,6 +19,11 @@ export interface CopilotEvent {
   coach_score: number | null;
 }
 
+export interface SpeakerLabeledEvent {
+  segment_id: string;
+  speaker_label: string;
+}
+
 export interface CaptureHandle {
   stop: () => void;
 }
@@ -70,6 +75,7 @@ export class LiveSessionClient {
   onTranscript: ((event: TranscriptEvent) => void) | null = null;
   onCopilot: ((event: CopilotEvent) => void) | null = null;
   onCopilotUnavailable: (() => void) | null = null;
+  onSpeakerLabeled: ((event: SpeakerLabeledEvent) => void) | null = null;
   onStopped: (() => void) | null = null;
   onError: ((message: string) => void) | null = null;
 
@@ -92,6 +98,8 @@ export class LiveSessionClient {
           blockers?: string[];
           action_items?: string[];
           coach_score?: number | null;
+          segment_id?: string;
+          speaker_label?: string;
         };
         try {
           msg = JSON.parse(event.data);
@@ -108,7 +116,9 @@ export class LiveSessionClient {
             coach_score: msg.coach_score ?? null,
           });
         } else if (msg.type === "copilot_unavailable") this.onCopilotUnavailable?.();
-        else if (msg.type === "stopped") this.onStopped?.();
+        else if (msg.type === "speaker_labeled" && msg.segment_id && msg.speaker_label) {
+          this.onSpeakerLabeled?.({ segment_id: msg.segment_id, speaker_label: msg.speaker_label });
+        } else if (msg.type === "stopped") this.onStopped?.();
         else if (msg.type === "error") this.onError?.(msg.message ?? "Live session error");
       };
       this.ws.onerror = () => reject(new Error("WebSocket connection failed"));
