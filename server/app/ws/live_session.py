@@ -28,6 +28,18 @@ _CHANNEL_KEY = {Channel.ME: "me", Channel.THEM: "them"}
 AUTH_TIMEOUT_SECONDS = 5.0
 SAMPLE_RATE = 16000
 
+# asyncio only holds a *weak* reference to a task once nothing else does —
+# an unreferenced background task can be garbage-collected mid-run. Keep a
+# strong reference here for the drain-and-finalize task, which deliberately
+# outlives the connection that spawned it.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 class _Utterance:
     __slots__ = ("channel", "pcm", "start_ms", "end_ms")
@@ -142,17 +154,16 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         # hit an error — a live meeting must never be left stuck at
         # `recording` with nothing left to finish it (same lesson as the
         # Phase B/C orphaned-meeting bug).
-        try:
-            session.enqueue_leftovers()
-            await asyncio.wait_for(session.queue.join(), timeout=60)
-        except Exception:
-            logger.exception("Live session %s: draining the utterance queue failed", meeting_id)
-        consumer_task.cancel()
-
-        try:
-            await _finalize(session)
-        except Exception:
-            logger.exception("Live session %s: _finalize raised", meeting_id)
+        #
+        # Draining a possible transcription backlog and mixing the full
+        # recording can take a while on a long call — that used to happen
+        # *before* replying, so "Stop" could hang for as long as that took.
+        # Mark the meeting `processing` immediately instead and let the
+        # frontend fall into the exact same polling path the upload flow
+        # already uses; the real finalize keeps running detached from this
+        # connection.
+        session.enqueue_leftovers()
+        await _mark_processing(meeting_id)
 
         if stopped_gracefully:
             try:
@@ -163,6 +174,8 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
             await websocket.close()
         except Exception:
             pass
+
+        _spawn_background(_drain_and_finalize(session, consumer_task))
 
 
 async def _authenticate(websocket: WebSocket) -> User | None:
@@ -279,6 +292,35 @@ async def _transcribe_pcm(pcm: bytes) -> str:
 
 def _duration_ms(pcm: bytes, sample_rate: int = SAMPLE_RATE) -> int:
     return int(len(pcm) / 2 / sample_rate * 1000)
+
+
+async def _mark_processing(meeting_id: UUID) -> None:
+    """Fast, synchronous status flip so the frontend can leave the live page
+    immediately and fall into the same `processing` polling UI the upload
+    path already has — the real work happens in _drain_and_finalize."""
+    async with SessionLocal() as db:
+        meeting = await db.get(Meeting, meeting_id)
+        if meeting is not None and meeting.status == MeetingStatus.RECORDING:
+            meeting.status = MeetingStatus.PROCESSING
+            await db.commit()
+
+
+async def _drain_and_finalize(session: LiveSession, consumer_task: asyncio.Task) -> None:
+    """Runs detached from the WS connection (see _spawn_background) — the
+    client already got its response and moved on by the time this finishes.
+    """
+    try:
+        await asyncio.wait_for(session.queue.join(), timeout=600)
+    except Exception:
+        logger.exception(
+            "Live session %s: draining the utterance queue failed", session.meeting_id
+        )
+    consumer_task.cancel()
+
+    try:
+        await _finalize(session)
+    except Exception:
+        logger.exception("Live session %s: _finalize raised", session.meeting_id)
 
 
 async def _finalize(session: LiveSession) -> None:
