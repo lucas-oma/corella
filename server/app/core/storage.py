@@ -24,6 +24,7 @@ for _ext, _type in {
     ".webm": "audio/webm",
     ".ogg": "audio/ogg",
     ".flac": "audio/flac",
+    ".caf": "audio/x-caf",
 }.items():
     mimetypes.add_type(_type, _ext)
 

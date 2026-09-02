@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-_ALLOWED_VOICE_EXTENSIONS = {".wav", ".webm", ".m4a", ".mp3", ".ogg", ".flac"}
+_ALLOWED_VOICE_EXTENSIONS = {".wav", ".webm", ".m4a", ".mp3", ".ogg", ".flac", ".caf"}
 
 
 def _looks_like_audio(filename: str | None, content_type: str | None) -> bool:
