@@ -2,7 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type ActionItem, type Meeting, type TranscriptSegment } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  CALL_TYPE_LABEL,
+  type ActionItem,
+  type Meeting,
+  type TranscriptSegment,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
 const POLL_INTERVAL_MS = 3000;
@@ -105,7 +112,18 @@ export default function MeetingDetail() {
     setGeneratingReport(true);
     try {
       const report = await api.generateReport(meetingId);
-      setMeeting((prev) => (prev ? { ...prev, summary: report.summary } : prev));
+      setMeeting((prev) =>
+        prev
+          ? {
+              ...prev,
+              title: report.title,
+              summary: report.summary,
+              key_topics: report.key_topics,
+              sentiment: report.sentiment,
+              notable_quotes: report.notable_quotes,
+            }
+          : prev,
+      );
       setActionItems(report.action_items);
       setTalkRatio(report.talk_ratio);
     } catch (err) {
@@ -173,7 +191,12 @@ export default function MeetingDetail() {
 
       {meeting && (
         <>
-          <h1 className="mt-2 font-serif text-2xl text-ink dark:text-ink-inverted">{meeting.title}</h1>
+          <div className="mt-2 flex items-center gap-2">
+            <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">{meeting.title}</h1>
+            <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+              {CALL_TYPE_LABEL[meeting.call_type]}
+            </span>
+          </div>
           <p className="mt-1 text-sm text-ink-muted">
             {!isOwner && <>{meeting.owner_name} · </>}
             {new Date(meeting.created_at).toLocaleString()}
@@ -225,7 +248,14 @@ export default function MeetingDetail() {
 
               <div className="card p-6">
                 <div className="mb-3 flex items-center justify-between">
-                  <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Report</h2>
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Report</h2>
+                    {meeting.sentiment && (
+                      <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                        {meeting.sentiment}
+                      </span>
+                    )}
+                  </div>
                   {isOwner && (meeting.summary || actionItems.length > 0) && (
                     <button
                       onClick={onGenerateReport}
@@ -263,6 +293,32 @@ export default function MeetingDetail() {
 
                 {meeting.summary && (
                   <p className="text-sm text-ink dark:text-ink-inverted">{meeting.summary}</p>
+                )}
+
+                {meeting.key_topics && meeting.key_topics.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {meeting.key_topics.map((topic) => (
+                      <span
+                        key={topic}
+                        className="rounded-full bg-black/[0.03] px-2.5 py-0.5 text-xs text-ink-muted dark:bg-white/[0.06]"
+                      >
+                        {topic}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {meeting.notable_quotes && meeting.notable_quotes.length > 0 && (
+                  <ul className="mt-4 space-y-2">
+                    {meeting.notable_quotes.map((quote, i) => (
+                      <li
+                        key={i}
+                        className="border-l-2 border-border pl-3 text-sm italic text-ink-muted dark:border-border-dark"
+                      >
+                        "{quote}"
+                      </li>
+                    ))}
+                  </ul>
                 )}
 
                 {talkRatio && (

@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import ARRAY, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,6 +30,18 @@ class ActionItemStatus(str, enum.Enum):
     DONE = "done"
 
 
+class CallType(str, enum.Enum):
+    """What kind of call this is — picked at creation time, used to steer
+    the post-call report's focus (app/services/copilot/report.py's
+    _CALL_TYPE_GUIDANCE), not just cosmetic."""
+
+    MEETING = "meeting"
+    SALES = "sales"
+    SUPPORT = "support"
+    INTERVIEW = "interview"
+    ONE_ON_ONE = "one_on_one"
+
+
 class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "meetings"
 
@@ -49,6 +61,12 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     audio_path: Mapped[str | None] = mapped_column(String(1024))
     summary: Mapped[str | None] = mapped_column(Text)
     processing_error: Mapped[str | None] = mapped_column(Text)
+    call_type: Mapped[CallType] = mapped_column(
+        pg_enum(CallType, "meeting_call_type"), default=CallType.MEETING
+    )
+    key_topics: Mapped[list[str] | None] = mapped_column(ARRAY(String))
+    sentiment: Mapped[str | None] = mapped_column(String(255))
+    notable_quotes: Mapped[list[str] | None] = mapped_column(ARRAY(String))
 
     owner: Mapped[User] = relationship(lazy="joined")
 

@@ -76,16 +76,30 @@ export interface AuthConfig {
   allow_public_registration: boolean;
 }
 
+export type CallType = "meeting" | "sales" | "support" | "interview" | "one_on_one";
+
+export const CALL_TYPE_LABEL: Record<CallType, string> = {
+  meeting: "Meeting",
+  sales: "Sales call",
+  support: "Support call",
+  interview: "Interview",
+  one_on_one: "1:1",
+};
+
 export interface Meeting {
   id: string;
   title: string;
   status: "recording" | "processing" | "ready" | "failed";
+  call_type: CallType;
   started_at: string | null;
   ended_at: string | null;
   duration_seconds: number | null;
   has_audio: boolean;
   processing_error: string | null;
   summary: string | null;
+  key_topics: string[] | null;
+  sentiment: string | null;
+  notable_quotes: string[] | null;
   created_at: string;
   owner_id: string;
   owner_name: string;
@@ -110,7 +124,11 @@ export interface ActionItem {
 }
 
 export interface Report {
+  title: string;
   summary: string;
+  key_topics: string[];
+  sentiment: string | null;
+  notable_quotes: string[];
   action_items: ActionItem[];
   talk_ratio: { me: number; them: number } | null;
 }
@@ -137,6 +155,27 @@ export interface MeetingSearchResult {
   created_at: string;
   snippet: string;
   start_ms: number;
+}
+
+export interface Group {
+  id: string;
+  name: string;
+  created_at: string;
+  member_count: number;
+}
+
+export interface AdminUserCreate {
+  email: string;
+  password: string;
+  full_name: string;
+  role: User["role"];
+  group_id: string | null;
+}
+
+export interface AdminUserUpdate {
+  role?: User["role"];
+  group_id?: string | null;
+  clear_group?: boolean;
 }
 
 export interface KBDocument {
@@ -168,8 +207,11 @@ export const api = {
   listGroupMeetings: () => request<GroupMeeting[]>("/api/meetings/group"),
   searchMeetings: (query: string) =>
     request<MeetingSearchResult[]>(`/api/meetings/search?q=${encodeURIComponent(query)}`),
-  createMeeting: (title: string) =>
-    request<Meeting>("/api/meetings", { method: "POST", body: JSON.stringify({ title }) }),
+  createMeeting: (title: string, callType: CallType = "meeting") =>
+    request<Meeting>("/api/meetings", {
+      method: "POST",
+      body: JSON.stringify({ title, call_type: callType }),
+    }),
   getMeeting: (id: string) => request<Meeting>(`/api/meetings/${id}`),
   uploadMeetingAudio: (id: string, file: File) => {
     const form = new FormData();
@@ -201,4 +243,13 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ status }),
     }),
+  adminListUsers: () => request<User[]>("/api/admin/users"),
+  adminCreateUser: (payload: AdminUserCreate) =>
+    request<User>("/api/admin/users", { method: "POST", body: JSON.stringify(payload) }),
+  adminUpdateUser: (id: string, payload: AdminUserUpdate) =>
+    request<User>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  adminListGroups: () => request<Group[]>("/api/admin/groups"),
+  adminCreateGroup: (name: string) =>
+    request<Group>("/api/admin/groups", { method: "POST", body: JSON.stringify({ name }) }),
+  adminDeleteGroup: (id: string) => request<void>(`/api/admin/groups/${id}`, { method: "DELETE" }),
 };

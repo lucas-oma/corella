@@ -95,7 +95,7 @@ async def create_meeting(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Meeting:
-    meeting = Meeting(owner_id=current_user.id, title=payload.title)
+    meeting = Meeting(owner_id=current_user.id, title=payload.title, call_type=payload.call_type)
     db.add(meeting)
     await db.commit()
     # refresh() reloads meeting's own columns, not the lazy="joined" owner
@@ -288,7 +288,11 @@ async def create_meeting_report(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
     return ReportResponse(
+        title=result.title,
         summary=result.summary,
+        key_topics=result.key_topics,
+        sentiment=result.sentiment,
+        notable_quotes=result.notable_quotes,
         action_items=[ActionItemRead.model_validate(item) for item in result.action_items],
         talk_ratio=result.talk_ratio,
     )

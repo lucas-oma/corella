@@ -18,6 +18,10 @@ class ActionItemUpdate(BaseModel):
 
 
 class ReportResponse(BaseModel):
+    title: str
     summary: str
+    key_topics: list[str]
+    sentiment: str | None
+    notable_quotes: list[str]
     action_items: list[ActionItemRead]
     talk_ratio: dict[str, int] | None

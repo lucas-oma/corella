@@ -3,11 +3,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.meeting import MeetingStatus
+from app.models.meeting import CallType, MeetingStatus
 
 
 class MeetingCreate(BaseModel):
     title: str = "Untitled meeting"
+    call_type: CallType = CallType.MEETING
 
 
 class MeetingRead(BaseModel):
@@ -16,12 +17,16 @@ class MeetingRead(BaseModel):
     id: UUID
     title: str
     status: MeetingStatus
+    call_type: CallType
     started_at: datetime | None
     ended_at: datetime | None
     duration_seconds: int | None
     has_audio: bool
     processing_error: str | None
     summary: str | None
+    key_topics: list[str] | None
+    sentiment: str | None
+    notable_quotes: list[str] | None
     created_at: datetime
     owner_id: UUID
     owner_name: str

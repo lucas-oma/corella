@@ -14,6 +14,7 @@ const NAV = [
 export default function AppShell({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const nav = user?.role === "admin" ? [...NAV, { to: "/admin", label: "Admin" }] : NAV;
 
   return (
     <div className="min-h-screen">
@@ -26,7 +27,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
               <span className="font-serif text-lg text-ink dark:text-ink-inverted">Corella</span>
             </div>
             <nav className="flex items-center gap-1">
-              {NAV.map((item) => {
+              {nav.map((item) => {
                 const active = location.pathname.startsWith(item.to);
                 return (
                   <Link

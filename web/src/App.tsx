@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AuthProvider, useAuth } from "@/lib/auth";
+import Admin from "@/routes/Admin";
 import Dashboard from "@/routes/Dashboard";
 import KnowledgeBase from "@/routes/KnowledgeBase";
 import LiveSession from "@/routes/LiveSession";
@@ -14,6 +15,12 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
   if (loading) return null;
   if (!user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+function RequireAdmin({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  if (user?.role !== "admin") return <Navigate to="/dashboard" replace />;
   return <>{children}</>;
 }
 
@@ -60,6 +67,16 @@ export default function App() {
           element={
             <RequireAuth>
               <Settings />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/admin"
+          element={
+            <RequireAuth>
+              <RequireAdmin>
+                <Admin />
+              </RequireAdmin>
             </RequireAuth>
           }
         />

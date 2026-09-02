@@ -2,7 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type GroupMeeting, type Meeting, type MeetingSearchResult } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  CALL_TYPE_LABEL,
+  type CallType,
+  type GroupMeeting,
+  type Meeting,
+  type MeetingSearchResult,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
 const STATUS_LABEL: Record<Meeting["status"], string> = {
@@ -32,6 +40,7 @@ export default function Dashboard() {
   const [searching, setSearching] = useState(false);
   const [view, setView] = useState<"mine" | "group">("mine");
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[] | null>(null);
+  const [callType, setCallType] = useState<CallType>("meeting");
 
   useEffect(() => {
     api.listMeetings().then(setMeetings);
@@ -85,7 +94,7 @@ export default function Dashboard() {
     setUploading(true);
     let meeting: Meeting | null = null;
     try {
-      meeting = await api.createMeeting(titleFromFilename(file.name));
+      meeting = await api.createMeeting(titleFromFilename(file.name), callType);
       await api.uploadMeetingAudio(meeting.id, file);
       navigate(`/meetings/${meeting.id}`);
     } catch (err) {
@@ -104,7 +113,7 @@ export default function Dashboard() {
     setError(null);
     setStarting(true);
     try {
-      const meeting = await api.createMeeting("Live recording");
+      const meeting = await api.createMeeting("Live recording", callType);
       navigate(`/meetings/${meeting.id}/live`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't start a live session");
@@ -136,7 +145,19 @@ export default function Dashboard() {
             Your recorded calls, transcripts, and coaching reports.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          <select
+            value={callType}
+            onChange={(e) => setCallType(e.target.value as CallType)}
+            className="field w-auto py-1.5 text-sm"
+            title="Call type — guides what the post-call report focuses on"
+          >
+            {(Object.keys(CALL_TYPE_LABEL) as CallType[]).map((type) => (
+              <option key={type} value={type}>
+                {CALL_TYPE_LABEL[type]}
+              </option>
+            ))}
+          </select>
           <button onClick={onRecordLive} disabled={starting} className="btn-primary">
             {starting ? "Starting…" : "Record live"}
           </button>
