@@ -6,7 +6,7 @@ export default function Footer() {
         href="https://github.com/lucas-oma"
         target="_blank"
         rel="noopener noreferrer"
-        className="text-accent hover:underline"
+        className="text-accent underline"
       >
         lucas-oma
       </a>

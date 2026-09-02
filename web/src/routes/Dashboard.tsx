@@ -292,7 +292,7 @@ export default function Dashboard() {
             </div>
           )}
           {filteredGroupMeetings && filteredGroupMeetings.length > 0 && (
-            <ul className="card divide-y divide-border dark:divide-border-dark">
+            <ul className="card max-h-[70vh] divide-y divide-border overflow-y-auto dark:divide-border-dark">
               {filteredGroupMeetings.map((meeting) => (
                 <li key={meeting.id}>
                   <Link
@@ -324,7 +324,7 @@ export default function Dashboard() {
             </div>
           )}
           {searchResults.length > 0 && (
-            <ul className="card divide-y divide-border dark:divide-border-dark">
+            <ul className="card max-h-[70vh] divide-y divide-border overflow-y-auto dark:divide-border-dark">
               {searchResults.map((result) => (
                 <li key={result.meeting_id}>
                   <Link
@@ -359,7 +359,7 @@ export default function Dashboard() {
             </div>
           )}
           {allMeetings && allMeetings.length > 0 && (
-            <ul className="card divide-y divide-border dark:divide-border-dark">
+            <ul className="card max-h-[70vh] divide-y divide-border overflow-y-auto dark:divide-border-dark">
               {allMeetings.map((meeting) => (
                 <li key={meeting.id}>
                   <Link
@@ -396,7 +396,7 @@ export default function Dashboard() {
           )}
 
           {meetings && meetings.length > 0 && (
-            <ul className="card divide-y divide-border dark:divide-border-dark">
+            <ul className="card max-h-[70vh] divide-y divide-border overflow-y-auto dark:divide-border-dark">
               {meetings.map((meeting) => (
                 <li key={meeting.id}>
                   <Link
