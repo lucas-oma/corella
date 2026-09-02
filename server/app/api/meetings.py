@@ -7,11 +7,11 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_admin
 from app.core import storage
 from app.core.db import get_db
 from app.models.meeting import ActionItem, Meeting, MeetingStatus, TranscriptSegment
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.meeting import GroupMeetingRead, MeetingCreate, MeetingRead, MeetingSearchResult
 from app.schemas.report import ActionItemRead, ActionItemUpdate, ReportResponse
 from app.schemas.transcript import TranscriptSegmentRead
@@ -57,23 +57,40 @@ async def _get_owned_meeting(
 async def _get_group_visible_meeting(
     meeting_id: UUID, current_user: User, db: AsyncSession
 ) -> Meeting:
-    """Owner OR same group as the owner — used *only* by the report-shaped
-    reads (GET /{id}, GET /{id}/action-items). Every other route (audio,
-    transcript, report generation, action-item edits, delete, upload) stays
-    on the strict _get_owned_meeting above — "no access to others'
-    conversation, just the report" was explicit in the request that asked
-    for this.
+    """Owner OR same group as the owner OR an admin — used *only* by the
+    report-shaped reads (GET /{id}, GET /{id}/action-items). Every other
+    route (audio, transcript, report generation, action-item edits, delete,
+    upload) stays on the strict _get_owned_meeting above (or, for admins,
+    _get_full_readable_meeting below) — group membership alone only ever
+    grants the report, never the raw recording.
     """
     meeting = await db.get(Meeting, meeting_id)
     if meeting is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
-    if meeting.owner_id == current_user.id:
+    if meeting.owner_id == current_user.id or current_user.role == UserRole.ADMIN:
         return meeting
     if current_user.group_id is not None:
         owner_group_id = await db.scalar(select(User.group_id).where(User.id == meeting.owner_id))
         if owner_group_id is not None and owner_group_id == current_user.group_id:
             return meeting
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+
+
+async def _get_full_readable_meeting(
+    meeting_id: UUID, current_user: User, db: AsyncSession
+) -> Meeting:
+    """Owner OR an admin — used *only* by the two raw-content reads (GET
+    .../audio, GET .../transcript). Deliberately does NOT include group
+    membership: a group-mate only ever gets the report-shaped view via
+    _get_group_visible_meeting above, never the recording itself. Read-only
+    — every write route (delete, upload, report generation, action-item
+    edits) stays on the strict owner-only _get_owned_meeting, with no admin
+    override, even for an admin.
+    """
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None or (meeting.owner_id != current_user.id and current_user.role != UserRole.ADMIN):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    return meeting
 
 
 @router.get("", response_model=list[MeetingRead])
@@ -181,6 +198,24 @@ async def list_group_meetings(
     return list(result)
 
 
+@router.get("/all", response_model=list[GroupMeetingRead])
+async def list_all_meetings(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[Meeting]:
+    """Every meeting in the system, for the Dashboard's admin-only "All
+    meetings" tab — same report-shaped list shape as /group (title/status/
+    who/when), not the full MeetingRead. Opening one goes through
+    _get_group_visible_meeting (report) or _get_full_readable_meeting
+    (audio/transcript) like any other access — this list is just for
+    browsing. require_admin (app/api/deps.py) 403s a non-admin outright.
+    Registered before /{meeting_id} — same route-order reason as /search
+    and /group.
+    """
+    result = await db.scalars(select(Meeting).order_by(Meeting.created_at.desc()))
+    return list(result)
+
+
 @router.get("/{meeting_id}", response_model=MeetingRead)
 async def get_meeting(
     meeting_id: UUID,
@@ -244,7 +279,7 @@ async def get_meeting_audio(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    meeting = await _get_owned_meeting(meeting_id, current_user, db)
+    meeting = await _get_full_readable_meeting(meeting_id, current_user, db)
     if not meeting.audio_path:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No audio for this meeting")
 
@@ -257,7 +292,7 @@ async def get_meeting_transcript(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[TranscriptSegment]:
-    await _get_owned_meeting(meeting_id, current_user, db)
+    await _get_full_readable_meeting(meeting_id, current_user, db)
 
     result = await db.scalars(
         select(TranscriptSegment)

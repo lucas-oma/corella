@@ -38,22 +38,27 @@ export default function Dashboard() {
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<MeetingSearchResult[] | null>(null);
   const [searching, setSearching] = useState(false);
-  const [view, setView] = useState<"mine" | "group">("mine");
+  const [view, setView] = useState<"mine" | "group" | "all">("mine");
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[] | null>(null);
+  const [allMeetings, setAllMeetings] = useState<GroupMeeting[] | null>(null);
   const [callType, setCallType] = useState<CallType>("meeting");
+  const isAdmin = user?.role === "admin";
 
   useEffect(() => {
     api.listMeetings().then(setMeetings);
   }, []);
 
-  // Only fetched once the user actually switches to it — an ungrouped user
-  // (the vast majority, and the tab isn't even shown to them) never needs
-  // this request at all.
+  // Only fetched once the user actually switches to it — someone who never
+  // opens the Group/All tab (the vast majority for "All," since it's
+  // admin-only) never needs the request at all.
   useEffect(() => {
     if (view === "group" && groupMeetings === null) {
       api.listGroupMeetings().then(setGroupMeetings);
     }
-  }, [view, groupMeetings]);
+    if (view === "all" && allMeetings === null) {
+      api.listAllMeetings().then(setAllMeetings);
+    }
+  }, [view, groupMeetings, allMeetings]);
 
   // Semantic search, not a substring filter over the already-loaded list —
   // needs a real request per query, so debounce it rather than searching on
@@ -178,21 +183,23 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {user?.group_id && (
+      {(user?.group_id || isAdmin) && (
         <div className="mb-6 flex gap-1 border-b border-border dark:border-border-dark">
-          {(["mine", "group"] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setView(tab)}
-              className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
-                view === tab
-                  ? "border-accent text-ink dark:border-ink-inverted dark:text-ink-inverted"
-                  : "border-transparent text-ink-muted hover:text-ink dark:hover:text-ink-inverted"
-              }`}
-            >
-              {tab === "mine" ? "My meetings" : "Group"}
-            </button>
-          ))}
+          {(["mine", ...(user?.group_id ? (["group"] as const) : []), ...(isAdmin ? (["all"] as const) : [])] as const).map(
+            (tab) => (
+              <button
+                key={tab}
+                onClick={() => setView(tab)}
+                className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
+                  view === tab
+                    ? "border-accent text-ink dark:border-ink-inverted dark:text-ink-inverted"
+                    : "border-transparent text-ink-muted hover:text-ink dark:hover:text-ink-inverted"
+                }`}
+              >
+                {tab === "mine" ? "My meetings" : tab === "group" ? "Group" : "All meetings"}
+              </button>
+            ),
+          )}
         </div>
       )}
 
@@ -215,41 +222,47 @@ export default function Dashboard() {
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
 
-      {view === "group" ? (
+      {view === "group" || view === "all" ? (
         <>
-          {groupMeetings === null && <p className="text-sm text-ink-muted">Loading…</p>}
-          {groupMeetings?.length === 0 && (
-            <div className="card p-10 text-center">
-              <p className="text-sm text-ink-muted">
-                No meetings from your group yet — reports show up here once a group-mate
-                finishes one.
-              </p>
-            </div>
-          )}
-          {groupMeetings && groupMeetings.length > 0 && (
-            <ul className="card divide-y divide-border dark:divide-border-dark">
-              {groupMeetings.map((meeting) => (
-                <li key={meeting.id}>
-                  <Link
-                    to={`/meetings/${meeting.id}`}
-                    className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
-                  >
-                    <div>
-                      <p className="text-sm font-medium text-ink dark:text-ink-inverted">
-                        {meeting.title}
-                      </p>
-                      <p className="mt-0.5 text-xs text-ink-subtle">
-                        {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
-                      </p>
-                    </div>
-                    <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
-                      {STATUS_LABEL[meeting.status]}
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
+          {(() => {
+            const list = view === "group" ? groupMeetings : allMeetings;
+            if (list === null) return <p className="text-sm text-ink-muted">Loading…</p>;
+            if (list.length === 0) {
+              return (
+                <div className="card p-10 text-center">
+                  <p className="text-sm text-ink-muted">
+                    {view === "group"
+                      ? "No meetings from your group yet — reports show up here once a group-mate finishes one."
+                      : "No meetings yet, across any account."}
+                  </p>
+                </div>
+              );
+            }
+            return (
+              <ul className="card divide-y divide-border dark:divide-border-dark">
+                {list.map((meeting) => (
+                  <li key={meeting.id}>
+                    <Link
+                      to={`/meetings/${meeting.id}`}
+                      className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                    >
+                      <div>
+                        <p className="text-sm font-medium text-ink dark:text-ink-inverted">
+                          {meeting.title}
+                        </p>
+                        <p className="mt-0.5 text-xs text-ink-subtle">
+                          {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
+                        </p>
+                      </div>
+                      <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                        {STATUS_LABEL[meeting.status]}
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            );
+          })()}
         </>
       ) : searchResults !== null ? (
         <>

@@ -205,6 +205,7 @@ export const api = {
   me: () => request<User>("/api/auth/me"),
   listMeetings: () => request<Meeting[]>("/api/meetings"),
   listGroupMeetings: () => request<GroupMeeting[]>("/api/meetings/group"),
+  listAllMeetings: () => request<GroupMeeting[]>("/api/meetings/all"),
   searchMeetings: (query: string) =>
     request<MeetingSearchResult[]>(`/api/meetings/search?q=${encodeURIComponent(query)}`),
   createMeeting: (title: string, callType: CallType = "meeting") =>

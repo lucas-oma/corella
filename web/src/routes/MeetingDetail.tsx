@@ -45,6 +45,11 @@ export default function MeetingDetail() {
   // this too (GET /{id} itself 404s for anyone else), this is just what
   // the UI shows once it *has* been let in.
   const isOwner = meeting ? meeting.owner_id === user?.id : true;
+  // An admin gets full read-only access system-wide (audio + transcript,
+  // not just the report) — but never the write controls below, which stay
+  // strictly isOwner. Server-enforced too (GET .../audio and .../transcript
+  // 404 for anyone else, admin included, on write routes).
+  const canViewFull = isOwner || user?.role === "admin";
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -90,21 +95,24 @@ export default function MeetingDetail() {
   }, [meetingId]);
 
   // Once the transcript is ready, load it plus the audio (as an object URL,
-  // since <audio src> can't carry our Authorization header). Skipped for a
-  // group-mate's meeting — the server would 404 both anyway (still strictly
-  // owner-only), no point attempting either fetch.
+  // since <audio src> can't carry our Authorization header) — for the owner
+  // or an admin. Skipped for a group-mate's meeting — the server would 404
+  // both anyway (never group-visible, only report-visible), no point
+  // attempting either fetch.
   useEffect(() => {
     if (!meetingId || meeting?.status !== "ready") return;
 
-    if (isOwner) {
+    if (canViewFull) {
       api.getTranscript(meetingId).then(setTranscript);
       if (meeting.has_audio) {
         api.getAudioObjectUrl(meetingId).then(setAudioUrl);
       }
+    }
+    if (isOwner) {
       api.getProviderStatus().then((statuses) => setProviderConnected(statuses.some((s) => s.connected)));
     }
     api.listActionItems(meetingId).then(setActionItems);
-  }, [meetingId, meeting?.status, meeting?.has_audio, isOwner]);
+  }, [meetingId, meeting?.status, meeting?.has_audio, isOwner, canViewFull]);
 
   async function onGenerateReport() {
     if (!meetingId) return;
@@ -202,9 +210,15 @@ export default function MeetingDetail() {
             {new Date(meeting.created_at).toLocaleString()}
           </p>
 
-          {!isOwner && (
+          {!isOwner && !canViewFull && (
             <p className="mt-2 text-xs text-ink-subtle">
               Shared from your group — you can see the report below, not the full recording.
+            </p>
+          )}
+
+          {!isOwner && canViewFull && (
+            <p className="mt-2 text-xs text-ink-subtle">
+              Viewing as admin — full recording and transcript.
             </p>
           )}
 
@@ -359,17 +373,17 @@ export default function MeetingDetail() {
                 )}
               </div>
 
-              {isOwner && transcript === null && (
+              {canViewFull && transcript === null && (
                 <p className="text-sm text-ink-muted">Loading transcript…</p>
               )}
 
-              {isOwner && transcript?.length === 0 && (
+              {canViewFull && transcript?.length === 0 && (
                 <div className="card p-10 text-center">
                   <p className="text-sm text-ink-muted">No speech was detected in this recording.</p>
                 </div>
               )}
 
-              {isOwner && transcript && transcript.length > 0 && (
+              {canViewFull && transcript && transcript.length > 0 && (
                 <ol className="card divide-y divide-border dark:divide-border-dark">
                   {transcript.map((segment) => (
                     <li key={segment.id}>
