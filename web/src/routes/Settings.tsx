@@ -24,6 +24,81 @@ function statusLabel(status: ProviderStatus): string {
   return status.source === "env" ? "Connected via .env" : "Connected";
 }
 
+// Deepgram's documented pre-recorded-transcription language codes (Nova-3's
+// list, the broader of the two models this app offers — a code Nova-2
+// doesn't support just gets rejected by Deepgram itself, same as an admin
+// typing an unsupported code ever could before this became a dropdown).
+// One entry per language (base code, not every regional variant) — a
+// regional code can still be set via the model field's neighboring API if
+// ever needed, but the base code is what the overwhelming majority of users
+// want. "multi" is Deepgram's own automatic multi-language/code-switching
+// mode (English, Spanish, French, German, Hindi, Russian, Portuguese,
+// Japanese, Italian, Dutch) — also this app's own default when no language
+// preference is set at all (app/services/asr/resolve.py).
+const DEEPGRAM_LANGUAGES: { code: string; label: string }[] = [
+  { code: "multi", label: "Multi (auto-detect, code-switching)" },
+  { code: "af", label: "Afrikaans" },
+  { code: "ar", label: "Arabic" },
+  { code: "hy", label: "Armenian" },
+  { code: "as", label: "Assamese" },
+  { code: "be", label: "Belarusian" },
+  { code: "bn", label: "Bengali" },
+  { code: "bs", label: "Bosnian" },
+  { code: "bg", label: "Bulgarian" },
+  { code: "ca", label: "Catalan" },
+  { code: "zh", label: "Chinese (Mandarin)" },
+  { code: "zh-HK", label: "Chinese (Cantonese)" },
+  { code: "hr", label: "Croatian" },
+  { code: "cs", label: "Czech" },
+  { code: "da", label: "Danish" },
+  { code: "nl", label: "Dutch" },
+  { code: "en", label: "English" },
+  { code: "et", label: "Estonian" },
+  { code: "fi", label: "Finnish" },
+  { code: "nl-BE", label: "Flemish" },
+  { code: "fr", label: "French" },
+  { code: "ka", label: "Georgian" },
+  { code: "de", label: "German" },
+  { code: "el", label: "Greek" },
+  { code: "gu", label: "Gujarati" },
+  { code: "he", label: "Hebrew" },
+  { code: "hi", label: "Hindi" },
+  { code: "hu", label: "Hungarian" },
+  { code: "id", label: "Indonesian" },
+  { code: "it", label: "Italian" },
+  { code: "ja", label: "Japanese" },
+  { code: "kn", label: "Kannada" },
+  { code: "ko", label: "Korean" },
+  { code: "lv", label: "Latvian" },
+  { code: "lt", label: "Lithuanian" },
+  { code: "mk", label: "Macedonian" },
+  { code: "ms", label: "Malay" },
+  { code: "mr", label: "Marathi" },
+  { code: "mn", label: "Mongolian" },
+  { code: "ne", label: "Nepali" },
+  { code: "no", label: "Norwegian" },
+  { code: "ps", label: "Pashto" },
+  { code: "fa", label: "Persian" },
+  { code: "pl", label: "Polish" },
+  { code: "pt", label: "Portuguese" },
+  { code: "pa", label: "Punjabi" },
+  { code: "ro", label: "Romanian" },
+  { code: "ru", label: "Russian" },
+  { code: "sr", label: "Serbian" },
+  { code: "sk", label: "Slovak" },
+  { code: "sl", label: "Slovenian" },
+  { code: "es", label: "Spanish" },
+  { code: "sv", label: "Swedish" },
+  { code: "tl", label: "Tagalog" },
+  { code: "ta", label: "Tamil" },
+  { code: "te", label: "Telugu" },
+  { code: "th", label: "Thai" },
+  { code: "tr", label: "Turkish" },
+  { code: "uk", label: "Ukrainian" },
+  { code: "ur", label: "Urdu" },
+  { code: "vi", label: "Vietnamese" },
+];
+
 export default function Settings() {
   const { user, refreshUser } = useAuth();
   const [providers, setProviders] = useState<ProviderStatus[] | null>(null);
@@ -556,13 +631,18 @@ export default function Settings() {
                         onChange={(e) => setInputs((prev) => ({ ...prev, sttModel: e.target.value }))}
                         className="field w-full text-sm"
                       />
-                      <input
-                        type="text"
-                        placeholder="multi (auto-detect — recommended)"
+                      <select
                         value={inputs.sttLanguage ?? ""}
                         onChange={(e) => setInputs((prev) => ({ ...prev, sttLanguage: e.target.value }))}
                         className="field w-full text-sm"
-                      />
+                      >
+                        <option value="">Default (auto-detect — recommended)</option>
+                        {DEEPGRAM_LANGUAGES.map((lang) => (
+                          <option key={lang.code} value={lang.code}>
+                            {lang.label}
+                          </option>
+                        ))}
+                      </select>
                     </>
                   )}
                   <button onClick={onSaveSttPrefs} disabled={busy === "stt-pref"} className="btn-secondary">
