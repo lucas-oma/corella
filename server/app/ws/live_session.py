@@ -497,3 +497,11 @@ async def _finalize(session: LiveSession) -> None:
         # Search indexing is a nice-to-have, not a reason to retroactively
         # mark an already-successfully-finalized meeting as failed.
         logger.exception("Failed to dispatch index_meeting_search for meeting %s", session.meeting_id)
+
+    try:
+        celery_app.send_task("corella.generate_report", args=[str(session.meeting_id)])
+    except Exception:
+        # Same reasoning as index_meeting_search above — the meeting is
+        # already successfully finalized either way; the existing manual
+        # "Generate report" button is still there if this doesn't run.
+        logger.exception("Failed to dispatch generate_report for meeting %s", session.meeting_id)

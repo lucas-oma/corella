@@ -23,6 +23,8 @@ from app.services.asr.whisper import transcribe
 from app.services.audio.mixing import read_wav_pcm, slice_pcm, write_wav
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import parse_json_response
+from app.services.copilot.report import ReportError
+from app.services.copilot.report import generate_report as run_generate_report
 from app.services.diarization import events as diar_events
 from app.services.diarization.cluster import (
     SIMILARITY_THRESHOLD,
@@ -150,6 +152,14 @@ def process_meeting_audio(meeting_id: str) -> None:
         # Search indexing is a nice-to-have, not a reason to retroactively
         # mark an already-successfully-transcribed meeting as failed.
         logger.exception("Failed to dispatch index_meeting_search for meeting %s", meeting_id)
+
+    try:
+        celery_app.send_task("corella.generate_report", args=[meeting_id])
+    except Exception:
+        # Same reasoning as index_meeting_search above — the meeting is
+        # already successfully transcribed either way; the existing manual
+        # "Generate report" button is still there if this doesn't run.
+        logger.exception("Failed to dispatch generate_report for meeting %s", meeting_id)
 
 
 @celery_app.task(name="corella.process_kb_document")
@@ -664,29 +674,31 @@ def identify_speaker_name(meeting_id: str, speaker_id: str, embedding_json: str)
     the worker.
     """
     try:
-        asyncio.run(_identify_speaker_name_with_cleanup(meeting_id, speaker_id, embedding_json))
+        asyncio.run(
+            _with_engine_cleanup(_identify_speaker_name_async(meeting_id, speaker_id, embedding_json))
+        )
     except Exception:
         logger.exception(
             "identify_speaker_name failed for speaker %s in meeting %s", speaker_id, meeting_id
         )
 
 
-async def _identify_speaker_name_with_cleanup(
-    meeting_id: str, speaker_id: str, embedding_json: str
-) -> None:
-    """asyncio.run() gives this call its own fresh event loop each time —
-    but SessionLocal's async engine (app/core/db.py) is a module-level
+async def _with_engine_cleanup(coro) -> None:
+    """asyncio.run() gives each call its own fresh event loop — but
+    SessionLocal's async engine (app/core/db.py) is a module-level
     singleton whose connection pool holds asyncpg connections bound to
     whichever loop first checked them out. Reused across a *second*
     asyncio.run() call in the same long-lived worker process, that pooled
     connection is bound to a now-dead loop — reproduced live:
-    "RuntimeError: ... attached to a different loop". Disposing the
-    engine's pool here, at the end of every call (success or failure),
-    means the next call always opens fresh connections against the
-    current loop instead of reusing stale ones.
+    "RuntimeError: ... attached to a different loop" (identify_speaker_name
+    was the first task to hit this; generate_report_task reuses the same
+    fix rather than re-discovering it). Disposing the engine's pool here,
+    at the end of every call (success or failure), means the next call
+    always opens fresh connections against the current loop instead of
+    reusing stale ones.
     """
     try:
-        await _identify_speaker_name_async(meeting_id, speaker_id, embedding_json)
+        await coro
     finally:
         await engine.dispose()
 
@@ -808,3 +820,40 @@ async def _identify_speaker_name_async(meeting_id: str, speaker_id: str, embeddi
             [str(s.id) for s in segments],
             speaker.channel,
         )
+
+
+@celery_app.task(name="corella.generate_report")
+def generate_report_task(meeting_id: str) -> None:
+    """Auto-generates the post-call report the moment a meeting reaches
+    READY — dispatched fire-and-forget from both process_meeting_audio's
+    success path and live_session.py's _finalize() success path, same
+    two-call-sites pattern as corella.index_meeting_search. Skips
+    silently, not a failure, if no LLM provider is connected or the
+    transcript is empty — the existing manual "Generate report" button in
+    MeetingDetail.tsx still works whenever the user wants to (re)run it,
+    on this meeting or any other.
+    """
+    try:
+        asyncio.run(_with_engine_cleanup(_generate_report_async(meeting_id)))
+    except Exception:
+        logger.exception("generate_report task failed for meeting %s", meeting_id)
+
+
+async def _generate_report_async(meeting_id: str) -> None:
+    async with SessionLocal() as db:
+        meeting = await db.get(Meeting, UUID(meeting_id))
+        if meeting is None:
+            return
+
+        provider = await resolve_provider(db, meeting.owner_id)
+        if provider is None:
+            logger.info(
+                "generate_report: no LLM provider connected for meeting %s, skipping auto-report",
+                meeting_id,
+            )
+            return
+
+        try:
+            await run_generate_report(db, meeting, provider)
+        except ReportError as e:
+            logger.info("generate_report: skipped for meeting %s: %s", meeting_id, e)
