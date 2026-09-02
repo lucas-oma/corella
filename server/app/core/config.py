@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     # stale by the time you're reading this.
     default_model_anthropic: str = "claude-sonnet-5"
     default_model_openai: str = "gpt-4o-mini"
-    default_model_gemini: str = "gemini-2.0-flash"
+    default_model_gemini: str = "gemini-3.6-flash"
     default_model_ollama: str = "llama3.2"
 
 
