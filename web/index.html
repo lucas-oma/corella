@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="/favicon-light.svg" type="image/svg+xml" />
     <link rel="icon" href="/favicon-dark.svg" type="image/svg+xml" media="(prefers-color-scheme: dark)" />
+    <!-- Loaded here (not via CSS @import in index.css) so the browser can
+         start fetching these in parallel with everything else, rather than
+         waiting to parse index.css first, discover the @import, and only
+         then start a font fetch — that extra round-trip widened the window
+         where the fallback font (system-ui) is visibly on screen before the
+         swap to Inter/Newsreader, which is the "briefly bolder" flash on a
+         hard reload. preconnect gets the DNS/TLS handshake going even
+         earlier, before the stylesheet itself is requested. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap"
+      rel="stylesheet"
+    />
     <title>Corella</title>
   </head>
   <body>
