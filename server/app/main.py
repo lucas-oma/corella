@@ -5,7 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import admin, auth, call_types, kb, meetings, settings as settings_api
+from app.api import admin, auth, call_types, kb, meetings
+from app.api import settings as settings_api
 from app.core.bootstrap import seed_admin_user
 from app.core.config import get_settings
 from app.ws import live_session

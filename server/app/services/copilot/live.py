@@ -9,10 +9,10 @@ from app.core.config import get_settings
 from app.models.cost import UsageKind
 from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import ActionItem, ActionItemStatus, Channel, TranscriptSegment
+from app.services.access import searchable_owner_ids
 from app.services.copilot.action_items import persist_new_action_items
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import as_str_list, parse_json_response
-from app.services.access import searchable_owner_ids
 from app.services.copilot.talk_ratio import talk_ratio
 from app.services.embeddings.qdrant_store import search_kb
 from app.services.embeddings.query import embed_query
@@ -137,7 +137,7 @@ async def run_cycle(
         suggestion=(parsed.get("suggestion") or None),
         blockers=as_str_list(parsed.get("blockers")),
         action_items=open_items,
-        coach_score=int(coach_score) if isinstance(coach_score, (int, float)) else None,
+        coach_score=int(coach_score) if isinstance(coach_score, int | float) else None,
     )
 
 

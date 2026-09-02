@@ -18,6 +18,7 @@ from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.models.user import User
 from app.models.voice_identity import VoiceIdentity
+from app.services.admin.webhooks import dispatch_call_type_webhook
 from app.services.alignment.align import align
 from app.services.asr import deepgram
 from app.services.asr.resolve import resolve_stt_provider
@@ -25,7 +26,6 @@ from app.services.asr.whisper import transcribe as whisper_transcribe
 from app.services.audio.mixing import read_wav_pcm, slice_pcm, write_wav
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import parse_json_response
-from app.services.admin.webhooks import dispatch_call_type_webhook
 from app.services.copilot.report import ReportError
 from app.services.copilot.report import generate_report as run_generate_report
 from app.services.diarization import events as diar_events

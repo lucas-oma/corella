@@ -1,0 +1,69 @@
+name: PR checks
+
+# Required checks (see CONTRIBUTING.md for the branching model): main is
+# the integration branch, release is the stable-cut branch — anything
+# landing on either should meet the same bar. Enabling these as "required
+# status checks" in GitHub's branch protection settings is a repo-admin
+# action taken separately in the GitHub UI, not something this file does
+# on its own.
+on:
+  pull_request:
+    branches: [main, release]
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - working-directory: server
+        run: pip install -e ".[dev]"
+      - run: ruff check server/app server/tests
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: corella
+          POSTGRES_PASSWORD: corella
+          POSTGRES_DB: corella_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U corella"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://corella:corella@localhost:5432/corella_test
+      JWT_SECRET: ci-test-secret-not-for-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - working-directory: server
+        run: pip install -e ".[dev]"
+      - working-directory: server
+        run: pytest -v
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - working-directory: web
+        run: npm ci
+      - working-directory: web
+        run: npm run build

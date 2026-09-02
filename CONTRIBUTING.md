@@ -6,7 +6,7 @@ Before touching any UI code, read [`BRANDING.md`](./BRANDING.md) — it's the si
 
 ## Branching
 
-**Target `main` for every feature and fix.** `main` is the integration branch — it's where all ongoing work lands, like a nightly build, and it's what people fork from. Stable cut points live on `release`, which only moves forward periodically via a `main` → `release` PR once `main` has accumulated a substantial batch of changes worth shipping, not per-feature. Unless a maintainer tells you otherwise, branch off `main` and open your PR against `main`.
+**Target `main` for every feature and fix.** `main` is the integration branch — it's where all ongoing work lands, like a nightly build, and it's what people must fork from. Stable cut points live on `release`, which only moves forward periodically via a `main` → `release` PR once `main` has accumulated a substantial batch of changes worth shipping, not per-feature. Unless a maintainer tells you otherwise, branch off `main` and open your PR against `main`.
 
 ## Getting set up
 
@@ -38,10 +38,26 @@ You'll want real infrastructure to do anything meaningful — `docker compose up
 
 ```bash
 cd web && npx tsc -b && npx vite build
-cd server && python -m py_compile $(git diff --name-only main -- '*.py')
+
+cd server
+pip install -e ".[dev]"
+ruff check app tests
+pytest
 ```
 
-There's no automated test suite yet (see [README's Status section](./README.md#status) — this is a real, open gap, not an oversight, and a PR that adds real `pytest`/`vitest` coverage is welcome on its own). In its absence, every change in this project's history has been verified against a **real, isolated Docker stack** before merging — not the developer's own running instance, and never mocked away. If you're touching backend behavior, do the same:
+`pytest` needs a real Postgres to run against (this schema uses Postgres-native enums/arrays a fake backend like SQLite can't represent faithfully) — point `DATABASE_URL` at a throwaway database, e.g.:
+
+```bash
+docker run -d --name corella-test-postgres -p 15432:5432 \
+  -e POSTGRES_USER=corella -e POSTGRES_PASSWORD=corella -e POSTGRES_DB=corella_test \
+  postgres:16-alpine
+export DATABASE_URL=postgresql+psycopg://corella:corella@localhost:15432/corella_test
+pytest
+```
+
+`ruff` and `pytest` are both **required checks** on any PR into `main` or `release` (see `.github/workflows/pr-checks.yml`) — the starter suite in `server/tests/` covers the highest-value logic (permission boundaries, credential/provider resolution, webhook templating, pricing math), not every endpoint; growing it is a welcome contribution on its own, not just a side effect of a feature PR. `ruff` also runs on every push to any branch (`.github/workflows/push-lint.yml`, not required, just fast feedback) so style issues surface immediately rather than piling up for review.
+
+Neither replaces this project's other standing discipline: every change has also been verified against a **real, isolated Docker stack** before merging — not the developer's own running instance, and never mocked away. If you're touching backend behavior beyond what the test suite covers, do the same:
 
 ```bash
 docker compose -p corella-verify --env-file <a throwaway .env> up -d postgres redis qdrant
@@ -51,7 +67,7 @@ docker compose -p corella-verify --env-file <a throwaway .env> up -d postgres re
 docker compose -p corella-verify down -v
 ```
 
-The point is to catch the kind of bug that only shows up against a real database/queue/vector-store round-trip — a migration that doesn't backfill correctly, a race in a Celery task, a response shape that looks right in code review but isn't. Several real bugs in this project's history were only ever caught this way, not by reading the diff.
+The point is to catch the kind of bug that only shows up against a real database/queue/vector-store round-trip — a migration that doesn't backfill correctly, a race in a Celery task, a response shape that looks right in code review but isn't. Several real bugs in this project's history were only ever caught this way, not by reading the diff (including, this round, `pytest`'s own test infrastructure — a missing explicit `greenlet` dependency and an event-loop/connection-pool interaction only surfaced by actually running the suite against a real database, not by writing it).
 
 ## Conventions this codebase already follows
 

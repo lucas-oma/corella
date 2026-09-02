@@ -9,8 +9,6 @@ from app.core.security import encrypt_secret
 from app.models.provider_credential import LLMProvider, ProviderCredential
 from app.models.stt_credential import SttCredential
 from app.models.user import User
-from app.services.asr.resolve import resolve_stt_provider
-from app.services.llm.resolve import resolve_provider
 from app.schemas.settings import (
     AiOverview,
     DiarizationOverview,
@@ -24,6 +22,8 @@ from app.schemas.settings import (
     SttOverview,
     SttStatus,
 )
+from app.services.asr.resolve import resolve_stt_provider
+from app.services.llm.resolve import resolve_provider
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
