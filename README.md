@@ -180,6 +180,8 @@ The UI follows a deliberate, documented visual language — see [`BRANDING.md`](
 
 ## Development
 
+Contributing? See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, this project's conventions (credential handling, migrations, adding a new LLM/STT provider), and what a good PR looks like here.
+
 Backend:
 
 ```bash
