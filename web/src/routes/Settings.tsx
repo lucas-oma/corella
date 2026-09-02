@@ -33,6 +33,16 @@ export default function Settings() {
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Which "AI models in use" row is currently expanded into an edit form —
+  // only one at a time, matching the rest of Settings' inline-edit pattern.
+  const [editingRow, setEditingRow] = useState<"stt" | "llm" | null>(null);
+  const [draftLlmProvider, setDraftLlmProvider] = useState<Exclude<Preferences["llm_provider"], null> | "">("");
+  const [draftSttProvider, setDraftSttProvider] = useState<Exclude<Preferences["stt_provider"], null> | "">("");
+  // Set right after a successful preference save, cleared a couple seconds
+  // later — the actual "yes, that worked" feedback the buttons were
+  // missing (busy -> idle alone looked identical whether it succeeded).
+  const [savedFlash, setSavedFlash] = useState<"stt" | "llm" | null>(null);
+  const savedFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [fullName, setFullName] = useState("");
   const [savingName, setSavingName] = useState(false);
@@ -48,15 +58,26 @@ export default function Settings() {
     api.getProviderStatus().then(setProviders);
     api.getSttStatus().then(setSttStatus);
     api.getAiOverview().then(setAiOverview);
-    api.getPreferences().then((prefs) => {
-      setPreferences(prefs);
-      setInputs((prev) => ({
-        ...prev,
-        llmModel: prefs.llm_model ?? "",
-        sttModel: prefs.stt_model ?? "",
-        sttLanguage: prefs.stt_language ?? "",
-      }));
-    });
+    api.getPreferences().then(setPreferences);
+  }, []);
+
+  // Keeps the edit-form drafts in sync whenever the committed preferences
+  // change (initial load, or right after a save) — separate from the
+  // edit-form-only draft state below, which only moves on an explicit Edit.
+  useEffect(() => {
+    if (!preferences) return;
+    setInputs((prev) => ({
+      ...prev,
+      llmModel: preferences.llm_model ?? "",
+      sttModel: preferences.stt_model ?? "",
+      sttLanguage: preferences.stt_language ?? "",
+    }));
+  }, [preferences]);
+
+  useEffect(() => {
+    return () => {
+      if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -208,12 +229,24 @@ export default function Settings() {
     }
   }
 
-  async function savePrefs(payload: Partial<Preferences>, busyKey: string) {
+  function flashSaved(row: "stt" | "llm") {
+    setSavedFlash(row);
+    if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
+    savedFlashTimer.current = setTimeout(() => setSavedFlash(null), 2000);
+  }
+
+  async function savePrefs(payload: Partial<Preferences>, row: "stt" | "llm") {
     setError(null);
-    setBusy(busyKey);
+    // "-pref" suffix keeps this distinct from the credential save/remove
+    // buttons above, which already use the bare "stt" busy key — sharing
+    // one would make those and this row's Save button spuriously disable
+    // together.
+    setBusy(`${row}-pref`);
     try {
       setPreferences(await api.savePreferences(payload));
       api.getAiOverview().then(setAiOverview);
+      setEditingRow(null);
+      flashSaved(row);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't save preference");
     } finally {
@@ -221,24 +254,35 @@ export default function Settings() {
     }
   }
 
-  function onLlmProviderChange(value: string) {
-    savePrefs({ llm_provider: (value || null) as Preferences["llm_provider"] }, "llm-pref");
+  function onEditRow(row: "stt" | "llm") {
+    setError(null);
+    setSavedFlash(null);
+    if (row === "llm") setDraftLlmProvider(preferences?.llm_provider ?? "");
+    else setDraftSttProvider(preferences?.stt_provider ?? "");
+    setEditingRow(row);
   }
 
-  function onSttProviderChange(value: string) {
-    savePrefs({ stt_provider: (value || null) as Preferences["stt_provider"] }, "stt-pref");
+  function onSaveLlmPrefs() {
+    savePrefs(
+      {
+        llm_provider: (draftLlmProvider || null) as Preferences["llm_provider"],
+        llm_model: draftLlmProvider ? inputs.llmModel?.trim() || null : null,
+      },
+      "llm",
+    );
   }
 
-  function onSaveLlmModel() {
-    savePrefs({ llm_model: inputs.llmModel?.trim() || null }, "llm-model");
-  }
-
-  function onSaveSttModel() {
-    savePrefs({ stt_model: inputs.sttModel?.trim() || null }, "stt-model");
-  }
-
-  function onSaveSttLanguage() {
-    savePrefs({ stt_language: inputs.sttLanguage?.trim() || null }, "stt-language");
+  function onSaveSttPrefs() {
+    const usingDeepgram =
+      draftSttProvider === "deepgram" || (!draftSttProvider && sttStatus?.connected);
+    savePrefs(
+      {
+        stt_provider: (draftSttProvider || null) as Preferences["stt_provider"],
+        stt_model: usingDeepgram ? inputs.sttModel?.trim() || null : null,
+        stt_language: usingDeepgram ? inputs.sttLanguage?.trim() || null : null,
+      },
+      "stt",
+    );
   }
 
   return (
@@ -326,39 +370,6 @@ export default function Settings() {
           key is stored encrypted and never shown again after saving.
         </p>
 
-        <div className="mt-5">
-          <p className="label mb-1">Preferred provider</p>
-          <select
-            value={preferences?.llm_provider ?? ""}
-            onChange={(e) => onLlmProviderChange(e.target.value)}
-            disabled={busy === "llm-pref" || providers === null}
-            className="field w-full text-sm"
-          >
-            <option value="">Auto (recommended — first connected provider)</option>
-            {providers
-              ?.filter((p) => p.connected)
-              .map((p) => (
-                <option key={p.provider} value={p.provider}>
-                  {PROVIDER_META[p.provider].name}
-                </option>
-              ))}
-          </select>
-          {preferences?.llm_provider && (
-            <div className="mt-2 flex gap-2">
-              <input
-                type="text"
-                placeholder={aiOverview?.language_model.model ?? "Model name"}
-                value={inputs.llmModel ?? ""}
-                onChange={(e) => setInputs((prev) => ({ ...prev, llmModel: e.target.value }))}
-                className="field flex-1 text-sm"
-              />
-              <button onClick={onSaveLlmModel} disabled={busy === "llm-model"} className="btn-secondary shrink-0">
-                {busy === "llm-model" ? "Saving…" : "Save model"}
-              </button>
-            </div>
-          )}
-        </div>
-
         <ul className="mt-5 divide-y divide-border dark:divide-border-dark">
           {providers === null && <li className="py-3 text-sm text-ink-muted">Loading…</li>}
           {providers?.map((status) => {
@@ -429,55 +440,6 @@ export default function Settings() {
           falling back to local automatically if it isn't.
         </p>
 
-        <div className="mt-5">
-          <p className="label mb-1">Preferred engine</p>
-          <select
-            value={preferences?.stt_provider ?? ""}
-            onChange={(e) => onSttProviderChange(e.target.value)}
-            disabled={busy === "stt-pref"}
-            className="field w-full text-sm"
-          >
-            <option value="">Auto (recommended — Deepgram if connected, else local)</option>
-            <option value="deepgram" disabled={!sttStatus?.connected}>
-              Deepgram{!sttStatus?.connected ? " (not connected)" : ""}
-            </option>
-            <option value="whisper">Local (faster-whisper)</option>
-          </select>
-          {(preferences?.stt_provider === "deepgram" ||
-            (!preferences?.stt_provider && sttStatus?.connected)) && (
-            <div className="mt-2 space-y-2">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder={aiOverview?.speech_to_text.model ?? "nova-3"}
-                  value={inputs.sttModel ?? ""}
-                  onChange={(e) => setInputs((prev) => ({ ...prev, sttModel: e.target.value }))}
-                  className="field flex-1 text-sm"
-                />
-                <button onClick={onSaveSttModel} disabled={busy === "stt-model"} className="btn-secondary shrink-0">
-                  {busy === "stt-model" ? "Saving…" : "Save model"}
-                </button>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="multi (auto-detect — recommended)"
-                  value={inputs.sttLanguage ?? ""}
-                  onChange={(e) => setInputs((prev) => ({ ...prev, sttLanguage: e.target.value }))}
-                  className="field flex-1 text-sm"
-                />
-                <button
-                  onClick={onSaveSttLanguage}
-                  disabled={busy === "stt-language"}
-                  className="btn-secondary shrink-0"
-                >
-                  {busy === "stt-language" ? "Saving…" : "Save language"}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-
         {sttStatus === null ? (
           <p className="mt-5 text-sm text-ink-muted">Loading…</p>
         ) : (
@@ -543,22 +505,123 @@ export default function Settings() {
           <p className="mt-5 text-sm text-ink-muted">Loading…</p>
         ) : (
           <ul className="mt-5 space-y-3">
-            <li className="flex items-center justify-between">
-              <p className="text-sm text-ink dark:text-ink-inverted">Speech-to-text</p>
-              <p className="text-right text-xs text-ink-subtle">
-                {aiOverview.speech_to_text.active === "deepgram" ? "Deepgram" : "Local (faster-whisper)"}
-                {" · "}
-                {aiOverview.speech_to_text.model}
-              </p>
+            <li>
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-ink dark:text-ink-inverted">Speech-to-text</p>
+                {editingRow === "stt" ? (
+                  <button onClick={() => setEditingRow(null)} className="text-xs text-ink-subtle">
+                    Cancel
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    {savedFlash === "stt" && <span className="text-xs text-status-success">Saved ✓</span>}
+                    <p className="text-right text-xs text-ink-subtle">
+                      {aiOverview.speech_to_text.active === "deepgram" ? "Deepgram" : "Local (faster-whisper)"}
+                      {" · "}
+                      {aiOverview.speech_to_text.model}
+                    </p>
+                    <button onClick={() => onEditRow("stt")} className="text-xs text-accent hover:underline">
+                      Edit
+                    </button>
+                  </div>
+                )}
+              </div>
+              {editingRow === "stt" && (
+                <div className="mt-2 space-y-2 border-l-2 border-border pl-3 dark:border-border-dark">
+                  <select
+                    value={draftSttProvider}
+                    onChange={(e) =>
+                      setDraftSttProvider(e.target.value as Exclude<Preferences["stt_provider"], null> | "")
+                    }
+                    className="field w-full text-sm"
+                  >
+                    <option value="">Auto (recommended — Deepgram if connected, else local)</option>
+                    <option value="deepgram" disabled={!sttStatus?.connected}>
+                      Deepgram{!sttStatus?.connected ? " (not connected)" : ""}
+                    </option>
+                    <option value="whisper">Local (faster-whisper)</option>
+                  </select>
+                  {(draftSttProvider === "deepgram" || (!draftSttProvider && sttStatus?.connected)) && (
+                    <>
+                      <input
+                        type="text"
+                        placeholder={aiOverview.speech_to_text.model || "nova-3"}
+                        value={inputs.sttModel ?? ""}
+                        onChange={(e) => setInputs((prev) => ({ ...prev, sttModel: e.target.value }))}
+                        className="field w-full text-sm"
+                      />
+                      <input
+                        type="text"
+                        placeholder="multi (auto-detect — recommended)"
+                        value={inputs.sttLanguage ?? ""}
+                        onChange={(e) => setInputs((prev) => ({ ...prev, sttLanguage: e.target.value }))}
+                        className="field w-full text-sm"
+                      />
+                    </>
+                  )}
+                  <button onClick={onSaveSttPrefs} disabled={busy === "stt-pref"} className="btn-secondary">
+                    {busy === "stt-pref" ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              )}
             </li>
-            <li className="flex items-center justify-between">
-              <p className="text-sm text-ink dark:text-ink-inverted">Copilot / reports</p>
-              <p className="text-right text-xs text-ink-subtle">
-                {aiOverview.language_model.active
-                  ? `${aiOverview.language_model.active} · ${aiOverview.language_model.model}`
-                  : "Not connected"}
-              </p>
+
+            <li>
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-ink dark:text-ink-inverted">Copilot / reports</p>
+                {editingRow === "llm" ? (
+                  <button onClick={() => setEditingRow(null)} className="text-xs text-ink-subtle">
+                    Cancel
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    {savedFlash === "llm" && <span className="text-xs text-status-success">Saved ✓</span>}
+                    <p className="text-right text-xs text-ink-subtle">
+                      {aiOverview.language_model.active
+                        ? `${aiOverview.language_model.active} · ${aiOverview.language_model.model}`
+                        : "Not connected"}
+                    </p>
+                    <button onClick={() => onEditRow("llm")} className="text-xs text-accent hover:underline">
+                      Edit
+                    </button>
+                  </div>
+                )}
+              </div>
+              {editingRow === "llm" && (
+                <div className="mt-2 space-y-2 border-l-2 border-border pl-3 dark:border-border-dark">
+                  <select
+                    value={draftLlmProvider}
+                    onChange={(e) =>
+                      setDraftLlmProvider(e.target.value as Exclude<Preferences["llm_provider"], null> | "")
+                    }
+                    disabled={providers === null}
+                    className="field w-full text-sm"
+                  >
+                    <option value="">Auto (recommended — first connected provider)</option>
+                    {providers
+                      ?.filter((p) => p.connected)
+                      .map((p) => (
+                        <option key={p.provider} value={p.provider}>
+                          {PROVIDER_META[p.provider].name}
+                        </option>
+                      ))}
+                  </select>
+                  {draftLlmProvider && (
+                    <input
+                      type="text"
+                      placeholder={aiOverview.language_model.model ?? "Model name"}
+                      value={inputs.llmModel ?? ""}
+                      onChange={(e) => setInputs((prev) => ({ ...prev, llmModel: e.target.value }))}
+                      className="field w-full text-sm"
+                    />
+                  )}
+                  <button onClick={onSaveLlmPrefs} disabled={busy === "llm-pref"} className="btn-secondary">
+                    {busy === "llm-pref" ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              )}
             </li>
+
             <li className="flex items-center justify-between">
               <p className="text-sm text-ink dark:text-ink-inverted">Knowledge base / meeting search</p>
               <p className="text-right text-xs text-ink-subtle">{aiOverview.embeddings.model}</p>
