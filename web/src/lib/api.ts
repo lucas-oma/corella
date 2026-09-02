@@ -114,6 +114,8 @@ export interface GroupMeeting {
   id: string;
   title: string;
   status: Meeting["status"];
+  summary: string | null;
+  key_topics: string[] | null;
   created_at: string;
   owner_id: string;
   owner_name: string;
@@ -159,6 +161,8 @@ export interface MeetingSearchResult {
   created_at: string;
   snippet: string;
   start_ms: number;
+  owner_id: string;
+  owner_name: string;
 }
 
 export interface Group {
@@ -180,6 +184,30 @@ export interface AdminUserUpdate {
   role?: User["role"];
   group_id?: string | null;
   clear_group?: boolean;
+}
+
+export interface UserCostBreakdown {
+  owner_id: string | null;
+  owner_name: string;
+  total_usd: number;
+  call_count: number;
+}
+
+export interface DailyCost {
+  day: string;
+  total_usd: number;
+}
+
+export interface CostSummary {
+  total_usd: number;
+  priced_call_count: number;
+  total_call_count: number;
+  avg_cost_per_call: number | null;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  by_user: UserCostBreakdown[];
+  daily: DailyCost[];
+  projected_next_7_days_usd: number | null;
 }
 
 export interface KBDocument {
@@ -212,6 +240,8 @@ export const api = {
   listAllMeetings: () => request<GroupMeeting[]>("/api/meetings/all"),
   searchMeetings: (query: string) =>
     request<MeetingSearchResult[]>(`/api/meetings/search?q=${encodeURIComponent(query)}`),
+  searchAllMeetings: (query: string) =>
+    request<MeetingSearchResult[]>(`/api/meetings/search/all?q=${encodeURIComponent(query)}`),
   createMeeting: (title: string, callType: CallType = "meeting") =>
     request<Meeting>("/api/meetings", {
       method: "POST",
@@ -257,4 +287,5 @@ export const api = {
   adminCreateGroup: (name: string) =>
     request<Group>("/api/admin/groups", { method: "POST", body: JSON.stringify({ name }) }),
   adminDeleteGroup: (id: string) => request<void>(`/api/admin/groups/${id}`, { method: "DELETE" }),
+  adminGetCostSummary: () => request<CostSummary>("/api/admin/costs"),
 };

@@ -1,13 +1,20 @@
 import { useEffect, useState } from "react";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type Group, type User } from "@/lib/api";
+import { ApiError, api, type CostSummary, type Group, type User } from "@/lib/api";
 
 const NO_GROUP = "__none__";
+
+/** Same sub-cent precision rule as MeetingDetail's per-meeting badge —
+ * "$0.00" would misleadingly read as free for a genuinely small amount. */
+function formatUsd(usd: number): string {
+  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
 
 export default function Admin() {
   const [groups, setGroups] = useState<Group[] | null>(null);
   const [users, setUsers] = useState<User[] | null>(null);
+  const [costs, setCosts] = useState<CostSummary | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,6 +30,7 @@ export default function Admin() {
   useEffect(() => {
     api.adminListGroups().then(setGroups);
     api.adminListUsers().then(setUsers);
+    api.adminGetCostSummary().then(setCosts);
   }, []);
 
   function groupName(groupId: string | null): string {
@@ -272,6 +280,93 @@ export default function Admin() {
             {busy === "new-user" ? "Creating…" : "Create user"}
           </button>
         </div>
+      </section>
+
+      <section className="card mt-6 p-6">
+        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Costs</h2>
+        <p className="mt-1 text-sm text-ink-muted">
+          Best-effort LLM spend estimate — token usage priced against a point-in-time table
+          (app/services/llm/pricing.py), not an authoritative bill.
+        </p>
+
+        {costs === null && <p className="mt-5 text-sm text-ink-muted">Loading…</p>}
+
+        {costs && (
+          <>
+            <div className="mt-5 grid grid-cols-3 gap-3">
+              <div className="rounded-sm border border-border p-4 dark:border-border-dark">
+                <p className="label">Total cost</p>
+                <p className="mt-1 font-serif text-xl text-ink dark:text-ink-inverted">
+                  {formatUsd(costs.total_usd)}
+                </p>
+                <p className="mt-0.5 text-xs text-ink-subtle">
+                  {costs.total_call_count} call{costs.total_call_count === 1 ? "" : "s"}
+                  {costs.priced_call_count < costs.total_call_count &&
+                    ` (${costs.total_call_count - costs.priced_call_count} unpriced)`}
+                </p>
+              </div>
+              <div className="rounded-sm border border-border p-4 dark:border-border-dark">
+                <p className="label">Avg cost / call</p>
+                <p className="mt-1 font-serif text-xl text-ink dark:text-ink-inverted">
+                  {costs.avg_cost_per_call !== null ? formatUsd(costs.avg_cost_per_call) : "—"}
+                </p>
+                <p className="mt-0.5 text-xs text-ink-subtle">across priced calls</p>
+              </div>
+              <div className="rounded-sm border border-border p-4 dark:border-border-dark">
+                <p className="label">Next 7 days (est.)</p>
+                <p className="mt-1 font-serif text-xl text-ink dark:text-ink-inverted">
+                  {costs.projected_next_7_days_usd !== null
+                    ? formatUsd(costs.projected_next_7_days_usd)
+                    : "—"}
+                </p>
+                <p className="mt-0.5 text-xs text-ink-subtle">based on the trailing average</p>
+              </div>
+            </div>
+
+            {costs.daily.length > 0 && (
+              <div className="mt-6">
+                <p className="label mb-2">Daily cost (last {costs.daily.length} days)</p>
+                <div className="flex h-24 items-end gap-0.5">
+                  {(() => {
+                    const max = Math.max(...costs.daily.map((d) => d.total_usd), 0.0001);
+                    return costs.daily.map((d) => (
+                      <div
+                        key={d.day}
+                        className="min-h-[2px] flex-1 rounded-t-sm bg-accent/70"
+                        style={{ height: `${Math.max((d.total_usd / max) * 100, 2)}%` }}
+                        title={`${d.day}: ${formatUsd(d.total_usd)}`}
+                      />
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+
+            <div className="mt-6">
+              <p className="label mb-2">By user</p>
+              {costs.by_user.length === 0 ? (
+                <p className="text-sm text-ink-muted">No LLM calls logged yet.</p>
+              ) : (
+                <ul className="divide-y divide-border dark:divide-border-dark">
+                  {costs.by_user.map((u) => (
+                    <li
+                      key={u.owner_id ?? "deleted"}
+                      className="flex items-center justify-between py-2"
+                    >
+                      <p className="text-sm text-ink dark:text-ink-inverted">{u.owner_name}</p>
+                      <p className="text-sm text-ink-muted">
+                        {formatUsd(u.total_usd)}{" "}
+                        <span className="text-xs text-ink-subtle">
+                          ({u.call_count} call{u.call_count === 1 ? "" : "s"})
+                        </span>
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </>
+        )}
       </section>
     </AppShell>
   );

@@ -125,23 +125,18 @@ async def create_meeting(
     return meeting
 
 
-@router.get("/search", response_model=list[MeetingSearchResult])
-async def search_meetings(
-    q: str,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> list[MeetingSearchResult]:
-    """Semantic search over transcript content (app/services/embeddings/,
-    corella.index_meeting_search), not a title/substring filter. Registered
-    before /{meeting_id} — route order matters here, or "search" would be
-    parsed as a meeting_id UUID and 422 instead of matching this route.
+async def _search_meetings(q: str, owner_id: UUID | None, db: AsyncSession) -> list[MeetingSearchResult]:
+    """Shared by both search routes below — embed -> Qdrant search -> keep
+    the best-scoring chunk per meeting -> join Postgres for display fields.
+    owner_id=None searches system-wide (admin only); otherwise scoped to
+    that one owner, same as before this was split out.
     """
     q = q.strip()
     if not q:
         return []
 
     embedding = await embed_query(q)
-    hits = qdrant_search_meetings(current_user.id, embedding, top_k=10)
+    hits = qdrant_search_meetings(owner_id, embedding, top_k=10)
 
     # Qdrant returns results ordered best-first; keep only the first
     # (best-scoring) hit per meeting.
@@ -153,11 +148,10 @@ async def search_meetings(
     if not best_by_meeting:
         return []
 
-    meetings = await db.scalars(
-        select(Meeting).where(
-            Meeting.id.in_(best_by_meeting.keys()), Meeting.owner_id == current_user.id
-        )
-    )
+    query = select(Meeting).where(Meeting.id.in_(best_by_meeting.keys()))
+    if owner_id is not None:
+        query = query.where(Meeting.owner_id == owner_id)
+    meetings = await db.scalars(query)
     results = []
     for meeting in meetings:
         hit = best_by_meeting[meeting.id]
@@ -169,10 +163,42 @@ async def search_meetings(
                 created_at=meeting.created_at,
                 snippet=hit["text"],
                 start_ms=hit["start_ms"],
+                owner_id=meeting.owner_id,
+                owner_name=meeting.owner_name,
             )
         )
     results.sort(key=lambda r: best_by_meeting[r.meeting_id]["score"], reverse=True)
     return results
+
+
+@router.get("/search", response_model=list[MeetingSearchResult])
+async def search_meetings(
+    q: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[MeetingSearchResult]:
+    """Semantic search over the caller's own transcript content
+    (app/services/embeddings/, corella.index_meeting_search), not a
+    title/substring filter. Registered before /{meeting_id} — route order
+    matters here, or "search" would be parsed as a meeting_id UUID and 422
+    instead of matching this route.
+    """
+    return await _search_meetings(q, current_user.id, db)
+
+
+@router.get("/search/all", response_model=list[MeetingSearchResult])
+async def search_all_meetings(
+    q: str,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[MeetingSearchResult]:
+    """Same semantic search, system-wide — admin-only (require_admin 403s
+    anyone else), backing the Dashboard's "All meetings" tab search. Never
+    exposed to group members: group visibility stays report-only
+    (_get_group_visible_meeting), this searches actual transcript content.
+    Registered before /{meeting_id}, same reason as /search.
+    """
+    return await _search_meetings(q, None, db)
 
 
 @router.get("/group", response_model=list[GroupMeetingRead])

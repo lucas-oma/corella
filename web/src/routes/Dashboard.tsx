@@ -41,8 +41,25 @@ export default function Dashboard() {
   const [view, setView] = useState<"mine" | "group" | "all">("mine");
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[] | null>(null);
   const [allMeetings, setAllMeetings] = useState<GroupMeeting[] | null>(null);
+  const [groupFilter, setGroupFilter] = useState("");
   const [callType, setCallType] = useState<CallType>("meeting");
   const isAdmin = user?.role === "admin";
+
+  // Not semantic — an instant client-side filter over what's already
+  // fetched, deliberately: unlike Mine/All (real search over transcript
+  // content via meeting_chunks), a group member never gets transcript
+  // access (_get_group_visible_meeting stays report-only), so this only
+  // matches the report fields they can already see once a meeting is open.
+  const filteredGroupMeetings = groupMeetings?.filter((m) => {
+    const q = groupFilter.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      m.title.toLowerCase().includes(q) ||
+      m.owner_name.toLowerCase().includes(q) ||
+      (m.summary?.toLowerCase().includes(q) ?? false) ||
+      (m.key_topics?.some((t) => t.toLowerCase().includes(q)) ?? false)
+    );
+  });
 
   useEffect(() => {
     api.listMeetings().then(setMeetings);
@@ -62,18 +79,19 @@ export default function Dashboard() {
 
   // Semantic search, not a substring filter over the already-loaded list —
   // needs a real request per query, so debounce it rather than searching on
-  // every keystroke.
+  // every keystroke. Only for Mine/All — Group uses the instant client-side
+  // filter above instead (see filteredGroupMeetings for why).
   useEffect(() => {
     const trimmed = query.trim();
-    if (!trimmed) {
+    if (!trimmed || view === "group") {
       setSearchResults(null);
       return;
     }
     let cancelled = false;
     setSearching(true);
+    const search = view === "all" ? api.searchAllMeetings : api.searchMeetings;
     const timer = setTimeout(() => {
-      api
-        .searchMeetings(trimmed)
+      search(trimmed)
         .then((results) => {
           if (!cancelled) setSearchResults(results);
         })
@@ -88,7 +106,7 @@ export default function Dashboard() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [query]);
+  }, [query, view]);
 
   async function onFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -203,13 +221,17 @@ export default function Dashboard() {
         </div>
       )}
 
-      {view === "mine" && (
+      {(view === "mine" || view === "all") && (
         <div className="relative mb-6">
           <input
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search meetings by what was said…"
+            placeholder={
+              view === "all"
+                ? "Search every meeting by what was said…"
+                : "Search meetings by what was said…"
+            }
             className="field"
           />
           {searching && (
@@ -220,49 +242,60 @@ export default function Dashboard() {
         </div>
       )}
 
+      {view === "group" && (
+        <div className="relative mb-6">
+          <input
+            type="search"
+            value={groupFilter}
+            onChange={(e) => setGroupFilter(e.target.value)}
+            placeholder="Filter by title, topic, or who…"
+            className="field"
+          />
+        </div>
+      )}
+
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
 
-      {view === "group" || view === "all" ? (
+      {view === "group" ? (
         <>
-          {(() => {
-            const list = view === "group" ? groupMeetings : allMeetings;
-            if (list === null) return <p className="text-sm text-ink-muted">Loading…</p>;
-            if (list.length === 0) {
-              return (
-                <div className="card p-10 text-center">
-                  <p className="text-sm text-ink-muted">
-                    {view === "group"
-                      ? "No meetings from your group yet — reports show up here once a group-mate finishes one."
-                      : "No meetings yet, across any account."}
-                  </p>
-                </div>
-              );
-            }
-            return (
-              <ul className="card divide-y divide-border dark:divide-border-dark">
-                {list.map((meeting) => (
-                  <li key={meeting.id}>
-                    <Link
-                      to={`/meetings/${meeting.id}`}
-                      className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
-                    >
-                      <div>
-                        <p className="text-sm font-medium text-ink dark:text-ink-inverted">
-                          {meeting.title}
-                        </p>
-                        <p className="mt-0.5 text-xs text-ink-subtle">
-                          {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
-                        </p>
-                      </div>
-                      <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
-                        {STATUS_LABEL[meeting.status]}
-                      </span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            );
-          })()}
+          {groupMeetings === null && <p className="text-sm text-ink-muted">Loading…</p>}
+          {groupMeetings?.length === 0 && (
+            <div className="card p-10 text-center">
+              <p className="text-sm text-ink-muted">
+                No meetings from your group yet — reports show up here once a group-mate
+                finishes one.
+              </p>
+            </div>
+          )}
+          {groupMeetings && groupMeetings.length > 0 && filteredGroupMeetings?.length === 0 && (
+            <div className="card p-10 text-center">
+              <p className="text-sm text-ink-muted">No meetings match "{groupFilter.trim()}".</p>
+            </div>
+          )}
+          {filteredGroupMeetings && filteredGroupMeetings.length > 0 && (
+            <ul className="card divide-y divide-border dark:divide-border-dark">
+              {filteredGroupMeetings.map((meeting) => (
+                <li key={meeting.id}>
+                  <Link
+                    to={`/meetings/${meeting.id}`}
+                    className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-ink dark:text-ink-inverted">
+                        {meeting.title}
+                      </p>
+                      <p className="mt-0.5 text-xs text-ink-subtle">
+                        {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                    <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                      {STATUS_LABEL[meeting.status]}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </>
       ) : searchResults !== null ? (
         <>
@@ -288,9 +321,43 @@ export default function Dashboard() {
                       </span>
                     </div>
                     <p className="mt-1 text-xs text-ink-subtle">
+                      {view === "all" && <>{result.owner_name} · </>}
                       {new Date(result.created_at).toLocaleString()}
                     </p>
                     <p className="mt-1.5 text-sm text-ink-muted">"{result.snippet}"</p>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : view === "all" ? (
+        <>
+          {allMeetings === null && <p className="text-sm text-ink-muted">Loading…</p>}
+          {allMeetings?.length === 0 && (
+            <div className="card p-10 text-center">
+              <p className="text-sm text-ink-muted">No meetings yet, across any account.</p>
+            </div>
+          )}
+          {allMeetings && allMeetings.length > 0 && (
+            <ul className="card divide-y divide-border dark:divide-border-dark">
+              {allMeetings.map((meeting) => (
+                <li key={meeting.id}>
+                  <Link
+                    to={`/meetings/${meeting.id}`}
+                    className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-ink dark:text-ink-inverted">
+                        {meeting.title}
+                      </p>
+                      <p className="mt-0.5 text-xs text-ink-subtle">
+                        {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                    <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                      {STATUS_LABEL[meeting.status]}
+                    </span>
                   </Link>
                 </li>
               ))}

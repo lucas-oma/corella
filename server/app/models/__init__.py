@@ -1,4 +1,5 @@
 from app.models.call_profile import CallProfile
+from app.models.cost import LLMUsageEvent
 from app.models.group import Group
 from app.models.kb_document import KBDocument
 from app.models.meeting import ActionItem, Meeting, Note, Speaker, TranscriptSegment
@@ -16,4 +17,5 @@ __all__ = [
     "CallProfile",
     "KBDocument",
     "ProviderCredential",
+    "LLMUsageEvent",
 ]

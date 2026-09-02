@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.cost import UsageKind
 from app.models.meeting import ActionItem, ActionItemStatus, CallType, Channel, Meeting, TranscriptSegment
 from app.services.copilot.action_items import persist_new_action_items
 from app.services.copilot.cost import add_meeting_cost
@@ -120,13 +121,24 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
         raise ReportError(f"Report generation failed: {e}") from e
 
     # The call itself cost money regardless of whether the JSON below parses
-    # cleanly, so track and commit it before parsing can fail.
+    # cleanly, so track and commit it before parsing can fail. Logged even
+    # when cost is None (unpriced model) — add_meeting_cost still records
+    # the ledger row, just skips the meeting's running-total bump.
     cost = estimate_cost_usd(
         provider.provider, provider.model, response.input_tokens, response.output_tokens
     )
-    if cost is not None:
-        await add_meeting_cost(db, meeting.id, cost)
-        await db.commit()
+    await add_meeting_cost(
+        db,
+        meeting.id,
+        meeting.owner_id,
+        provider.provider,
+        provider.model,
+        response.input_tokens,
+        response.output_tokens,
+        cost,
+        UsageKind.REPORT,
+    )
+    await db.commit()
 
     try:
         parsed = parse_json_response(response.text)

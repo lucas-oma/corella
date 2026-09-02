@@ -9,8 +9,10 @@ from app.core.db import get_db
 from app.core.security import hash_password
 from app.models.group import Group
 from app.models.user import User
+from app.schemas.cost import CostSummaryRead, DailyCostRead, UserCostBreakdownRead
 from app.schemas.group import GroupCreate, GroupRead
 from app.schemas.user import AdminUserCreate, AdminUserUpdate, UserRead
+from app.services.admin.costs import get_cost_summary
 
 router = APIRouter(
     prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
@@ -110,3 +112,32 @@ async def delete_group(group_id: UUID, db: AsyncSession = Depends(get_db)) -> No
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
     await db.delete(group)
     await db.commit()
+
+
+@router.get("/costs", response_model=CostSummaryRead)
+async def get_costs(db: AsyncSession = Depends(get_db)) -> CostSummaryRead:
+    """Aggregate LLM cost analytics for the Admin Costs section — total,
+    per-user, daily history, and a trailing-average next-7-days projection.
+    Built from the LLMUsageEvent ledger (app/services/admin/costs.py), not
+    the per-meeting running total, which has no per-event timestamps.
+    """
+    summary = await get_cost_summary(db)
+    return CostSummaryRead(
+        total_usd=summary.total_usd,
+        priced_call_count=summary.priced_call_count,
+        total_call_count=summary.total_call_count,
+        avg_cost_per_call=summary.avg_cost_per_call,
+        total_input_tokens=summary.total_input_tokens,
+        total_output_tokens=summary.total_output_tokens,
+        by_user=[
+            UserCostBreakdownRead(
+                owner_id=u.owner_id,
+                owner_name=u.owner_name,
+                total_usd=u.total_usd,
+                call_count=u.call_count,
+            )
+            for u in summary.by_user
+        ],
+        daily=[DailyCostRead(day=d.day, total_usd=d.total_usd) for d in summary.daily],
+        projected_next_7_days_usd=summary.projected_next_7_days_usd,
+    )

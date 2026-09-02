@@ -166,24 +166,34 @@ def upsert_meeting_chunks(
 _MIN_RELEVANCE_SCORE = 0.2
 
 
-def search_meetings(owner_id: UUID, query_embedding: list[float], top_k: int = 10) -> list[dict]:
-    """Top-k most relevant transcript chunks for this user, across all their
-    meetings — one row per matching *chunk*, not deduplicated by meeting;
-    the caller (the search API route) collapses to one (best) hit per
-    meeting. Empty if the collection doesn't exist yet (no meeting has
-    finished indexing) — normal, not an error.
+def search_meetings(
+    owner_id: UUID | None, query_embedding: list[float], top_k: int = 10
+) -> list[dict]:
+    """Top-k most relevant transcript chunks, across all matching meetings —
+    one row per matching *chunk*, not deduplicated by meeting; the caller
+    (the search API route) collapses to one (best) hit per meeting. Empty
+    if the collection doesn't exist yet (no meeting has finished indexing)
+    — normal, not an error.
+
+    owner_id=None searches system-wide, with no owner filter at all — used
+    only by the admin-only "All meetings" search
+    (GET /api/meetings/search/all); every other caller passes the
+    searching user's own id, unchanged from before this existed.
     """
     client = _client()
     if not client.collection_exists(MEETING_COLLECTION):
         return []
-    result = client.query_points(
-        collection_name=MEETING_COLLECTION,
-        query=query_embedding,
-        query_filter=qmodels.Filter(
+    query_filter = None
+    if owner_id is not None:
+        query_filter = qmodels.Filter(
             must=[
                 qmodels.FieldCondition(key="owner_id", match=qmodels.MatchValue(value=str(owner_id)))
             ]
-        ),
+        )
+    result = client.query_points(
+        collection_name=MEETING_COLLECTION,
+        query=query_embedding,
+        query_filter=query_filter,
         limit=top_k,
         score_threshold=_MIN_RELEVANCE_SCORE,
     )

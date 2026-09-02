@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.models.cost import UsageKind
 from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import ActionItem, ActionItemStatus, Channel, TranscriptSegment
 from app.services.copilot.action_items import persist_new_action_items
@@ -93,13 +94,24 @@ async def run_cycle(
         return None
 
     # The call itself cost money regardless of whether the JSON below parses
-    # cleanly, so track it before parsing can fail.
+    # cleanly, so track it before parsing can fail. Logged even when cost is
+    # None (unpriced model) — add_meeting_cost still records the ledger row,
+    # just skips the meeting's running-total bump for that case.
     cost = estimate_cost_usd(
         provider.provider, provider.model, response.input_tokens, response.output_tokens
     )
-    if cost is not None:
-        await add_meeting_cost(db, meeting_id, cost)
-        await db.commit()
+    await add_meeting_cost(
+        db,
+        meeting_id,
+        owner_id,
+        provider.provider,
+        provider.model,
+        response.input_tokens,
+        response.output_tokens,
+        cost,
+        UsageKind.LIVE_CYCLE,
+    )
+    await db.commit()
 
     try:
         parsed = parse_json_response(response.text)
