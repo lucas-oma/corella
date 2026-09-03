@@ -207,4 +207,4 @@ Not yet built: post-call "polish" re-transcription with a larger model, and an a
 
 ## License
 
-No license file yet — all rights reserved by default until one is added. If you intend to open-source this, add a `LICENSE` file before accepting outside contributions.
+[Apache License 2.0](LICENSE).
