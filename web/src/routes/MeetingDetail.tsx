@@ -181,35 +181,40 @@ export default function MeetingDetail() {
     let cancelled = false;
 
     if (canViewFull) {
-      // Re-poll, bounded, specifically while a live-recorded segment is
-      // still missing a resolved speaker — see speakerLabel's and
-      // DIARIZATION_GRACE_MS's docstrings above. Only worth attempting at
-      // all if the call ended recently enough that the backend could
-      // plausibly still be working on it — an old meeting reopened later
-      // gets its final ("Unknown" for anything that never resolved) state
-      // immediately instead of replaying a 90-second spinner that can only
-      // ever end in the exact same place.
+      // Always fetch the transcript once meeting is ready. Separately,
+      // re-poll for a bounded window while a live-recorded segment is still
+      // missing a resolved speaker — see speakerLabel's and
+      // DIARIZATION_GRACE_MS's docstrings above. Only worth re-polling if
+      // the call ended recently enough that the backend could still be
+      // working on it; an old meeting (or one with no ended_at) gets its
+      // final state immediately ("Unknown" for anything that never
+      // resolved) instead of a 90-second spinner — and must still load the
+      // transcript either way (previously the !endedRecently branch only
+      // cleared the spinner flag and never called getTranscript, leaving
+      // the page stuck on "Loading transcript…" forever after refresh).
       const endedRecently =
         !!meeting.ended_at && Date.now() - new Date(meeting.ended_at).getTime() < DIARIZATION_GRACE_MS;
-      if (!endedRecently) {
-        setDiarizationCatchingUp(false);
-      } else {
-        (async () => {
-          const deadline = Date.now() + DIARIZATION_GRACE_MS;
-          while (!cancelled) {
-            const fresh = await api.getTranscript(meetingId);
-            if (cancelled) return;
-            setTranscript(fresh);
-            const stillPending = hasUnresolvedLiveSpeaker(fresh);
-            if (!stillPending || Date.now() >= deadline) {
-              setDiarizationCatchingUp(false);
-              return;
-            }
-            setDiarizationCatchingUp(true);
-            await new Promise((resolve) => setTimeout(resolve, DIARIZATION_POLL_INTERVAL_MS));
+      (async () => {
+        if (!endedRecently) {
+          setDiarizationCatchingUp(false);
+          const fresh = await api.getTranscript(meetingId);
+          if (!cancelled) setTranscript(fresh);
+          return;
+        }
+        const deadline = Date.now() + DIARIZATION_GRACE_MS;
+        while (!cancelled) {
+          const fresh = await api.getTranscript(meetingId);
+          if (cancelled) return;
+          setTranscript(fresh);
+          const stillPending = hasUnresolvedLiveSpeaker(fresh);
+          if (!stillPending || Date.now() >= deadline) {
+            setDiarizationCatchingUp(false);
+            return;
           }
-        })();
-      }
+          setDiarizationCatchingUp(true);
+          await new Promise((resolve) => setTimeout(resolve, DIARIZATION_POLL_INTERVAL_MS));
+        }
+      })();
       if (meeting.has_audio) {
         api.getAudioObjectUrl(meetingId).then(setAudioUrl);
       }
