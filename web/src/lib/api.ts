@@ -22,6 +22,32 @@ export class ApiError extends Error {
   }
 }
 
+/** Turn FastAPI's `detail` (string, validation array, or object) into a
+ * single human-readable message — validation 422s otherwise stringify to
+ * "[object Object]" when shown in the UI. */
+function formatApiDetail(detail: unknown): string {
+  if (detail == null || detail === "") return "";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        const row = item as { msg?: unknown; loc?: unknown[] };
+        if (typeof row.msg === "string" && row.msg) return row.msg;
+      }
+      return "";
+    }).filter(Boolean);
+    return parts.join("; ");
+  }
+  if (typeof detail === "object") {
+    const row = detail as { msg?: unknown; detail?: unknown; message?: unknown };
+    if (typeof row.msg === "string" && row.msg) return row.msg;
+    if (typeof row.detail === "string" && row.detail) return row.detail;
+    if (typeof row.message === "string" && row.message) return row.message;
+  }
+  return "";
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers = new Headers(options.headers);
@@ -36,7 +62,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.detail ?? res.statusText);
+    throw new ApiError(
+      res.status,
+      formatApiDetail((body as { detail?: unknown }).detail) || res.statusText || "Request failed",
+    );
   }
 
   if (res.status === 204) return undefined as T;
