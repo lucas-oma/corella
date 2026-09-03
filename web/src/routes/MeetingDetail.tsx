@@ -16,6 +16,13 @@ const POLL_INTERVAL_MS = 3000;
 // window.
 const DIARIZATION_GRACE_MS = 45000;
 const DIARIZATION_POLL_INTERVAL_MS = 4000;
+// The auto-generated post-call report (server/app/workers/tasks.py:
+// _generate_report_async, dispatched fire-and-forget once a meeting reaches
+// "ready") is a real LLM call, not instant — bounds how long the "ready"
+// catch-up effect below re-polls for it before giving up and falling back
+// to the manual "Generate report" button.
+const REPORT_GRACE_MS = 60000;
+const REPORT_POLL_INTERVAL_MS = 4000;
 
 function formatTimestamp(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -103,6 +110,9 @@ export default function MeetingDetail() {
   const [providerConnected, setProviderConnected] = useState<boolean | null>(null);
   const [generatingReport, setGeneratingReport] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
+  // True while the "ready" catch-up effect below is still waiting on the
+  // auto-generated report to land — see REPORT_GRACE_MS's docstring.
+  const [reportPending, setReportPending] = useState(false);
 
   async function onDelete() {
     if (!meetingId) return;
@@ -174,7 +184,41 @@ export default function MeetingDetail() {
     if (isOwner) {
       api.getProviderStatus().then((statuses) => setProviderConnected(statuses.some((s) => s.connected)));
     }
-    api.listActionItems(meetingId).then(setActionItems);
+
+    // Report generation (server/app/workers/tasks.py:_generate_report_async)
+    // is dispatched fire-and-forget right after a meeting reaches "ready"
+    // (both the upload-processing and live-finalize success paths) — so a
+    // page that loads right at that transition fetches action items before
+    // the real report has landed, and (since the meeting-status poll above
+    // stops the instant it sees "ready") never learns the summary/title/etc.
+    // arrived either. Same bounded-catch-up shape as the diarization
+    // re-poll above: keep re-fetching for a while, stop the moment real
+    // content shows up or the window runs out — a meeting whose owner has
+    // no connected provider never gets an auto report at all (the backend
+    // skips it silently), so this must give up eventually rather than poll
+    // forever, falling back to the "Generate report" button as it always
+    // has.
+    (async () => {
+      const deadline = Date.now() + REPORT_GRACE_MS;
+      let items = await api.listActionItems(meetingId);
+      if (cancelled) return;
+      setActionItems(items);
+      if (meeting.summary || items.length > 0) return;
+      setReportPending(true);
+      while (!cancelled && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, REPORT_POLL_INTERVAL_MS));
+        if (cancelled) return;
+        const [fresh, freshItems] = await Promise.all([api.getMeeting(meetingId), api.listActionItems(meetingId)]);
+        if (cancelled) return;
+        items = freshItems;
+        if (fresh.summary || items.length > 0) {
+          setMeeting(fresh);
+          setActionItems(items);
+          break;
+        }
+      }
+      if (!cancelled) setReportPending(false);
+    })();
 
     return () => {
       cancelled = true;
@@ -368,12 +412,16 @@ export default function MeetingDetail() {
                 {reportError && <p className="mb-3 text-sm text-status-danger">{reportError}</p>}
 
                 {!isOwner && !meeting.summary && actionItems.length === 0 && (
-                  <p className="text-sm text-ink-muted">No report yet.</p>
+                  <p className="text-sm text-ink-muted">
+                    {reportPending ? "Generating report…" : "No report yet."}
+                  </p>
                 )}
 
                 {isOwner && !meeting.summary && actionItems.length === 0 && (
                   <>
-                    {providerConnected === false ? (
+                    {reportPending ? (
+                      <p className="text-sm text-ink-muted">Generating report…</p>
+                    ) : providerConnected === false ? (
                       <p className="text-sm text-ink-muted">
                         Connect an LLM provider in Settings to generate a summary and action items.
                       </p>
