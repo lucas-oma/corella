@@ -40,6 +40,45 @@ class Cluster:
     speaker_id: str  # Speaker.id, as a str — every cluster gets one immediately on creation
 
 
+@dataclass
+class PendingEmbedding:
+    """A whole-utterance embedding that didn't confidently match any
+    existing cluster but wasn't trusted enough to mint a brand-new one from
+    on its own either (app/workers/tasks.py:diarize_utterance's defer path)
+    — held here, per meeting+channel, until either a later cluster update
+    makes it match (diarization_backfill_similarity_threshold) or another
+    pending embedding mutually corroborates it (see
+    try_promote_mutual_pair) enough to jointly seed a real new cluster.
+    Segment stays unlabeled in Postgres for as long as this stays pending —
+    same accepted trade-off as insufficient_signal's own unresolved
+    segments, MeetingDetail.tsx already degrades those gracefully.
+    """
+
+    segment_id: str  # TranscriptSegment.id, as a str
+    embedding: list[float]
+
+
+def _state_key(meeting_id: UUID, channel: Channel) -> str:
+    return f"diar:{meeting_id}:{channel.value}"
+
+
+def _pending_key(meeting_id: UUID, channel: Channel) -> str:
+    return f"diar-pending:{meeting_id}:{channel.value}"
+
+
+def peek_clusters(meeting_id: UUID, channel: Channel) -> list[Cluster]:
+    """Lock-free read of the current cluster state — used only to make a
+    fast, best-effort confidence decision about whether the expensive
+    diarize() pass is even worth running for a new utterance
+    (app/workers/tasks.py:diarize_utterance's skip-check). A small race here
+    against a concurrent update only ever costs a possibly-one-utterance-
+    stale confidence read, never a wrong final assignment — the actual
+    cluster write always still goes through locked_state below.
+    """
+    raw = _redis().get(_state_key(meeting_id, channel))
+    return [Cluster(**c) for c in json.loads(raw)] if raw else []
+
+
 @contextmanager
 def locked_state(meeting_id: UUID, channel: Channel):
     """Per-meeting-per-channel lock around one read-decide-write cycle of
@@ -49,16 +88,52 @@ def locked_state(meeting_id: UUID, channel: Channel):
     meeting) so a "Me" voice and a "Them" voice never get clustered against
     each other's centroids — Me and Them are unrelated pools of people, one
     a local mic capture, the other a shared tab/system-audio track. Yields
-    a mutable list[Cluster]; mutate it in place, it's saved back to Redis
-    when the block exits.
+    a mutable (list[Cluster], list[PendingEmbedding]) pair; mutate either in
+    place, both are saved back to Redis together when the block exits — the
+    same lock covers both because a single utterance's decision can touch
+    both at once (e.g. resolving a pending embedding also updates a
+    cluster's centroid), and they'd drift out of sync under separate locks.
     """
     r = _redis()
-    key = f"diar:{meeting_id}:{channel.value}"
+    key = _state_key(meeting_id, channel)
+    pending_key = _pending_key(meeting_id, channel)
     with r.lock(f"diar-lock:{meeting_id}:{channel.value}", timeout=10):
         raw = r.get(key)
         clusters = [Cluster(**c) for c in json.loads(raw)] if raw else []
-        yield clusters
+        pending_raw = r.get(pending_key)
+        pending = [PendingEmbedding(**p) for p in json.loads(pending_raw)] if pending_raw else []
+        yield clusters, pending
         r.set(key, json.dumps([asdict(c) for c in clusters]), ex=STATE_TTL_SECONDS)
+        r.set(pending_key, json.dumps([asdict(p) for p in pending]), ex=STATE_TTL_SECONDS)
+
+
+def try_promote_mutual_pair(pending: list[PendingEmbedding]) -> tuple[int, int] | None:
+    """The first pair of still-pending embeddings that mutually agree with
+    each other at SIMILARITY_THRESHOLD — real corroborating evidence from
+    two independent utterances, not one weak score trusted alone. Returns
+    their (index, index) into `pending`, or None.
+
+    Why this exists at all: without it, once a channel's first cluster is
+    created, no utterance that fails to confidently match it can ever
+    become a new cluster on its own (it would just defer forever) — a real,
+    genuinely different second speaker would never get their own identity,
+    silently absorbed into "unresolved" or the wrong cluster instead.
+    Verified live against real 2-speaker ground-truth audio: this alone
+    (deferring but never promoting) collapsed a real 2-speaker file down to
+    1 cluster, erasing the second speaker entirely — worse than the
+    over-segmentation bug being fixed. Requiring two pending embeddings to
+    agree with each other before minting a cluster from them fixed it
+    (verified: both real 2-speaker test files then correctly converged to
+    2 clusters, matching ground truth, with no regression on real
+    single-speaker files).
+    """
+    for a in range(len(pending)):
+        for b in range(a + 1, len(pending)):
+            ea, eb = np.array(pending[a].embedding), np.array(pending[b].embedding)
+            sim = float(np.dot(ea, eb) / (np.linalg.norm(ea) * np.linalg.norm(eb)))
+            if sim >= SIMILARITY_THRESHOLD:
+                return a, b
+    return None
 
 
 def best_match(clusters: list[Cluster], embedding: np.ndarray) -> tuple[int | None, float]:

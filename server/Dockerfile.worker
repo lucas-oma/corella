@@ -21,4 +21,12 @@ RUN pip install --no-cache-dir \
     --extra-index-url https://pypi.org/simple \
     -e ".[worker]"
 
-CMD ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info"]
+# --concurrency pinned rather than left at Celery's default (os.cpu_count()):
+# each forked worker process loads its own full copy of pyannote/whisper into
+# memory and is now eagerly pre-warmed at startup (celery_app.py's
+# worker_process_init hook) — on a multi-core host, an uncapped process count
+# means several independent cold-load-then-idle copies. 2 trades some
+# task-level parallelism for a predictable, bounded memory footprint and
+# fully-warm latency on a CPU-only deployment; raise it if the host has
+# cores/RAM to spare and genuinely needs more concurrent heavy jobs.
+CMD ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info", "--concurrency=2"]

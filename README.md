@@ -56,7 +56,7 @@ A self-hosted meeting assistant: it records a call from your browser (or takes a
 - **redis** — Celery broker/result backend, plus pub/sub for bridging worker-side events (diarization, live labels) back to the right live WebSocket connection.
 - **web** — React/TypeScript SPA, built static and served by nginx.
 
-The copilot LLM and the speech-to-text engine are each pluggable per user: a per-user saved key takes priority, then an instance-wide `.env` fallback, then — for STT only — local `faster-whisper`, which needs no key at all. See [`BRANDING.md`](BRANDING.md) for the UI's visual language if you're touching `web/`.
+The copilot LLM and the speech-to-text engine are each pluggable per user: a per-user saved key takes priority, then an instance-wide `.env` fallback, then — for STT only — local `faster-whisper`, which needs no key at all. See [`BRANDING.md`](BRANDING.md) for the UI's visual language if you're touching `web/`, or [`docs/AUDIO_PIPELINE.md`](docs/AUDIO_PIPELINE.md) for a detailed look at the transcription/live-streaming/speaker-diarization pipeline — including the full decision flow and the real bugs that shaped it — if you're touching `app/services/vad/`, `app/services/diarization/`, `app/services/asr/`, `app/ws/live_session.py`, or `app/workers/tasks.py`.
 
 ### Tech stack
 
@@ -103,6 +103,8 @@ corella/
   docker-compose.gpu.yml     optional NVIDIA runtime override
   .env.example
   BRANDING.md                UI visual language + component conventions
+  docs/
+    AUDIO_PIPELINE.md        transcription/live-streaming/diarization deep dive
 ```
 
 ## Running it

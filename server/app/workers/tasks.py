@@ -9,9 +9,11 @@ import wave
 from pathlib import Path
 from uuid import UUID
 
+import numpy as np
 from sqlalchemy import select
 
 from app.core import storage
+from app.core.config import get_settings
 from app.core.db import SessionLocal, engine, get_sync_db
 from app.models.cost import UsageKind
 from app.models.kb_document import KBDocument, KBDocumentStatus
@@ -23,7 +25,7 @@ from app.services.alignment.align import align
 from app.services.asr import deepgram
 from app.services.asr.resolve import resolve_stt_provider
 from app.services.asr.whisper import transcribe as whisper_transcribe
-from app.services.audio.mixing import read_wav_pcm, slice_pcm, write_wav
+from app.services.audio.mixing import is_clipped, read_wav_pcm, slice_pcm, write_wav
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import parse_json_response
 from app.services.copilot.report import ReportError
@@ -32,8 +34,11 @@ from app.services.diarization import events as diar_events
 from app.services.diarization.cluster import (
     SIMILARITY_THRESHOLD,
     Cluster,
+    PendingEmbedding,
     best_match,
     locked_state,
+    peek_clusters,
+    try_promote_mutual_pair,
     update_centroid,
 )
 from app.services.diarization.embedding import embed_utterance
@@ -51,6 +56,7 @@ from app.services.embeddings.qdrant_store import (
 from app.services.llm.base import LLMError, LLMMessage, complete
 from app.services.llm.pricing import estimate_cost_usd
 from app.services.llm.resolve import resolve_provider
+from app.services.vad.vad import speech_ms, trailing_contiguous_ms
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -287,31 +293,71 @@ def _recognize_voice_identity(
 
 
 def _cluster_and_assign(
-    db, meeting: Meeting, clusters: list[Cluster], embedding, channel: Channel
-) -> tuple[Speaker, bool]:
+    db,
+    meeting: Meeting,
+    clusters: list[Cluster],
+    embedding,
+    channel: Channel,
+    fallback_embedding=None,
+) -> tuple[Speaker, bool, object]:
     """One pre-computed embedding -> one clustering decision -> that
     cluster's Speaker (plus whether it's a *newly created* cluster with no
     resolved identity yet — the caller uses that to decide whether to
     dispatch corella.identify_speaker_name, exactly once per cluster, not
-    on every utterance that matches an already-decided one). Shared by
-    both the simple (no-split) and split paths below. Takes an embedding,
+    on every utterance that matches an already-decided one — and whichever
+    embedding actually decided this call, so the caller can reuse *that*
+    one, not blindly its own original, for anything downstream). Shared by
+    both the simple (no-split) and split paths below. Takes embeddings,
     not raw PCM: extraction is slow on a cold model load (the first call
     in a worker process), and this runs inside the per-meeting-per-channel
     Redis lock (locked_state) — embedding *before* acquiring the lock, not
     during, is what keeps that lock's hold time short (verified this
     mattered: a cold-start extraction held inside the lock outlasted its
     10s timeout, so the lock auto-expired mid-hold and releasing it at the
-    end raised redis.exceptions.LockNotOwnedError)."""
+    end raised redis.exceptions.LockNotOwnedError).
+
+    `fallback_embedding` (the caller only computes and passes one when
+    `embedding` came from a short utterance — see diarize_utterance) is a
+    second, wider-window look at the same channel's already-received audio,
+    tried only if `embedding` alone doesn't confidently match anything —
+    a short utterance's own embedding is genuinely noisy (verified
+    empirically: a real same-speaker 0.5s clip scored 0.53 against its own
+    true speaker, just under SIMILARITY_THRESHOLD), so a lone "no match"
+    from it shouldn't be trusted enough to permanently mint a new speaker.
+    Whichever embedding actually produces a match — or `embedding` itself,
+    if neither does — is what gets used consistently for the centroid
+    update/new cluster and the durable voice-identity lookup below, so a
+    weak primary embedding can't poison either of those once a better one
+    was already computed anyway.
+    """
     idx, similarity = best_match(clusters, embedding)
+    used_embedding = embedding
+
+    if (idx is None or similarity < SIMILARITY_THRESHOLD) and fallback_embedding is not None:
+        fb_idx, fb_similarity = best_match(clusters, fallback_embedding)
+        if fb_idx is not None and fb_similarity >= SIMILARITY_THRESHOLD:
+            idx, similarity, used_embedding = fb_idx, fb_similarity, fallback_embedding
+
     if idx is not None and similarity >= SIMILARITY_THRESHOLD:
         cluster = clusters[idx]
-        update_centroid(cluster, embedding)
+        update_centroid(cluster, used_embedding)
         speaker = db.get(Speaker, UUID(cluster.speaker_id))
-        return speaker, False
+        return speaker, False, used_embedding
 
-    # A genuinely new cluster for this meeting — before falling back to a
-    # fresh anonymous "Speaker N"/"Them N", check whether this voice is
-    # already durably recognized.
+    speaker, needs_naming = _create_speaker_cluster(db, meeting, clusters, used_embedding, channel)
+    return speaker, needs_naming, used_embedding
+
+
+def _create_speaker_cluster(
+    db, meeting: Meeting, clusters: list[Cluster], embedding, channel: Channel
+) -> tuple[Speaker, bool]:
+    """A genuinely new cluster for this meeting — before falling back to a
+    fresh anonymous "Speaker N"/"Them N", check whether this voice is
+    already durably recognized. Shared by _cluster_and_assign's own "no
+    match" tail and diarize_utterance's mutual-pending-agreement promotion
+    (see try_promote_mutual_pair) — both are "mint a brand-new speaker from
+    one embedding" decisions, just reached via different evidence.
+    """
     identity = _recognize_voice_identity(db, embedding, meeting.owner.group_id, meeting.owner_id)
 
     speaker = Speaker(
@@ -325,6 +371,160 @@ def _cluster_and_assign(
     db.flush()  # assign speaker.id before the cluster references it
     clusters.append(Cluster(centroid=embedding.tolist(), count=1, speaker_id=str(speaker.id)))
     return speaker, identity is None
+
+
+def _last_active_speaker(db, meeting_id: UUID, channel: Channel, before_start_ms: int) -> Speaker | None:
+    """The most recently resolved speaker on this channel, strictly before
+    `before_start_ms` — the "probably still whoever was just talking"
+    default for an utterance with genuinely too little reliable signal to
+    make its own identity decision (diarize_utterance's insufficient_signal
+    handling). None if nothing's been resolved on this channel yet (e.g.
+    this is the very first utterance) — there's nothing to default to, so
+    the caller leaves the segment unresolved instead, to be picked up by
+    the backfill pass below once a real cluster exists.
+    """
+    return db.scalar(
+        select(Speaker)
+        .join(TranscriptSegment, TranscriptSegment.speaker_id == Speaker.id)
+        .where(
+            TranscriptSegment.meeting_id == meeting_id,
+            TranscriptSegment.channel == channel,
+            TranscriptSegment.start_ms < before_start_ms,
+        )
+        .order_by(TranscriptSegment.start_ms.desc())
+        .limit(1)
+    )
+
+
+def _backfill_unresolved_segments(
+    db,
+    meeting: Meeting,
+    clusters: list[Cluster],
+    channel: Channel,
+    current_segment: TranscriptSegment,
+    window_pcm: bytes,
+    window_start_ms_abs: int,
+    settings,
+) -> list[TranscriptSegment]:
+    """Right after a brand-new cluster is created, give any earlier
+    unresolved segment on this same channel — one that couldn't be reliably
+    placed at the time (diarize_utterance's insufficient_signal, or the
+    channel's very first utterance with no prior speaker to default to) —
+    one retroactive shot at matching it against whatever clusters exist
+    *now*, using diarization_backfill_similarity_threshold rather than the
+    stricter bar creating a new speaker requires: the risk here is
+    different — worst case a backfilled label is only roughly right, not a
+    confidently wrong brand-new identity, and it only ever touches a
+    segment that had no label at all.
+
+    Deliberately does not special-case clipped candidates — the similarity
+    check itself is the only filter, so a distorted clip that still happens
+    to genuinely resemble an established cluster can still be picked up
+    (verified live on the exact motivating case: a real clipped clip scored
+    only 0.12 against the correct speaker, well under even this lenient
+    bar — so it stays unresolved there, correctly, not because it was
+    excluded outright but because it honestly didn't match).
+
+    Only considers segments whose own audio still falls within `window_pcm`
+    (the window just dispatched for `current_segment`) — an unresolved
+    segment further back than diarization_context_window_ms isn't
+    re-embeddable here without audio this task was never given; it settles
+    to the frontend's own generic fallback instead (see MeetingDetail.tsx).
+    """
+    candidates = db.scalars(
+        select(TranscriptSegment)
+        .where(
+            TranscriptSegment.meeting_id == meeting.id,
+            TranscriptSegment.channel == channel,
+            TranscriptSegment.speaker_id.is_(None),
+            TranscriptSegment.id != current_segment.id,
+            TranscriptSegment.start_ms >= window_start_ms_abs,
+            TranscriptSegment.start_ms < current_segment.start_ms,
+        )
+        .order_by(TranscriptSegment.start_ms)
+    ).all()
+
+    backfilled: list[TranscriptSegment] = []
+    for candidate in candidates:
+        candidate_pcm = slice_pcm(
+            window_pcm, candidate.start_ms - window_start_ms_abs, candidate.end_ms - candidate.start_ms
+        )
+        if not candidate_pcm:
+            continue
+        embedding = embed_utterance(candidate_pcm)
+        idx, similarity = best_match(clusters, embedding)
+        if idx is None or similarity < settings.diarization_backfill_similarity_threshold:
+            continue
+        cluster = clusters[idx]
+        update_centroid(cluster, embedding)
+        candidate.speaker = db.get(Speaker, UUID(cluster.speaker_id))
+        backfilled.append(candidate)
+    return backfilled
+
+
+def _resolve_pending(
+    db, meeting: Meeting, clusters: list[Cluster], pending: list[PendingEmbedding], channel: Channel, settings
+) -> tuple[list[tuple[TranscriptSegment, str]], list[tuple[UUID, list]]]:
+    """Every utterance's turn to try clearing the deferred queue (see
+    PendingEmbedding's own docstring) — not just the utterance that just
+    deferred, or only right after a brand-new cluster forms: an ordinary
+    match on this round can move a centroid close enough to resolve a much
+    older pending embedding, and two pending embeddings can mutually
+    corroborate each other even without a fresh cluster update at all.
+
+    Two passes, run to a fixed point (mutual promotion can make more
+    matches possible, which is worth one more matching pass before this
+    task ends): (1) match each pending embedding against current clusters
+    at the lenient backfill bar, same as _backfill_unresolved_segments; (2)
+    mint a brand-new cluster from any pair of pending embeddings that
+    mutually agree with each other (try_promote_mutual_pair) — the only way
+    a second cluster can ever form once a first one exists under this
+    scheme; see that function's own docstring for why it's required, not
+    just an enhancement.
+
+    Returns (resolved segments for the WS payload, newly-created speakers
+    needing corella.identify_speaker_name).
+    """
+    resolved: list[tuple[TranscriptSegment, str]] = []
+    newly_named: list[tuple[UUID, list]] = []
+
+    changed = True
+    while changed:
+        changed = False
+
+        still_pending: list[PendingEmbedding] = []
+        for entry in pending:
+            embedding = np.array(entry.embedding)
+            idx, similarity = best_match(clusters, embedding)
+            if idx is not None and similarity >= settings.diarization_backfill_similarity_threshold:
+                cluster = clusters[idx]
+                update_centroid(cluster, embedding)
+                seg = db.get(TranscriptSegment, UUID(entry.segment_id))
+                if seg is not None:
+                    seg.speaker = db.get(Speaker, UUID(cluster.speaker_id))
+                    resolved.append((seg, seg.speaker.display_label))
+                changed = True
+            else:
+                still_pending.append(entry)
+        pending[:] = still_pending
+
+        pair = try_promote_mutual_pair(pending)
+        if pair is not None:
+            a, b = pair
+            ea, eb = np.array(pending[a].embedding), np.array(pending[b].embedding)
+            speaker, needs_naming = _create_speaker_cluster(db, meeting, clusters, ea, channel)
+            update_centroid(clusters[-1], eb)
+            if needs_naming:
+                newly_named.append((speaker.id, eb.tolist()))
+            for entry_idx in (a, b):
+                seg = db.get(TranscriptSegment, UUID(pending[entry_idx].segment_id))
+                if seg is not None:
+                    seg.speaker = speaker
+                    resolved.append((seg, speaker.display_label))
+            pending[:] = [e for i, e in enumerate(pending) if i not in (a, b)]
+            changed = True
+
+    return resolved, newly_named
 
 
 def _segment_payload(segment: TranscriptSegment, speaker_label: str) -> dict:
@@ -372,45 +572,6 @@ def diarize_utterance(
     u_start_s = utterance_offset_ms / 1000
     u_end_s = u_start_s + utterance_duration_ms / 1000
 
-    # diarize()'s pipeline is only reliable well above ~10s of audio
-    # (verified empirically — an isolated ~4-6s clip either missed a real
-    # speaker change entirely or produced garbage overlapping turns, both
-    # reproduced live). live_session.py *asks* for settings.
-    # diarization_context_window_ms (default 12000) of context, but early in
-    # a session there may not be that much "Me" audio yet to satisfy it with
-    # — checking the window it actually got, not the size requested, avoids
-    # trusting a split decision the pipeline was never reliable enough to
-    # make; falls back to the simple whole-utterance path instead.
-    window_duration_ms = len(window_pcm) / 2 / 16000 * 1000
-    if window_duration_ms < 9000:
-        turns = []
-    else:
-        window_wav = None
-        try:
-            fd, window_wav = tempfile.mkstemp(suffix=".wav")
-            os.close(fd)
-            write_wav(window_wav, window_pcm)
-            turns = diarize(window_wav)
-        except DiarizationUnavailable:
-            turns = []
-        except Exception:
-            logger.exception("diarize_utterance: within-utterance segmentation failed for %s", segment_id)
-            turns = []
-        finally:
-            if window_wav:
-                try:
-                    os.unlink(window_wav)
-                except OSError:
-                    pass
-
-    clipped: list[tuple[float, float, str]] = []
-    for start, end, speaker in _merge_adjacent_same_speaker(turns):
-        clip_start, clip_end = max(start, u_start_s), min(end, u_end_s)
-        if clip_end > clip_start:
-            clipped.append((clip_start - u_start_s, clip_end - u_start_s, speaker))
-
-    distinct_local_speakers = {c[2] for c in clipped}
-
     with get_sync_db() as db:
         meeting = db.get(Meeting, UUID(meeting_id))
         segment = db.get(TranscriptSegment, UUID(segment_id))
@@ -421,13 +582,212 @@ def diarize_utterance(
         # below (the split path deletes `segment`).
         channel = segment.channel
 
-        # Embedding extraction happens here, before the per-meeting lock
-        # below is acquired — it's the slow part (a cold model load can take
-        # several seconds) and doesn't need cross-task exclusivity; only the
-        # actual cluster-decision-and-write does. Verified this ordering
-        # matters: a cold-start extraction held *inside* the lock outlasted
-        # its 10s timeout, so Redis auto-expired it mid-hold and releasing
-        # it at the end raised redis.exceptions.LockNotOwnedError.
+        # Cheap whole-utterance embedding, extracted first and unconditionally
+        # — before the per-meeting lock, and before deciding whether the
+        # expensive diarize() pass below is even necessary. On its own this
+        # is often already confident enough to place the utterance (the same
+        # person is still talking, the overwhelmingly common case in
+        # ordinary conversation), letting the full pipeline be skipped
+        # entirely — see diarization_skip_confidence in app/core/config.py.
+        # Reused below as-is when no split turns out to be needed, so this
+        # is never redundant work even on the slow path.
+        utterance_pcm = slice_pcm(window_pcm, utterance_offset_ms, utterance_duration_ms)
+        whole_embedding = embed_utterance(utterance_pcm)
+
+        settings = get_settings()
+
+        # window_pcm always ends exactly at this utterance's own end (that's
+        # how live_session.py builds it — extract_channel_window is called
+        # with the utterance's own end_ms as the window's end), and
+        # utterance_offset_ms/utterance_duration_ms are relative to
+        # window_pcm's own start rather than absolute — this converts that
+        # relative frame back to the session's real absolute-ms timeline,
+        # needed below to scope the backfill pass to segments this window
+        # actually has audio for.
+        window_start_ms_abs = segment.end_ms - utterance_offset_ms - utterance_duration_ms
+
+        # best_match returns (None, -1.0) when there are no clusters yet for
+        # this channel — correctly never confident, so a meeting's very
+        # first utterance on a channel always gets the careful full pass.
+        _best_idx, best_sim = best_match(peek_clusters(meeting.id, channel), whole_embedding)
+        confident_single_speaker = best_sim >= settings.diarization_skip_confidence
+
+        # A lone "doesn't match anything confidently" verdict from this
+        # utterance's own embedding doesn't get to mint a new speaker
+        # outright — try a second, wider-window look first (computed here,
+        # before the lock, same discipline as whole_embedding itself —
+        # never do slow model inference while holding locked_state's
+        # lock). `best_sim` above is a lock-free peek (may be a cluster or
+        # two stale by the time _cluster_and_assign runs for real), so this
+        # is a heuristic trigger, not a guarantee — worst case, an
+        # unnecessary embedding gets computed, or a genuinely-warranted one
+        # doesn't; _cluster_and_assign's own real decision still always
+        # goes through the fresh, locked cluster state.
+        #
+        # Originally gated the *trigger* on content thinness (too little
+        # real speech, e.g. a clip that's mostly silence padding — verified
+        # empirically that raw wall-clock duration alone is NOT the right
+        # signal here) rather than any miss — reproduced live, against real
+        # Deepgram-chunked ground-truth audio (not just synthetic short
+        # chops), that this was too narrow: a genuinely NOT-thin utterance
+        # can still score just under SIMILARITY_THRESHOLD from ordinary
+        # embedding variance (real examples: 0.524, 0.544, both against the
+        # correct matching speaker), and a thinness-only trigger never gave
+        # those a second look at all — an instant, permanent new speaker on
+        # a single narrow miss. Clipping (verified empirically — see
+        # is_clipped's docstring; a distorted clip scored 0.12 against the
+        # same real speaker's own clean speech) still always warrants a
+        # second look too, independent of the match score.
+        #
+        # Raw similarity score decides whether to *attempt* a second look
+        # (any miss against an existing cluster), but deliberately still
+        # does NOT decide whether the utterance's own audio quality can be
+        # *trusted* once that second look actually runs (see is_clipped
+        # below) — tried a purely score-based trust check too and rejected
+        # it after a real counter-example: two different genuinely-short
+        # real utterances — one a different speaker, one the *same*
+        # speaker caught by a nearby real gap — scored the identical 0.141
+        # against their respective closest cluster. Raw score alone cannot
+        # tell those apart at this duration.
+        fallback_embedding = None
+        # True only when the utterance is clipped and even the wider look
+        # couldn't rescue it — clipped audio isn't merely weak evidence,
+        # it's been shown to actively mismatch everything it's compared
+        # against (0.12 against the correct speaker in the case that
+        # motivated this), so it's left unresolved rather than either
+        # inventing a new identity from it or guessing whose it is. A
+        # thin-but-clean clip that similarly can't be rescued is NOT routed
+        # here — see the "falls through unchanged" branch below for why.
+        insufficient_signal = False
+
+        utterance_clipped = is_clipped(utterance_pcm)
+        has_existing_clusters = best_sim > -1.0  # -1.0 sentinel: no clusters on this channel at all yet
+        # Originally gated on content thinness (speech_ms < diarization_short_
+        # utterance_ms) as well as clipping — reproduced live, against real
+        # Deepgram-chunked ground-truth audio (not just synthetic short
+        # chops), that this was too narrow: a genuinely NOT-thin utterance
+        # (1.5-2s of real speech) can still score just under
+        # SIMILARITY_THRESHOLD from ordinary embedding variance (real
+        # examples: 0.524, 0.544, both against the correct matching
+        # speaker) — and since "too little content" never fires for it, no
+        # second look is ever attempted; a single narrow miss mints a
+        # permanent new speaker. The fix: any miss against an existing
+        # cluster warrants a second look, not only a thin/clipped one — a
+        # channel's ordinary first-ever utterance still never triggers this
+        # (has_existing_clusters is False, nothing to have failed to match
+        # against yet), matching how this has always worked.
+        needs_second_look = utterance_clipped or (has_existing_clusters and best_sim < SIMILARITY_THRESHOLD)
+        if needs_second_look and best_sim < SIMILARITY_THRESHOLD:
+            # A blind fixed-duration trailing window is NOT safe here —
+            # reproduced live: widening straight into audio that actually
+            # belongs to the *previous* speaker's own turn (across the very
+            # silence gap that caused this utterance's own boundary in the
+            # first place) blended two real people's voices into one
+            # embedding, which then confidently matched the WRONG existing
+            # cluster (0.78 similarity to the wrong speaker, verified on
+            # real audio) instead of correctly finding no match. Capping the
+            # window at the previous *committed segment's* own boundary
+            # instead was tried and also rejected — verified live that it
+            # collapses to zero extra context whenever utterances are
+            # dispatched back-to-back with no gap at all, which is the
+            # common case this whole mechanism exists for. A real detected
+            # silence gap (trailing_contiguous_ms, the same
+            # SILENCE_TO_FLUSH_MS-based signal local VAD itself uses to
+            # decide "this is a real pause") is the actual right signal:
+            # widen freely through genuinely continuous speech, stop at the
+            # first real pause. Cheap — no ML model involved, unlike the
+            # embedding extraction it's gating.
+            contiguous_ms = trailing_contiguous_ms(
+                window_pcm,
+                settings.live_vad_aggressiveness,
+                max_ms=settings.diarization_corroboration_window_ms,
+            )
+            utterance_end_within_window_ms = utterance_offset_ms + utterance_duration_ms
+            corroboration_start_ms = max(0, utterance_end_within_window_ms - contiguous_ms)
+            corroboration_pcm = slice_pcm(
+                window_pcm, corroboration_start_ms, utterance_end_within_window_ms - corroboration_start_ms
+            )
+            # Only usable if widening actually gives more (real, clean)
+            # audio than the utterance's own span already was — early in a
+            # session, or right after a real speaker change, there may be
+            # little to no extra *same-speaker* context available yet, and
+            # if the utterance itself was clipped rather than short, a
+            # corroboration window with too little of its own real speech
+            # or that's *also* clipped is no better than what we started
+            # with.
+            corroboration_usable = (
+                len(corroboration_pcm) > len(utterance_pcm)
+                and speech_ms(corroboration_pcm, settings.live_vad_aggressiveness)
+                >= settings.diarization_corroboration_min_speech_ms
+                and not is_clipped(corroboration_pcm)
+            )
+            if corroboration_usable:
+                fallback_embedding = embed_utterance(corroboration_pcm)
+            elif utterance_clipped:
+                insufficient_signal = True
+            # else: thin-but-clean content, no rescue available, not
+            # clipped — falls through unchanged to _cluster_and_assign
+            # below with fallback_embedding still None, same as this
+            # codebase has always done. Deliberately does NOT default to
+            # "probably still whoever was last talking" here: verified
+            # live that doing so misattributed a genuinely different
+            # speaker's own utterance (the exact 0.141-score
+            # counter-example above) to the wrong existing speaker — a
+            # false merge, which this codebase has never risked before and
+            # is a worse failure than the spurious-extra-speaker case this
+            # mechanism exists to reduce. Creating a new speaker here can
+            # occasionally still be wrong (a real trailing utterance with
+            # no rescuable context, verified live on one such case), but
+            # never merges two different real people's words together —
+            # the safer of the two error types.
+
+        # diarize()'s pipeline is only reliable well above ~10s of audio
+        # (verified empirically — an isolated ~4-6s clip either missed a real
+        # speaker change entirely or produced garbage overlapping turns, both
+        # reproduced live). live_session.py *asks* for settings.
+        # diarization_context_window_ms (default 12000) of context, but early in
+        # a session there may not be that much "Me" audio yet to satisfy it with
+        # — checking the window it actually got, not the size requested, avoids
+        # trusting a split decision the pipeline was never reliable enough to
+        # make; falls back to the simple whole-utterance path instead.
+        window_duration_ms = len(window_pcm) / 2 / 16000 * 1000
+        if confident_single_speaker or window_duration_ms < 9000:
+            turns = []
+        else:
+            window_wav = None
+            try:
+                fd, window_wav = tempfile.mkstemp(suffix=".wav")
+                os.close(fd)
+                write_wav(window_wav, window_pcm)
+                turns = diarize(window_wav)
+            except DiarizationUnavailable:
+                turns = []
+            except Exception:
+                logger.exception("diarize_utterance: within-utterance segmentation failed for %s", segment_id)
+                turns = []
+            finally:
+                if window_wav:
+                    try:
+                        os.unlink(window_wav)
+                    except OSError:
+                        pass
+
+        clipped: list[tuple[float, float, str]] = []
+        for start, end, speaker in _merge_adjacent_same_speaker(turns):
+            clip_start, clip_end = max(start, u_start_s), min(end, u_end_s)
+            if clip_end > clip_start:
+                clipped.append((clip_start - u_start_s, clip_end - u_start_s, speaker))
+
+        distinct_local_speakers = {c[2] for c in clipped}
+
+        # Per-turn embedding extraction still happens here, before the
+        # per-meeting lock below is acquired — it's the slow part (a cold
+        # model load can take several seconds) and doesn't need cross-task
+        # exclusivity; only the actual cluster-decision-and-write does.
+        # Verified this ordering matters: a cold-start extraction held
+        # *inside* the lock outlasted its 10s timeout, so Redis auto-expired
+        # it mid-hold and releasing it at the end raised
+        # redis.exceptions.LockNotOwnedError.
         split_turns: list[tuple[float, float, str, object]] = []
         if len(distinct_local_speakers) > 1:
             for rel_start, rel_end, _local_label in clipped:
@@ -443,11 +803,9 @@ def diarize_utterance(
 
         # A "split" that loses every turn but one to empty text-attribution
         # isn't a split — fall back to the whole utterance rather than
-        # silently dropping it.
+        # silently dropping it. whole_embedding was already computed above
+        # unconditionally, so the non-split path below just reuses it.
         did_split = len(split_turns) >= 2
-        if not did_split:
-            pcm = slice_pcm(window_pcm, utterance_offset_ms, utterance_duration_ms)
-            whole_embedding = embed_utterance(pcm)
 
         # (speaker_id, embedding) pairs to dispatch corella.identify_speaker_name
         # for, once outside the lock/transaction — a brand-new cluster this
@@ -463,28 +821,108 @@ def diarize_utterance(
         has_resolved_identity = False
 
         try:
-            with locked_state(meeting.id, channel) as clusters:
+            with locked_state(meeting.id, channel) as (clusters, pending):
                 resulting: list[tuple[TranscriptSegment, str]] = []
 
-                if not did_split:
-                    speaker, needs_naming = _cluster_and_assign(
-                        db, meeting, clusters, whole_embedding, channel
+                if not did_split and insufficient_signal:
+                    # Neither this utterance's own audio nor a wider look
+                    # had enough reliable signal to make any identity
+                    # decision at all — inventing a brand-new speaker from
+                    # that would be worse than not deciding (verified live,
+                    # see insufficient_signal's docstring above). Default to
+                    # whoever was last talking on this channel; if nobody
+                    # has been resolved on this channel yet (this segment is
+                    # itself the very first utterance, or every earlier one
+                    # was *also* unreliable), there's nothing to default to
+                    # — leave it unresolved, to be picked up by the backfill
+                    # pass below once a real cluster exists to check it
+                    # against.
+                    speaker = _last_active_speaker(db, meeting.id, channel, segment.start_ms)
+                    if speaker is not None:
+                        segment.speaker = speaker
+                        resulting.append((segment, speaker.display_label))
+                        has_resolved_identity = has_resolved_identity or speaker.voice_identity_id is not None
+                elif not did_split:
+                    # Dry-run the exact same primary+corroboration match
+                    # _cluster_and_assign would do, to decide BEFORE
+                    # committing whether it's about to mint a new cluster
+                    # from one weak embedding — the actual mechanism behind
+                    # over-segmentation that survived the broadened
+                    # second-look trigger above (a genuinely thin or
+                    # cross-a-real-pause utterance whose corroboration
+                    # attempt still doesn't clear SIMILARITY_THRESHOLD).
+                    # `clusters` non-empty is required — a channel's very
+                    # first-ever cluster is still created outright, nothing
+                    # to defer against yet.
+                    dry_idx, dry_sim = best_match(clusters, whole_embedding)
+                    would_match = dry_idx is not None and dry_sim >= SIMILARITY_THRESHOLD
+                    if not would_match and fallback_embedding is not None:
+                        fb_dry_idx, fb_dry_sim = best_match(clusters, fallback_embedding)
+                        would_match = fb_dry_idx is not None and fb_dry_sim >= SIMILARITY_THRESHOLD
+
+                    if not would_match and clusters:
+                        # Defer rather than mint a new cluster outright —
+                        # verified live that doing so DIRECTLY (no
+                        # corroborating second opinion) causes real
+                        # over-segmentation; see PendingEmbedding's own
+                        # docstring for what happens to it from here.
+                        pending.append(
+                            PendingEmbedding(segment_id=str(segment.id), embedding=whole_embedding.tolist())
+                        )
+                    else:
+                        speaker, needs_naming, used_embedding = _cluster_and_assign(
+                            db, meeting, clusters, whole_embedding, channel, fallback_embedding
+                        )
+                        # Assign the relationship object, not just the FK
+                        # column — segment.speaker was already loaded (as
+                        # None) when it was fetched above, and setting
+                        # speaker_id alone doesn't refresh that
+                        # already-cached relationship. Matters here because
+                        # the backfill query below can re-select this exact
+                        # row later in the same session/identity map.
+                        segment.speaker = speaker
+                        resulting.append((segment, speaker.display_label))
+                        if needs_naming:
+                            pending_name_inference.append((speaker.id, used_embedding.tolist()))
+                        has_resolved_identity = has_resolved_identity or speaker.voice_identity_id is not None
+
+                        # A brand-new (non-deferred) cluster — see if any
+                        # earlier segment on this same channel that
+                        # couldn't be reliably placed at the time
+                        # (insufficient_signal above, on some earlier
+                        # utterance) can now be backfilled against it, or
+                        # against any other cluster it might genuinely
+                        # match — using a more lenient bar than creating a
+                        # new speaker requires (see
+                        # diarization_backfill_similarity_threshold).
+                        backfilled = _backfill_unresolved_segments(
+                            db, meeting, clusters, channel, segment, window_pcm, window_start_ms_abs, settings
+                        )
+                        resulting.extend((s, s.speaker.display_label) for s in backfilled)
+                        has_resolved_identity = has_resolved_identity or any(
+                            s.speaker.voice_identity_id is not None for s in backfilled
+                        )
+
+                    # Every utterance gets a chance to clear the deferred
+                    # queue, not just the one that just deferred — an
+                    # ordinary match above can move a centroid close enough
+                    # to resolve a much older pending embedding, and two
+                    # pending embeddings can mutually corroborate each
+                    # other into a brand-new cluster (see
+                    # try_promote_mutual_pair — the only way a 2nd cluster
+                    # can ever form once a 1st exists under this scheme).
+                    pending_resolved, pending_named = _resolve_pending(
+                        db, meeting, clusters, pending, channel, settings
                     )
-                    # Assign the relationship object, not just the FK column
-                    # — segment.speaker was already loaded (as None) when it
-                    # was fetched above, and setting speaker_id alone doesn't
-                    # refresh that already-cached relationship. Matters here
-                    # because the backfill query below can re-select this
-                    # exact row later in the same session/identity map.
-                    segment.speaker = speaker
-                    resulting.append((segment, speaker.display_label))
-                    if needs_naming:
-                        pending_name_inference.append((speaker.id, whole_embedding.tolist()))
-                    has_resolved_identity = has_resolved_identity or speaker.voice_identity_id is not None
+                    resulting.extend(pending_resolved)
+                    pending_name_inference.extend(pending_named)
+                    has_resolved_identity = has_resolved_identity or any(
+                        s.speaker.voice_identity_id is not None for s, _ in pending_resolved
+                    )
                 else:
                     base_start_ms = segment.start_ms
                     for rel_start, rel_end, text, embedding in split_turns:
-                        speaker, needs_naming = _cluster_and_assign(
+                        speaker, needs_naming, used_embedding = _cluster_and_assign(
                             db, meeting, clusters, embedding, channel
                         )
                         new_row = TranscriptSegment(

@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -210,13 +211,17 @@ async def delete_call_type(call_type_id: UUID, db: AsyncSession = Depends(get_db
 
 
 @router.get("/costs", response_model=CostSummaryRead)
-async def get_costs(db: AsyncSession = Depends(get_db)) -> CostSummaryRead:
+async def get_costs(
+    period: Literal["7d", "30d", "month", "year"] = "30d",
+    db: AsyncSession = Depends(get_db),
+) -> CostSummaryRead:
     """Aggregate LLM cost analytics for the Admin Costs section — total,
-    per-user, daily history, and a trailing-average next-7-days projection.
+    per-user, daily history (dense zero-filled series for `period`), and a
+    trailing-average next-7-days projection.
     Built from the LLMUsageEvent ledger (app/services/admin/costs.py), not
     the per-meeting running total, which has no per-event timestamps.
     """
-    summary = await get_cost_summary(db)
+    summary = await get_cost_summary(db, period=period)
     return CostSummaryRead(
         total_usd=summary.total_usd,
         priced_call_count=summary.priced_call_count,
@@ -235,4 +240,5 @@ async def get_costs(db: AsyncSession = Depends(get_db)) -> CostSummaryRead:
         ],
         daily=[DailyCostRead(day=d.day, total_usd=d.total_usd) for d in summary.daily],
         projected_next_7_days_usd=summary.projected_next_7_days_usd,
+        period=summary.period,
     )

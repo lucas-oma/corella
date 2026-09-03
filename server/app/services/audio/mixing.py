@@ -86,6 +86,33 @@ def slice_pcm(pcm: bytes, start_ms: int, duration_ms: int, sample_rate: int = SA
     return pcm[start_byte:end_byte]
 
 
+def is_clipped(pcm: bytes, min_clipped_samples: int = 3, ceiling: int = 32760) -> bool:
+    """True if `pcm` shows genuine amplitude clipping — real samples pinned
+    at (or within a few counts of) the int16 ceiling, a sign the input gain
+    was set too hot rather than just loud speech. Verified against a real
+    distorted recording and the project's own clean ground-truth clips: the
+    bad recording had 7 samples at the literal ceiling out of ~60,000; the
+    same person's own later, clean speech in the same session had zero, and
+    every other real recording used for diarization testing this project has
+    had zero anywhere near the ceiling across ~1.5M samples checked — a
+    clean, well-separated signal, not just "loud." `min_clipped_samples=3`
+    keeps a single stray sample from tripping this on an otherwise-fine
+    clip.
+
+    Used by app/workers/tasks.py:_cluster_and_assign to keep a distorted
+    utterance from becoming a new speaker's permanent reference voiceprint
+    — reproduced live: a clipped 3.75s clip scored only 0.12 similarity
+    against the same person's own clean speech moments later (a genuine
+    same-speaker match usually scores 0.6-0.9), permanently splitting one
+    real person into two. Unlike a short or silence-padded clip, more
+    context doesn't fix this — the audio itself is the problem.
+    """
+    samples = np.frombuffer(pcm, dtype=np.int16)
+    if len(samples) == 0:
+        return False
+    return int(np.sum(np.abs(samples.astype(np.int32)) >= ceiling)) >= min_clipped_samples
+
+
 def write_wav(path: str, pcm: bytes, sample_rate: int = SAMPLE_RATE) -> None:
     with wave.open(path, "wb") as wf:
         wf.setnchannels(1)

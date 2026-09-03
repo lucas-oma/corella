@@ -20,3 +20,6 @@ dist/
 
 # Test samples
 audio-samples/
+
+# Local diarization-debug harness cache (real transcript content — never commit)
+server/scripts/.deepgram_cache/

@@ -34,6 +34,19 @@ def _events_key(meeting_id: UUID) -> str:
     return f"diar-events:{meeting_id}"
 
 
+def notify_channel(meeting_id: UUID) -> str:
+    """Pub/sub wake-up channel, separate from the durable list above — the
+    list is still the actual source of truth (drain_events reads it), this
+    is purely a low-latency "something's there, go check now" ping so
+    app/ws/live_session.py doesn't have to poll on a fixed interval to find
+    out. A ping published with no subscriber listening is simply lost
+    (pub/sub gives no delivery guarantee), which is fine: the subscriber
+    also re-checks the list on a much longer fallback timer, so a missed
+    ping only ever costs that fallback interval, never a stuck update.
+    """
+    return f"diar-notify:{meeting_id}"
+
+
 def _reported_key(meeting_id: UUID, channel: Channel) -> str:
     return f"diar-reported:{meeting_id}:{channel.value}"
 
@@ -77,6 +90,10 @@ def push_event(meeting_id: UUID, event: dict, reported_segment_ids: list[str], c
         key = _reported_key(meeting_id, channel)
         r.sadd(key, *reported_segment_ids)
         r.expire(key, STATE_TTL_SECONDS)
+    # Wake up a subscriber immediately rather than making it wait out its own
+    # poll interval — see notify_channel's docstring for why this is safe
+    # to be best-effort.
+    r.publish(notify_channel(meeting_id), "1")
 
 
 def drain_events(meeting_id: UUID) -> list[dict]:
