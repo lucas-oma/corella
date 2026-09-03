@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import wave
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -183,6 +184,12 @@ def process_meeting_audio(meeting_id: str) -> None:
 
                 meeting.duration_seconds = _wav_duration_seconds(normalized_path)
                 meeting.status = MeetingStatus.READY
+                # Same field live finalize sets — MeetingDetail gates its
+                # diarization catch-up poll on ended_at being recent; leaving
+                # it null for uploads made the page skip getTranscript
+                # entirely on the !endedRecently path.
+                if meeting.ended_at is None:
+                    meeting.ended_at = datetime.now(UTC)
                 meeting.processing_error = None
                 db.commit()
         except Exception as e:
