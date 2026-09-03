@@ -33,6 +33,36 @@ skip-confidence/needs-second-look/corroboration decisions exactly as
 diarize_utterance makes them, whether the (real) full diarize() split pass
 ran, and the resulting cluster assignment — then a final summary of how many
 speakers were created and, for each, what triggered its creation.
+
+STATUS as of the investigation that built this (see git log for the commit
+that shipped the first fix): the broadened second-look trigger (default
+behavior now, --legacy-narrow-trigger reproduces the old one for A/B) is
+shipped to production. Two more issues were found via this harness and are
+still OPEN — not yet safely fixed:
+
+  (B) A thin utterance immediately following a real pause still can't be
+      rescued — trailing_contiguous_ms stops at that very pause, so there's
+      nothing extra to recover. Tried --last-speaker-threshold as a fix;
+      verified UNSAFE on real audio-1.wav ground truth (a threshold that
+      correctly rescues a real same-speaker case at 0.409 also falsely
+      merges two different real speakers at 0.403 — not separable by raw
+      score alone at this signal level).
+
+  (C) The EXISTING corroboration mechanism can blend two different real
+      speakers when their real pause is under SILENCE_TO_FLUSH_MS (500ms) —
+      reproduced on real audio-1.wav ground truth (utterance "Sí," at
+      2879-3679ms falsely matched the PRECEDING speaker's cluster at 0.775,
+      because Deepgram's own gap there was only 400ms — mathematically too
+      short for trailing_contiguous_ms's 500ms-consecutive-silence stop
+      condition to ever trigger). Tried --corroboration-silence-gap-ms as a
+      fix (a tighter global threshold, e.g. 300/200/150/100ms); verified
+      this makes things WORSE overall on the same file (4 clusters -> 6) —
+      a single global retune just trades this false-merge for breaking
+      OTHER true corroboration rescues that also happen to have short
+      pauses before them. A real fix needs something smarter than one
+      constant — e.g. a threshold that itself scales with how much
+      contiguous audio was actually recovered, or a fundamentally different
+      corroboration source — not yet found.
 """
 
 import argparse
@@ -86,6 +116,7 @@ from app.services.diarization.pyannote import DiarizationUnavailable, diarize  #
 from app.services.vad.vad import (  # noqa: E402
     FRAME_BYTES,
     SAMPLE_RATE,
+    SILENCE_TO_FLUSH_MS,
     UtteranceDetector,
     speech_ms,
     trailing_contiguous_ms,
@@ -278,6 +309,7 @@ def run(
     label: str,
     legacy_narrow_trigger: bool = False,
     last_speaker_threshold: float | None = None,
+    corroboration_silence_gap_ms: int = SILENCE_TO_FLUSH_MS,
 ) -> None:
     """`legacy_narrow_trigger`: reproduce the pre-fix, content-thinness-only
     second-look gate this project shipped and then replaced — for A/B
@@ -340,7 +372,10 @@ def run(
         corroboration_note = ""
         if needs_second_look and best_sim < SIMILARITY_THRESHOLD:
             contiguous_ms = trailing_contiguous_ms(
-                window_pcm, settings.live_vad_aggressiveness, max_ms=settings.diarization_corroboration_window_ms
+                window_pcm,
+                settings.live_vad_aggressiveness,
+                silence_gap_ms=corroboration_silence_gap_ms,
+                max_ms=settings.diarization_corroboration_window_ms,
             )
             utterance_end_within_window_ms = utterance_offset_ms + utterance_duration_ms
             corroboration_start_ms = max(0, utterance_end_within_window_ms - contiguous_ms)
@@ -455,6 +490,12 @@ def main() -> None:
         default=None,
         help="EXPERIMENTAL, verified unsafe (see run()'s docstring) — try one more lenient comparison against the most-recently-assigned cluster at this threshold",
     )
+    parser.add_argument(
+        "--corroboration-silence-gap-ms",
+        type=int,
+        default=SILENCE_TO_FLUSH_MS,
+        help="EXPERIMENTAL fix hypothesis C — silence_gap_ms passed to trailing_contiguous_ms; a tighter value than the default (SILENCE_TO_FLUSH_MS, tuned for transcription boundaries, not speaker identity) may stop corroboration from blending across a real but short cross-speaker pause",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -481,6 +522,7 @@ def main() -> None:
         label=f"{Path(args.audio).name} [{args.chunker}]",
         legacy_narrow_trigger=args.legacy_narrow_trigger,
         last_speaker_threshold=args.last_speaker_threshold,
+        corroboration_silence_gap_ms=args.corroboration_silence_gap_ms,
     )
 
 
