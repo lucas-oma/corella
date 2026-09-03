@@ -19,6 +19,7 @@ real, hard-won iterations before it worked reliably. If you're touching
   - [Full decision flow](#full-decision-flow)
 - [The debugging history](#the-debugging-history)
 - [Debugging tools](#debugging-tools)
+  - [Content-addressed caching for `--chunker deepgram`](#content-addressed-caching-for---chunker-deepgram)
 - [Tunables reference](#tunables-reference)
 - [Known open issues](#known-open-issues)
 
@@ -387,6 +388,40 @@ rebuild loop:
   the already-built `corella-worker:latest` image with local code
   bind-mounted read-only, so code edits are picked up on `docker restart`
   without a slow image rebuild).
+
+### Content-addressed caching for `--chunker deepgram`
+
+Debugging real over-segmentation needed *real* Deepgram chunking — a
+synthetic or local-VAD approximation wouldn't reproduce the actual
+utterance boundaries production traffic gets, which is exactly what this
+whole investigation turned on. But a real fix-hypothesis session runs the
+harness against the same handful of audio files repeatedly (once per
+candidate fix, sometimes several times per file while narrowing in), and
+Deepgram's `/v1/listen` response — the utterance list this whole exercise
+is built on — is fully determined by the audio bytes and request params.
+Re-sending the same file to Deepgram on every run is pure waste: it costs
+real money, adds real network latency to every iteration, and buys nothing
+the first response didn't already answer.
+
+`chunk_via_deepgram()` hashes the input audio (`sha256`, first 16 hex
+chars) and caches the raw JSON response under
+`server/scripts/.deepgram_cache/{hash}.json`, keyed purely by content — the
+same audio bytes always resolve to the same cache entry regardless of
+filename, so renaming or copying a sample doesn't invalidate it, and two
+different samples never collide. A cache hit skips the network call
+entirely and prints which cache file it used; a miss makes the real call
+once and writes the response before returning it. This is why the dozen-plus
+harness runs during this investigation only ever hit Deepgram's real API
+once per distinct audio file, not once per run — the fix-hypothesis
+iteration loop (change a threshold, re-run all 4 samples, compare) went
+from "a real network round-trip every time" to "instant after the first
+run," without ever risking a stale or synthetic chunking result standing
+in for the real thing.
+
+The cache directory is git-ignored (`.gitignore`) — it holds real
+transcript content from real audio, not something to commit — and is
+disposable: delete it any time to force fresh calls (e.g. after a model or
+`language` param change that would actually produce different chunking).
 
 ## Tunables reference
 
