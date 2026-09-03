@@ -533,36 +533,43 @@ def diarize_utterance(
         _best_idx, best_sim = best_match(peek_clusters(meeting.id, channel), whole_embedding)
         confident_single_speaker = best_sim >= settings.diarization_skip_confidence
 
-        # Two independent reasons a lone "doesn't match anything" verdict
-        # from this utterance's own embedding shouldn't be trusted at face
-        # value: too little real speech content to build a reliable
-        # voiceprint at all (verified empirically — see
-        # diarization_short_utterance_ms's docstring; raw wall-clock
-        # duration alone is NOT the right signal here, a clip can run
-        # several seconds and still be almost entirely silence padding), or
-        # genuine amplitude clipping (verified empirically — see
-        # is_clipped's docstring; a distorted clip scored 0.12 against the
-        # same real speaker's own clean speech). Either way, try a second,
-        # wider-window look before giving up — computed here, before the
-        # lock, same discipline as whole_embedding itself (never do slow
-        # model inference while holding locked_state's lock). `best_sim`
-        # above is a lock-free peek (may be a cluster or two stale by the
-        # time _cluster_and_assign runs for real), so this is a heuristic
-        # trigger, not a guarantee — worst case, an unnecessary embedding
-        # gets computed, or a genuinely-warranted one doesn't;
-        # _cluster_and_assign's own real decision still always goes through
-        # the fresh, locked cluster state.
+        # A lone "doesn't match anything confidently" verdict from this
+        # utterance's own embedding doesn't get to mint a new speaker
+        # outright — try a second, wider-window look first (computed here,
+        # before the lock, same discipline as whole_embedding itself —
+        # never do slow model inference while holding locked_state's
+        # lock). `best_sim` above is a lock-free peek (may be a cluster or
+        # two stale by the time _cluster_and_assign runs for real), so this
+        # is a heuristic trigger, not a guarantee — worst case, an
+        # unnecessary embedding gets computed, or a genuinely-warranted one
+        # doesn't; _cluster_and_assign's own real decision still always
+        # goes through the fresh, locked cluster state.
         #
-        # Raw similarity score is deliberately NOT used to decide whether a
-        # thin clip's "no match" verdict should be trusted, only content
-        # and clipping — tried scoring-based triggering and rejected it
-        # after a real counter-example: two different genuinely-short real
-        # utterances — one a different speaker, one the *same* speaker
-        # caught by a nearby real gap — scored the identical 0.141 against
-        # their respective closest cluster. Raw score alone cannot tell
-        # those apart at this duration; content/clipping tells us the
-        # *embedding* isn't trustworthy without claiming to also know which
-        # way the truth actually points.
+        # Originally gated the *trigger* on content thinness (too little
+        # real speech, e.g. a clip that's mostly silence padding — verified
+        # empirically that raw wall-clock duration alone is NOT the right
+        # signal here) rather than any miss — reproduced live, against real
+        # Deepgram-chunked ground-truth audio (not just synthetic short
+        # chops), that this was too narrow: a genuinely NOT-thin utterance
+        # can still score just under SIMILARITY_THRESHOLD from ordinary
+        # embedding variance (real examples: 0.524, 0.544, both against the
+        # correct matching speaker), and a thinness-only trigger never gave
+        # those a second look at all — an instant, permanent new speaker on
+        # a single narrow miss. Clipping (verified empirically — see
+        # is_clipped's docstring; a distorted clip scored 0.12 against the
+        # same real speaker's own clean speech) still always warrants a
+        # second look too, independent of the match score.
+        #
+        # Raw similarity score decides whether to *attempt* a second look
+        # (any miss against an existing cluster), but deliberately still
+        # does NOT decide whether the utterance's own audio quality can be
+        # *trusted* once that second look actually runs (see is_clipped
+        # below) — tried a purely score-based trust check too and rejected
+        # it after a real counter-example: two different genuinely-short
+        # real utterances — one a different speaker, one the *same*
+        # speaker caught by a nearby real gap — scored the identical 0.141
+        # against their respective closest cluster. Raw score alone cannot
+        # tell those apart at this duration.
         fallback_embedding = None
         # True only when the utterance is clipped and even the wider look
         # couldn't rescue it — clipped audio isn't merely weak evidence,
@@ -576,18 +583,21 @@ def diarize_utterance(
 
         utterance_clipped = is_clipped(utterance_pcm)
         has_existing_clusters = best_sim > -1.0  # -1.0 sentinel: no clusters on this channel at all yet
-        too_little_content = speech_ms(utterance_pcm, settings.live_vad_aggressiveness) < (
-            settings.diarization_short_utterance_ms
-        )
-        # Clipping always warrants a second look, independent of content or
-        # whether anything exists yet to compare against. Content thinness
-        # only warrants one when there's a real existing cluster it failed
-        # to match against — a channel's ordinary first-ever utterance is
-        # short by definition and has nothing to have failed to match,
-        # which isn't evidence of anything wrong; forcing a decision from
-        # it (creating the very first cluster) is exactly how this has
-        # always worked, verified across every prior diarization phase.
-        needs_second_look = utterance_clipped or (too_little_content and has_existing_clusters)
+        # Originally gated on content thinness (speech_ms < diarization_short_
+        # utterance_ms) as well as clipping — reproduced live, against real
+        # Deepgram-chunked ground-truth audio (not just synthetic short
+        # chops), that this was too narrow: a genuinely NOT-thin utterance
+        # (1.5-2s of real speech) can still score just under
+        # SIMILARITY_THRESHOLD from ordinary embedding variance (real
+        # examples: 0.524, 0.544, both against the correct matching
+        # speaker) — and since "too little content" never fires for it, no
+        # second look is ever attempted; a single narrow miss mints a
+        # permanent new speaker. The fix: any miss against an existing
+        # cluster warrants a second look, not only a thin/clipped one — a
+        # channel's ordinary first-ever utterance still never triggers this
+        # (has_existing_clusters is False, nothing to have failed to match
+        # against yet), matching how this has always worked.
+        needs_second_look = utterance_clipped or (has_existing_clusters and best_sim < SIMILARITY_THRESHOLD)
         if needs_second_look and best_sim < SIMILARITY_THRESHOLD:
             # A blind fixed-duration trailing window is NOT safe here —
             # reproduced live: widening straight into audio that actually
