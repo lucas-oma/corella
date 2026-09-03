@@ -6,6 +6,16 @@ import { ApiError, api, type ActionItem, type Meeting, type TranscriptSegment } 
 import { useAuth } from "@/lib/auth";
 
 const POLL_INTERVAL_MS = 3000;
+// Same-room diarization (server/app/workers/tasks.py:diarize_utterance) is a
+// background Celery task, independent of the live WS session — it keeps
+// running and correctly labels a segment even after the call has ended and
+// this page has already loaded, but nothing pushes that update to an
+// already-loaded page on its own. These bound how long the transcript-
+// loading effect below re-polls specifically for segments still missing a
+// real speaker_label; most resolve within a few seconds, well inside this
+// window.
+const DIARIZATION_GRACE_MS = 45000;
+const DIARIZATION_POLL_INTERVAL_MS = 4000;
 
 function formatTimestamp(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -21,21 +31,44 @@ function formatCost(usd: number): string {
   return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
 }
 
-/** Live-recorded segments have no Speaker row (channel already says who) —
- * fall back to "Me"/"Them" so they aren't unlabeled. A resolved identity
- * linked to an enrolled account (segment.linked_user_id) is viewer-
- * relative: the account owner sees "Me" here (first person, their own
- * meeting), anyone else with legitimate access (an admin, per Phase J —
- * a group member never reaches this view at all) sees the real name. */
-function speakerLabel(segment: TranscriptSegment, viewerId: string | undefined): string | null {
+/** A resolved identity linked to an enrolled account (segment.linked_user_id)
+ * is viewer-relative: the account owner sees "Me" here (first person, their
+ * own meeting), anyone else with legitimate access (an admin, per Phase J —
+ * a group member never reaches this view at all) sees the real name.
+ *
+ * A live-recorded segment with no speaker_label *yet* is not the same as
+ * one that's genuinely just the channel owner talking alone — same-room
+ * diarization (server/app/workers/tasks.py:diarize_utterance) runs as a
+ * background task and can still be catching up right after the call ends,
+ * and this segment might turn out to belong to a different speaker
+ * entirely (a real, previously-reported bug: confidently guessing "Me"
+ * here before diarization has had a chance to run). Only fall back to the
+ * plain channel guess once the bounded catch-up window has actually given
+ * up — see DIARIZATION_GRACE_MS and the transcript-loading effect below. */
+function speakerLabel(
+  segment: TranscriptSegment,
+  viewerId: string | undefined,
+  diarizationCatchingUp: boolean,
+): string | null {
   if (segment.speaker_label) {
     return segment.linked_user_id && segment.linked_user_id === viewerId
       ? "Me"
       : segment.speaker_label;
   }
-  if (segment.channel === "me") return "Me";
-  if (segment.channel === "them") return "Them";
+  if (segment.channel === "me" || segment.channel === "them") {
+    if (diarizationCatchingUp) return "Identifying…";
+    return segment.channel === "me" ? "Me" : "Them";
+  }
   return null;
+}
+
+/** Any live-recorded (me/them) segment whose speaker hasn't been resolved
+ * yet — see speakerLabel's docstring for why that's not the same as "just
+ * the channel owner." */
+function hasUnresolvedLiveSpeaker(segments: TranscriptSegment[]): boolean {
+  return segments.some(
+    (s) => (s.channel === "me" || s.channel === "them") && !s.speaker_label,
+  );
 }
 
 export default function MeetingDetail() {
@@ -59,6 +92,10 @@ export default function MeetingDetail() {
   // 404 for anyone else, admin included, on write routes).
   const canViewFull = isOwner || user?.role === "admin";
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
+  // True while the transcript-loading effect below is still re-polling for
+  // same-room diarization to catch up on any segment it loaded without a
+  // resolved speaker yet — see speakerLabel's docstring.
+  const [diarizationCatchingUp, setDiarizationCatchingUp] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
@@ -109,9 +146,27 @@ export default function MeetingDetail() {
   // attempting either fetch.
   useEffect(() => {
     if (!meetingId || meeting?.status !== "ready") return;
+    let cancelled = false;
 
     if (canViewFull) {
-      api.getTranscript(meetingId).then(setTranscript);
+      // Re-poll, bounded, specifically while a live-recorded segment is
+      // still missing a resolved speaker — see speakerLabel's and
+      // DIARIZATION_GRACE_MS's docstrings above.
+      (async () => {
+        const deadline = Date.now() + DIARIZATION_GRACE_MS;
+        while (!cancelled) {
+          const fresh = await api.getTranscript(meetingId);
+          if (cancelled) return;
+          setTranscript(fresh);
+          const stillPending = hasUnresolvedLiveSpeaker(fresh);
+          if (!stillPending || Date.now() >= deadline) {
+            setDiarizationCatchingUp(false);
+            return;
+          }
+          setDiarizationCatchingUp(true);
+          await new Promise((resolve) => setTimeout(resolve, DIARIZATION_POLL_INTERVAL_MS));
+        }
+      })();
       if (meeting.has_audio) {
         api.getAudioObjectUrl(meetingId).then(setAudioUrl);
       }
@@ -120,6 +175,10 @@ export default function MeetingDetail() {
       api.getProviderStatus().then((statuses) => setProviderConnected(statuses.some((s) => s.connected)));
     }
     api.listActionItems(meetingId).then(setActionItems);
+
+    return () => {
+      cancelled = true;
+    };
   }, [meetingId, meeting?.status, meeting?.has_audio, isOwner, canViewFull]);
 
   async function onGenerateReport() {
@@ -410,26 +469,33 @@ export default function MeetingDetail() {
 
               {canViewFull && transcript && transcript.length > 0 && (
                 <ol className="card divide-y divide-border dark:divide-border-dark">
-                  {transcript.map((segment) => (
-                    <li key={segment.id}>
-                      <button
-                        onClick={() => seekTo(segment.start_ms)}
-                        className="flex w-full gap-4 px-5 py-3 text-left transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
-                      >
-                        <span className="w-12 shrink-0 pt-0.5 font-mono text-xs text-ink-subtle">
-                          {formatTimestamp(segment.start_ms)}
-                        </span>
-                        <span>
-                          {speakerLabel(segment, user?.id) && (
-                            <span className="mr-2 text-xs font-medium text-ink-muted">
-                              {speakerLabel(segment, user?.id)}
-                            </span>
-                          )}
-                          <span className="text-sm text-ink dark:text-ink-inverted">{segment.text}</span>
-                        </span>
-                      </button>
-                    </li>
-                  ))}
+                  {transcript.map((segment) => {
+                    const label = speakerLabel(segment, user?.id, diarizationCatchingUp);
+                    return (
+                      <li key={segment.id}>
+                        <button
+                          onClick={() => seekTo(segment.start_ms)}
+                          className="flex w-full gap-4 px-5 py-3 text-left transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                        >
+                          <span className="w-12 shrink-0 pt-0.5 font-mono text-xs text-ink-subtle">
+                            {formatTimestamp(segment.start_ms)}
+                          </span>
+                          <span>
+                            {label && (
+                              <span
+                                className={`mr-2 text-xs font-medium text-ink-muted ${
+                                  label === "Identifying…" ? "italic opacity-70" : ""
+                                }`}
+                              >
+                                {label}
+                              </span>
+                            )}
+                            <span className="text-sm text-ink dark:text-ink-inverted">{segment.text}</span>
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ol>
               )}
             </div>
