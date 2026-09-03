@@ -34,19 +34,27 @@ diarize_utterance makes them, whether the (real) full diarize() split pass
 ran, and the resulting cluster assignment — then a final summary of how many
 speakers were created and, for each, what triggered its creation.
 
-STATUS as of the investigation that built this (see git log for the commit
-that shipped the first fix): the broadened second-look trigger (default
-behavior now, --legacy-narrow-trigger reproduces the old one for A/B) is
-shipped to production. Two more issues were found via this harness and are
-still OPEN — not yet safely fixed:
+STATUS as of the investigation that built this (see git log): TWO fixes are
+now shipped to production —
+  (A) the broadened second-look trigger (default behavior now,
+      --legacy-narrow-trigger reproduces the old one for A/B), and
+  (D+E) defer-then-mutual-agreement-promote (--defer-thin-unresolved
+      --mutual-agreement-threshold 0.55 together — this harness's own
+      default stays OFF for both, since they're independent experiments
+      the harness lets you toggle; production always runs with the
+      equivalent of both on). Ported into
+      app/workers/tasks.py (_resolve_pending, PendingEmbedding,
+      try_promote_mutual_pair in cluster.py) and re-verified against the
+      REAL production code path — real Postgres/Redis/Qdrant, the actual
+      diarize_utterance task function called directly, not just this
+      harness's simulation (see scripts/verify_production_diarize.py) —
+      on all 4 real audio samples, matching this harness's own predictions
+      exactly: audio-1.wav/audio-2.wav (2 real speakers each) both
+      produced exactly 2 real Speaker rows; audio-3.wav/audio-4.wav
+      (1 real speaker each) both produced exactly 1.
 
-  (B) A thin utterance immediately following a real pause still can't be
-      rescued — trailing_contiguous_ms stops at that very pause, so there's
-      nothing extra to recover. Tried --last-speaker-threshold as a fix;
-      verified UNSAFE on real audio-1.wav ground truth (a threshold that
-      correctly rescues a real same-speaker case at 0.409 also falsely
-      merges two different real speakers at 0.403 — not separable by raw
-      score alone at this signal level).
+One issue remains OPEN, confirmed still present in production by that same
+real verification (not just theorized):
 
   (C) The EXISTING corroboration mechanism can blend two different real
       speakers when their real pause is under SILENCE_TO_FLUSH_MS (500ms) —
@@ -62,7 +70,10 @@ still OPEN — not yet safely fixed:
       pauses before them. A real fix needs something smarter than one
       constant — e.g. a threshold that itself scales with how much
       contiguous audio was actually recovered, or a fundamentally different
-      corroboration source — not yet found.
+      corroboration source — not yet found. D+E gets speaker COUNTS right
+      even with this bug still live (confirmed on real audio-1.wav: exactly
+      2 Speaker rows), but a couple of individual utterances still land in
+      the wrong one because of it.
 """
 
 import argparse
@@ -310,6 +321,8 @@ def run(
     legacy_narrow_trigger: bool = False,
     last_speaker_threshold: float | None = None,
     corroboration_silence_gap_ms: int = SILENCE_TO_FLUSH_MS,
+    defer_thin_unresolved: bool = False,
+    mutual_agreement_threshold: float | None = None,
 ) -> None:
     """`legacy_narrow_trigger`: reproduce the pre-fix, content-thinness-only
     second-look gate this project shipped and then replaced — for A/B
@@ -327,10 +340,67 @@ def run(
     at 0.403 — same-speaker-weak and different-speaker-weak aren't
     separable by raw score alone at this signal level. NOT shipped to
     production. None disables this (matches production).
+
+    `defer_thin_unresolved`: fix hypothesis D for the same still-open gap —
+    a thin-but-clean utterance that corroboration couldn't rescue currently
+    falls through unchanged and mints a brand-new cluster on the strength
+    of one weak, low-signal embedding (the actual mechanism behind
+    over-segmentation that survives the shipped fix). Instead of guessing
+    (rejected — hypothesis B) or accepting the new-cluster cost, defer the
+    decision entirely: leave the segment unresolved (no cluster_and_assign
+    call at all this round) and, after every subsequent utterance, retry
+    matching every still-pending deferred embedding against the
+    now-possibly-more-informed cluster centroids at
+    diarization_backfill_similarity_threshold (0.45, already the
+    production backfill bar).
+
+    **Verified STRUCTURALLY BROKEN for genuine multi-speaker audio, not
+    shipped.** Looked great on solo-speaker files (audio-3/4.wav both
+    correctly converged to exactly 1 cluster) — but on real 2-speaker
+    ground truth (audio-1/2.wav) it collapsed BOTH down to 1 cluster too,
+    silently erasing the second real speaker. Root cause is structural, not
+    a threshold to retune: once any cluster exists, needs_second_look fires
+    for any utterance that doesn't confidently match it, and with this
+    hypothesis on, such an utterance ALWAYS defers instead of creating a
+    new cluster — but the retry loop only ever matches deferred embeddings
+    against EXISTING clusters, it never promotes one into a brand-new one.
+    So no second cluster can ever form once the first exists: every
+    subsequent different speaker's utterance either gets swept into the
+    dominant cluster via the lenient 0.45 backfill bar (confirmed a real
+    false merge on audio-2.wav: "¿O sea que estarás ocupado el resto del
+    día?", almost certainly the OTHER speaker's line, backfilled into
+    speaker 1's cluster at sim=0.514) or sits unresolved forever, present
+    in the transcript but with no distinct identity at all. Worse than the
+    over-segmentation bug it was meant to fix — that fragmented one person
+    into several; this erases a second real person entirely. A real fix
+    would need deferred embeddings to also be allowed to seed a genuinely
+    new cluster once enough of them mutually agree with each other (not
+    just checked against clusters that already exist) — not attempted here.
+    That fix is exactly `mutual_agreement_threshold`, next.
+
+    `mutual_agreement_threshold`: fix hypothesis E, requires
+    `defer_thin_unresolved=True` — the fix for hypothesis D's structural
+    flaw above. A new cluster can still form from two pending deferred
+    embeddings, but only once they mutually agree with each other (real
+    corroborating evidence from two independent utterances) at this cosine
+    similarity, rather than trusting one weak score alone.
+
+    **D+E together, SHIPPED to production** (app/workers/tasks.py's
+    `_resolve_pending`, cluster.py's `try_promote_mutual_pair`, both using
+    0.55 = SIMILARITY_THRESHOLD as the mutual-agreement bar) — re-verified
+    against the real production code path after porting, not just this
+    harness: audio-1.wav/audio-2.wav (2 real speakers each) both produced
+    exactly 2 real Speaker rows, audio-3.wav/audio-4.wav (1 real speaker
+    each) both produced exactly 1, with no regression on the solo-speaker
+    files (mutual agreement never had a chance to misfire — never more than
+    1 pending item at a time there). See
+    scripts/verify_production_diarize.py for how to reproduce that
+    real-code verification directly.
     """
     clusters: list[Cluster] = []
     creation_log: list[dict] = []
     last_active_idx: int | None = None
+    pending_deferred: list[dict] = []  # hypothesis D — see run()'s docstring
 
     print(f"\n=== {label}: {len(utterances)} utterances ===")
     for i, u in enumerate(utterances):
@@ -369,6 +439,7 @@ def run(
 
         fallback_embedding = None
         insufficient_signal = False
+        thin_deferred = False
         corroboration_note = ""
         if needs_second_look and best_sim < SIMILARITY_THRESHOLD:
             contiguous_ms = trailing_contiguous_ms(
@@ -396,6 +467,26 @@ def run(
                 corroboration_note = " corrob=unusable+clipped->insufficient_signal"
             else:
                 corroboration_note = " corrob=unusable(thin,no rescue)"
+
+            # Dry-run the same primary+corroboration match cluster_and_assign
+            # would do — if defer_thin_unresolved is on and NEITHER embedding
+            # would confidently match (i.e. this is about to mint a new
+            # cluster), defer instead. Covers both "corroboration was
+            # unusable at all" and "corroboration ran but still didn't
+            # confidently match" — the earlier version of this hypothesis
+            # only caught the first case, missing real over-segmentation
+            # cases (verified live on audio-2.wav) where corroboration DID
+            # produce an embedding but it still fell short of
+            # SIMILARITY_THRESHOLD.
+            if defer_thin_unresolved and not insufficient_signal:
+                _dry_idx, dry_sim = best_match(clusters, whole_embedding)
+                would_match = _dry_idx is not None and dry_sim >= SIMILARITY_THRESHOLD
+                if not would_match and fallback_embedding is not None:
+                    _dry_idx2, dry_sim2 = best_match(clusters, fallback_embedding)
+                    would_match = _dry_idx2 is not None and dry_sim2 >= SIMILARITY_THRESHOLD
+                if not would_match:
+                    thin_deferred = True
+                    corroboration_note += "->DEFERRED"
 
         window_duration_ms = len(window_pcm) / 2 / SAMPLE_RATE * 1000
         did_split = False
@@ -437,6 +528,18 @@ def run(
         if insufficient_signal:
             outcome = "UNRESOLVED (insufficient_signal — left for backfill)"
             cluster_idx, is_new = None, False
+        elif thin_deferred:
+            outcome = "DEFERRED (thin, unresolved — retried against every future cluster update)"
+            cluster_idx, is_new = None, False
+            pending_deferred.append(
+                {
+                    "utterance_idx": i,
+                    "start_ms": u.start_ms,
+                    "end_ms": u.end_ms,
+                    "embedding": whole_embedding,
+                    "best_sim_before": round(best_sim, 3),
+                }
+            )
         else:
             cluster_idx, is_new, reason = cluster_and_assign(
                 clusters, whole_embedding, fallback_embedding, last_active_idx, last_speaker_threshold
@@ -462,6 +565,60 @@ def run(
             f"skip_conf={'Y' if confident_single_speaker else 'n'} "
             f"2nd_look={'Y' if needs_second_look else 'n'}{corroboration_note}  => {outcome}"
         )
+
+        # Retry every still-pending deferred embedding against the cluster
+        # state as it stands right now — after every utterance, not only
+        # after a brand-new cluster is created, since an ordinary match can
+        # also meaningfully move a centroid closer to a pending embedding.
+        if defer_thin_unresolved and pending_deferred:
+            still_pending = []
+            for entry in pending_deferred:
+                p_idx, p_sim = best_match(clusters, entry["embedding"])
+                if p_idx is not None and p_sim >= settings.diarization_backfill_similarity_threshold:
+                    update_centroid(clusters[p_idx], entry["embedding"])
+                    print(
+                        f"       -> BACKFILLED utterance #{entry['utterance_idx']} "
+                        f"[{entry['start_ms']}-{entry['end_ms']}ms] into cluster #{p_idx} "
+                        f"(sim={p_sim:.3f}, was best_sim={entry['best_sim_before']} when deferred)"
+                    )
+                else:
+                    still_pending.append(entry)
+            pending_deferred = still_pending
+
+            # hypothesis E: a new cluster can still form from deferred
+            # embeddings, but only when two of them mutually agree with
+            # each other (real corroborating evidence from two independent
+            # utterances) rather than trusting any single weak score alone
+            # — see run()'s docstring for why hypothesis D alone can never
+            # create a second cluster once a first one exists.
+            if mutual_agreement_threshold is not None and len(pending_deferred) >= 2:
+                promoted: set[int] = set()
+                for a in range(len(pending_deferred)):
+                    if a in promoted:
+                        continue
+                    for b in range(a + 1, len(pending_deferred)):
+                        if b in promoted:
+                            continue
+                        ea, eb = pending_deferred[a]["embedding"], pending_deferred[b]["embedding"]
+                        pair_sim = float(np.dot(ea, eb) / (np.linalg.norm(ea) * np.linalg.norm(eb)))
+                        if pair_sim >= mutual_agreement_threshold:
+                            clusters.append(Cluster(centroid=ea.tolist(), count=1, speaker_id=f"speaker-{len(clusters) + 1}"))
+                            update_centroid(clusters[-1], eb)
+                            print(
+                                f"       -> PROMOTED utterances #{pending_deferred[a]['utterance_idx']} "
+                                f"and #{pending_deferred[b]['utterance_idx']} into new cluster "
+                                f"#{len(clusters) - 1} (mutual sim={pair_sim:.3f})"
+                            )
+                            promoted.add(a)
+                            promoted.add(b)
+                            break
+                if promoted:
+                    pending_deferred = [e for idx, e in enumerate(pending_deferred) if idx not in promoted]
+
+    if pending_deferred:
+        print(f"\n{len(pending_deferred)} utterance(s) never resolved (permanently deferred):")
+        for entry in pending_deferred:
+            print(f"  #{entry['utterance_idx']} [{entry['start_ms']}-{entry['end_ms']}ms]")
 
     print(f"\n=== {label}: SUMMARY ===")
     print(f"Total speakers created: {len(clusters)}")
@@ -496,6 +653,17 @@ def main() -> None:
         default=SILENCE_TO_FLUSH_MS,
         help="EXPERIMENTAL fix hypothesis C — silence_gap_ms passed to trailing_contiguous_ms; a tighter value than the default (SILENCE_TO_FLUSH_MS, tuned for transcription boundaries, not speaker identity) may stop corroboration from blending across a real but short cross-speaker pause",
     )
+    parser.add_argument(
+        "--defer-thin-unresolved",
+        action="store_true",
+        help="SHIPPED to production (paired with --mutual-agreement-threshold — alone this is structurally broken, can never form a 2nd cluster; see run()'s docstring) — leave a thin, unrescued utterance unresolved instead of minting a new cluster, retrying it against cluster state after every later utterance",
+    )
+    parser.add_argument(
+        "--mutual-agreement-threshold",
+        type=float,
+        default=None,
+        help="SHIPPED to production as 0.55 (paired with --defer-thin-unresolved — see cluster.py:try_promote_mutual_pair) — promote two deferred embeddings into a brand-new cluster once they mutually agree at this cosine similarity, instead of never being able to form a 2nd cluster at all",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -523,6 +691,8 @@ def main() -> None:
         legacy_narrow_trigger=args.legacy_narrow_trigger,
         last_speaker_threshold=args.last_speaker_threshold,
         corroboration_silence_gap_ms=args.corroboration_silence_gap_ms,
+        defer_thin_unresolved=args.defer_thin_unresolved,
+        mutual_agreement_threshold=args.mutual_agreement_threshold,
     )
 
 

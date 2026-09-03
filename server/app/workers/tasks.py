@@ -9,6 +9,7 @@ import wave
 from pathlib import Path
 from uuid import UUID
 
+import numpy as np
 from sqlalchemy import select
 
 from app.core import storage
@@ -33,9 +34,11 @@ from app.services.diarization import events as diar_events
 from app.services.diarization.cluster import (
     SIMILARITY_THRESHOLD,
     Cluster,
+    PendingEmbedding,
     best_match,
     locked_state,
     peek_clusters,
+    try_promote_mutual_pair,
     update_centroid,
 )
 from app.services.diarization.embedding import embed_utterance
@@ -341,10 +344,21 @@ def _cluster_and_assign(
         speaker = db.get(Speaker, UUID(cluster.speaker_id))
         return speaker, False, used_embedding
 
-    # A genuinely new cluster for this meeting — before falling back to a
-    # fresh anonymous "Speaker N"/"Them N", check whether this voice is
-    # already durably recognized.
-    identity = _recognize_voice_identity(db, used_embedding, meeting.owner.group_id, meeting.owner_id)
+    speaker, needs_naming = _create_speaker_cluster(db, meeting, clusters, used_embedding, channel)
+    return speaker, needs_naming, used_embedding
+
+
+def _create_speaker_cluster(
+    db, meeting: Meeting, clusters: list[Cluster], embedding, channel: Channel
+) -> tuple[Speaker, bool]:
+    """A genuinely new cluster for this meeting — before falling back to a
+    fresh anonymous "Speaker N"/"Them N", check whether this voice is
+    already durably recognized. Shared by _cluster_and_assign's own "no
+    match" tail and diarize_utterance's mutual-pending-agreement promotion
+    (see try_promote_mutual_pair) — both are "mint a brand-new speaker from
+    one embedding" decisions, just reached via different evidence.
+    """
+    identity = _recognize_voice_identity(db, embedding, meeting.owner.group_id, meeting.owner_id)
 
     speaker = Speaker(
         owner_id=meeting.owner_id,
@@ -355,8 +369,8 @@ def _cluster_and_assign(
     )
     db.add(speaker)
     db.flush()  # assign speaker.id before the cluster references it
-    clusters.append(Cluster(centroid=used_embedding.tolist(), count=1, speaker_id=str(speaker.id)))
-    return speaker, identity is None, used_embedding
+    clusters.append(Cluster(centroid=embedding.tolist(), count=1, speaker_id=str(speaker.id)))
+    return speaker, identity is None
 
 
 def _last_active_speaker(db, meeting_id: UUID, channel: Channel, before_start_ms: int) -> Speaker | None:
@@ -446,6 +460,71 @@ def _backfill_unresolved_segments(
         candidate.speaker = db.get(Speaker, UUID(cluster.speaker_id))
         backfilled.append(candidate)
     return backfilled
+
+
+def _resolve_pending(
+    db, meeting: Meeting, clusters: list[Cluster], pending: list[PendingEmbedding], channel: Channel, settings
+) -> tuple[list[tuple[TranscriptSegment, str]], list[tuple[UUID, list]]]:
+    """Every utterance's turn to try clearing the deferred queue (see
+    PendingEmbedding's own docstring) — not just the utterance that just
+    deferred, or only right after a brand-new cluster forms: an ordinary
+    match on this round can move a centroid close enough to resolve a much
+    older pending embedding, and two pending embeddings can mutually
+    corroborate each other even without a fresh cluster update at all.
+
+    Two passes, run to a fixed point (mutual promotion can make more
+    matches possible, which is worth one more matching pass before this
+    task ends): (1) match each pending embedding against current clusters
+    at the lenient backfill bar, same as _backfill_unresolved_segments; (2)
+    mint a brand-new cluster from any pair of pending embeddings that
+    mutually agree with each other (try_promote_mutual_pair) — the only way
+    a second cluster can ever form once a first one exists under this
+    scheme; see that function's own docstring for why it's required, not
+    just an enhancement.
+
+    Returns (resolved segments for the WS payload, newly-created speakers
+    needing corella.identify_speaker_name).
+    """
+    resolved: list[tuple[TranscriptSegment, str]] = []
+    newly_named: list[tuple[UUID, list]] = []
+
+    changed = True
+    while changed:
+        changed = False
+
+        still_pending: list[PendingEmbedding] = []
+        for entry in pending:
+            embedding = np.array(entry.embedding)
+            idx, similarity = best_match(clusters, embedding)
+            if idx is not None and similarity >= settings.diarization_backfill_similarity_threshold:
+                cluster = clusters[idx]
+                update_centroid(cluster, embedding)
+                seg = db.get(TranscriptSegment, UUID(entry.segment_id))
+                if seg is not None:
+                    seg.speaker = db.get(Speaker, UUID(cluster.speaker_id))
+                    resolved.append((seg, seg.speaker.display_label))
+                changed = True
+            else:
+                still_pending.append(entry)
+        pending[:] = still_pending
+
+        pair = try_promote_mutual_pair(pending)
+        if pair is not None:
+            a, b = pair
+            ea, eb = np.array(pending[a].embedding), np.array(pending[b].embedding)
+            speaker, needs_naming = _create_speaker_cluster(db, meeting, clusters, ea, channel)
+            update_centroid(clusters[-1], eb)
+            if needs_naming:
+                newly_named.append((speaker.id, eb.tolist()))
+            for entry_idx in (a, b):
+                seg = db.get(TranscriptSegment, UUID(pending[entry_idx].segment_id))
+                if seg is not None:
+                    seg.speaker = speaker
+                    resolved.append((seg, speaker.display_label))
+            pending[:] = [e for i, e in enumerate(pending) if i not in (a, b)]
+            changed = True
+
+    return resolved, newly_named
 
 
 def _segment_payload(segment: TranscriptSegment, speaker_label: str) -> dict:
@@ -742,7 +821,7 @@ def diarize_utterance(
         has_resolved_identity = False
 
         try:
-            with locked_state(meeting.id, channel) as clusters:
+            with locked_state(meeting.id, channel) as (clusters, pending):
                 resulting: list[tuple[TranscriptSegment, str]] = []
 
                 if not did_split and insufficient_signal:
@@ -764,30 +843,57 @@ def diarize_utterance(
                         resulting.append((segment, speaker.display_label))
                         has_resolved_identity = has_resolved_identity or speaker.voice_identity_id is not None
                 elif not did_split:
-                    cluster_count_before = len(clusters)
-                    speaker, needs_naming, used_embedding = _cluster_and_assign(
-                        db, meeting, clusters, whole_embedding, channel, fallback_embedding
-                    )
-                    # Assign the relationship object, not just the FK column
-                    # — segment.speaker was already loaded (as None) when it
-                    # was fetched above, and setting speaker_id alone doesn't
-                    # refresh that already-cached relationship. Matters here
-                    # because the backfill query below can re-select this
-                    # exact row later in the same session/identity map.
-                    segment.speaker = speaker
-                    resulting.append((segment, speaker.display_label))
-                    if needs_naming:
-                        pending_name_inference.append((speaker.id, used_embedding.tolist()))
-                    has_resolved_identity = has_resolved_identity or speaker.voice_identity_id is not None
+                    # Dry-run the exact same primary+corroboration match
+                    # _cluster_and_assign would do, to decide BEFORE
+                    # committing whether it's about to mint a new cluster
+                    # from one weak embedding — the actual mechanism behind
+                    # over-segmentation that survived the broadened
+                    # second-look trigger above (a genuinely thin or
+                    # cross-a-real-pause utterance whose corroboration
+                    # attempt still doesn't clear SIMILARITY_THRESHOLD).
+                    # `clusters` non-empty is required — a channel's very
+                    # first-ever cluster is still created outright, nothing
+                    # to defer against yet.
+                    dry_idx, dry_sim = best_match(clusters, whole_embedding)
+                    would_match = dry_idx is not None and dry_sim >= SIMILARITY_THRESHOLD
+                    if not would_match and fallback_embedding is not None:
+                        fb_dry_idx, fb_dry_sim = best_match(clusters, fallback_embedding)
+                        would_match = fb_dry_idx is not None and fb_dry_sim >= SIMILARITY_THRESHOLD
 
-                    if len(clusters) > cluster_count_before:
-                        # A brand-new cluster — see if any earlier segment
-                        # on this same channel that couldn't be reliably
-                        # placed at the time (insufficient_signal above, on
-                        # some earlier utterance) can now be backfilled
-                        # against it, or against any other cluster it might
-                        # genuinely match — using a more lenient bar than
-                        # creating a new speaker requires (see
+                    if not would_match and clusters:
+                        # Defer rather than mint a new cluster outright —
+                        # verified live that doing so DIRECTLY (no
+                        # corroborating second opinion) causes real
+                        # over-segmentation; see PendingEmbedding's own
+                        # docstring for what happens to it from here.
+                        pending.append(
+                            PendingEmbedding(segment_id=str(segment.id), embedding=whole_embedding.tolist())
+                        )
+                    else:
+                        speaker, needs_naming, used_embedding = _cluster_and_assign(
+                            db, meeting, clusters, whole_embedding, channel, fallback_embedding
+                        )
+                        # Assign the relationship object, not just the FK
+                        # column — segment.speaker was already loaded (as
+                        # None) when it was fetched above, and setting
+                        # speaker_id alone doesn't refresh that
+                        # already-cached relationship. Matters here because
+                        # the backfill query below can re-select this exact
+                        # row later in the same session/identity map.
+                        segment.speaker = speaker
+                        resulting.append((segment, speaker.display_label))
+                        if needs_naming:
+                            pending_name_inference.append((speaker.id, used_embedding.tolist()))
+                        has_resolved_identity = has_resolved_identity or speaker.voice_identity_id is not None
+
+                        # A brand-new (non-deferred) cluster — see if any
+                        # earlier segment on this same channel that
+                        # couldn't be reliably placed at the time
+                        # (insufficient_signal above, on some earlier
+                        # utterance) can now be backfilled against it, or
+                        # against any other cluster it might genuinely
+                        # match — using a more lenient bar than creating a
+                        # new speaker requires (see
                         # diarization_backfill_similarity_threshold).
                         backfilled = _backfill_unresolved_segments(
                             db, meeting, clusters, channel, segment, window_pcm, window_start_ms_abs, settings
@@ -796,6 +902,23 @@ def diarize_utterance(
                         has_resolved_identity = has_resolved_identity or any(
                             s.speaker.voice_identity_id is not None for s in backfilled
                         )
+
+                    # Every utterance gets a chance to clear the deferred
+                    # queue, not just the one that just deferred — an
+                    # ordinary match above can move a centroid close enough
+                    # to resolve a much older pending embedding, and two
+                    # pending embeddings can mutually corroborate each
+                    # other into a brand-new cluster (see
+                    # try_promote_mutual_pair — the only way a 2nd cluster
+                    # can ever form once a 1st exists under this scheme).
+                    pending_resolved, pending_named = _resolve_pending(
+                        db, meeting, clusters, pending, channel, settings
+                    )
+                    resulting.extend(pending_resolved)
+                    pending_name_inference.extend(pending_named)
+                    has_resolved_identity = has_resolved_identity or any(
+                        s.speaker.voice_identity_id is not None for s, _ in pending_resolved
+                    )
                 else:
                     base_start_ms = segment.start_ms
                     for rel_start, rel_end, text, embedding in split_turns:
