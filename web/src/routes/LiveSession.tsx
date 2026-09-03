@@ -7,7 +7,9 @@ import {
   type CopilotEvent,
   type DebugEvent,
   type DiarizationUpdateEvent,
+  type LiveChannel,
   LiveSessionClient,
+  type PartialTranscriptEvent,
   type TranscriptEvent,
   startCapture,
 } from "@/lib/live";
@@ -51,6 +53,11 @@ export default function LiveSession() {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptEvent[]>([]);
+  // The rolling live-preview draft per channel — a disposable, more-frequent
+  // re-decode of the not-yet-committed utterance, replaced in place on each
+  // update and cleared the moment the real transcript event for that channel
+  // lands (see app/ws/live_session.py's maybe_schedule_preview).
+  const [partials, setPartials] = useState<Partial<Record<LiveChannel, string>>>({});
   const [micActive, setMicActive] = useState(false);
   const [themActive, setThemActive] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -80,7 +87,7 @@ export default function LiveSession() {
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ block: "end" });
-  }, [transcript]);
+  }, [transcript, partials]);
 
   useEffect(() => {
     debugEndRef.current?.scrollIntoView({ block: "end" });
@@ -125,7 +132,19 @@ export default function LiveSession() {
     async function connect() {
       const client = new LiveSessionClient(meetingId!);
       clientRef.current = client;
-      client.onTranscript = (event) => setTranscript((prev) => [...prev, event]);
+      client.onTranscript = (event) => {
+        setTranscript((prev) => [...prev, event]);
+        if (event.channel === "me" || event.channel === "them") {
+          setPartials((prev) => {
+            if (!(event.channel in prev)) return prev;
+            const next = { ...prev };
+            delete next[event.channel as LiveChannel];
+            return next;
+          });
+        }
+      };
+      client.onPartialTranscript = (event: PartialTranscriptEvent) =>
+        setPartials((prev) => ({ ...prev, [event.channel]: event.text }));
       client.onCopilot = (event) => setCopilot(event);
       client.onCopilotUnavailable = () => setCopilotAvailable(false);
       client.onDiarizationUpdate = (event) => applyDiarizationUpdate(event);
@@ -279,6 +298,25 @@ export default function LiveSession() {
                     }`}
                   >
                     {segment.text}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          {(["me", "them"] as const).map((channel) => {
+            const text = partials[channel];
+            if (!text) return null;
+            return (
+              <div key={`partial-${channel}`} className={`flex ${channel === "me" ? "justify-end" : "justify-start"}`}>
+                <div className={`max-w-[75%] ${channel === "me" ? "text-right" : "text-left"}`}>
+                  <div
+                    className={`rounded-lg px-4 py-2 text-sm italic opacity-60 ${
+                      channel === "me"
+                        ? "bg-accent text-accent-foreground"
+                        : "border border-border text-ink dark:border-border-dark dark:text-ink-inverted"
+                    }`}
+                  >
+                    {text}
                   </div>
                 </div>
               </div>

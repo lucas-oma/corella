@@ -12,6 +12,7 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.core import storage
+from app.core.config import get_settings
 from app.core.db import SessionLocal, engine, get_sync_db
 from app.models.cost import UsageKind
 from app.models.kb_document import KBDocument, KBDocumentStatus
@@ -34,6 +35,7 @@ from app.services.diarization.cluster import (
     Cluster,
     best_match,
     locked_state,
+    peek_clusters,
     update_centroid,
 )
 from app.services.diarization.embedding import embed_utterance
@@ -372,45 +374,6 @@ def diarize_utterance(
     u_start_s = utterance_offset_ms / 1000
     u_end_s = u_start_s + utterance_duration_ms / 1000
 
-    # diarize()'s pipeline is only reliable well above ~10s of audio
-    # (verified empirically — an isolated ~4-6s clip either missed a real
-    # speaker change entirely or produced garbage overlapping turns, both
-    # reproduced live). live_session.py *asks* for settings.
-    # diarization_context_window_ms (default 12000) of context, but early in
-    # a session there may not be that much "Me" audio yet to satisfy it with
-    # — checking the window it actually got, not the size requested, avoids
-    # trusting a split decision the pipeline was never reliable enough to
-    # make; falls back to the simple whole-utterance path instead.
-    window_duration_ms = len(window_pcm) / 2 / 16000 * 1000
-    if window_duration_ms < 9000:
-        turns = []
-    else:
-        window_wav = None
-        try:
-            fd, window_wav = tempfile.mkstemp(suffix=".wav")
-            os.close(fd)
-            write_wav(window_wav, window_pcm)
-            turns = diarize(window_wav)
-        except DiarizationUnavailable:
-            turns = []
-        except Exception:
-            logger.exception("diarize_utterance: within-utterance segmentation failed for %s", segment_id)
-            turns = []
-        finally:
-            if window_wav:
-                try:
-                    os.unlink(window_wav)
-                except OSError:
-                    pass
-
-    clipped: list[tuple[float, float, str]] = []
-    for start, end, speaker in _merge_adjacent_same_speaker(turns):
-        clip_start, clip_end = max(start, u_start_s), min(end, u_end_s)
-        if clip_end > clip_start:
-            clipped.append((clip_start - u_start_s, clip_end - u_start_s, speaker))
-
-    distinct_local_speakers = {c[2] for c in clipped}
-
     with get_sync_db() as db:
         meeting = db.get(Meeting, UUID(meeting_id))
         segment = db.get(TranscriptSegment, UUID(segment_id))
@@ -421,13 +384,71 @@ def diarize_utterance(
         # below (the split path deletes `segment`).
         channel = segment.channel
 
-        # Embedding extraction happens here, before the per-meeting lock
-        # below is acquired — it's the slow part (a cold model load can take
-        # several seconds) and doesn't need cross-task exclusivity; only the
-        # actual cluster-decision-and-write does. Verified this ordering
-        # matters: a cold-start extraction held *inside* the lock outlasted
-        # its 10s timeout, so Redis auto-expired it mid-hold and releasing
-        # it at the end raised redis.exceptions.LockNotOwnedError.
+        # Cheap whole-utterance embedding, extracted first and unconditionally
+        # — before the per-meeting lock, and before deciding whether the
+        # expensive diarize() pass below is even necessary. On its own this
+        # is often already confident enough to place the utterance (the same
+        # person is still talking, the overwhelmingly common case in
+        # ordinary conversation), letting the full pipeline be skipped
+        # entirely — see diarization_skip_confidence in app/core/config.py.
+        # Reused below as-is when no split turns out to be needed, so this
+        # is never redundant work even on the slow path.
+        utterance_pcm = slice_pcm(window_pcm, utterance_offset_ms, utterance_duration_ms)
+        whole_embedding = embed_utterance(utterance_pcm)
+
+        # best_match returns (None, -1.0) when there are no clusters yet for
+        # this channel — correctly never confident, so a meeting's very
+        # first utterance on a channel always gets the careful full pass.
+        _best_idx, best_sim = best_match(peek_clusters(meeting.id, channel), whole_embedding)
+        confident_single_speaker = best_sim >= get_settings().diarization_skip_confidence
+
+        # diarize()'s pipeline is only reliable well above ~10s of audio
+        # (verified empirically — an isolated ~4-6s clip either missed a real
+        # speaker change entirely or produced garbage overlapping turns, both
+        # reproduced live). live_session.py *asks* for settings.
+        # diarization_context_window_ms (default 12000) of context, but early in
+        # a session there may not be that much "Me" audio yet to satisfy it with
+        # — checking the window it actually got, not the size requested, avoids
+        # trusting a split decision the pipeline was never reliable enough to
+        # make; falls back to the simple whole-utterance path instead.
+        window_duration_ms = len(window_pcm) / 2 / 16000 * 1000
+        if confident_single_speaker or window_duration_ms < 9000:
+            turns = []
+        else:
+            window_wav = None
+            try:
+                fd, window_wav = tempfile.mkstemp(suffix=".wav")
+                os.close(fd)
+                write_wav(window_wav, window_pcm)
+                turns = diarize(window_wav)
+            except DiarizationUnavailable:
+                turns = []
+            except Exception:
+                logger.exception("diarize_utterance: within-utterance segmentation failed for %s", segment_id)
+                turns = []
+            finally:
+                if window_wav:
+                    try:
+                        os.unlink(window_wav)
+                    except OSError:
+                        pass
+
+        clipped: list[tuple[float, float, str]] = []
+        for start, end, speaker in _merge_adjacent_same_speaker(turns):
+            clip_start, clip_end = max(start, u_start_s), min(end, u_end_s)
+            if clip_end > clip_start:
+                clipped.append((clip_start - u_start_s, clip_end - u_start_s, speaker))
+
+        distinct_local_speakers = {c[2] for c in clipped}
+
+        # Per-turn embedding extraction still happens here, before the
+        # per-meeting lock below is acquired — it's the slow part (a cold
+        # model load can take several seconds) and doesn't need cross-task
+        # exclusivity; only the actual cluster-decision-and-write does.
+        # Verified this ordering matters: a cold-start extraction held
+        # *inside* the lock outlasted its 10s timeout, so Redis auto-expired
+        # it mid-hold and releasing it at the end raised
+        # redis.exceptions.LockNotOwnedError.
         split_turns: list[tuple[float, float, str, object]] = []
         if len(distinct_local_speakers) > 1:
             for rel_start, rel_end, _local_label in clipped:
@@ -443,11 +464,9 @@ def diarize_utterance(
 
         # A "split" that loses every turn but one to empty text-attribution
         # isn't a split — fall back to the whole utterance rather than
-        # silently dropping it.
+        # silently dropping it. whole_embedding was already computed above
+        # unconditionally, so the non-split path below just reuses it.
         did_split = len(split_turns) >= 2
-        if not did_split:
-            pcm = slice_pcm(window_pcm, utterance_offset_ms, utterance_duration_ms)
-            whole_embedding = embed_utterance(pcm)
 
         # (speaker_id, embedding) pairs to dispatch corella.identify_speaker_name
         # for, once outside the lock/transaction — a brand-new cluster this

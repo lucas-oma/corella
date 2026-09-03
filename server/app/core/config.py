@@ -73,7 +73,7 @@ class Settings(BaseSettings):
 
     # Live recording (app/ws/live_session.py)
     live_vad_aggressiveness: int = 2  # webrtcvad mode 0-3; higher = more aggressive filtering
-    live_max_utterance_seconds: int = 20  # force a flush even without a detected pause
+    live_max_utterance_seconds: int = 12  # force a flush even without a detected pause
     live_min_utterance_ms: int = 300  # ignore speech blips shorter than this
 
     # Same-room live diarization (app/workers/tasks.py:diarize_utterance) — how
@@ -84,6 +84,16 @@ class Settings(BaseSettings):
     # 10s (an isolated ~4s clip missed a real speaker change entirely); 12s
     # gives comfortable margin above that floor.
     diarization_context_window_ms: int = 12000
+    # Above this cosine similarity to an existing cluster, an utterance's
+    # whole-embedding match is confident enough to skip the expensive full
+    # diarize() pass entirely (app/workers/tasks.py:diarize_utterance) —
+    # deliberately higher than cluster.SIMILARITY_THRESHOLD (0.55, "is this
+    # the same person at all"): this is "confident enough that a within-
+    # utterance speaker change is implausible," not just "same speaker
+    # overall." Sits inside the real measured same-speaker range (0.67-0.75
+    # on real recordings) with margin below it, so a genuinely ambiguous
+    # match still falls through to the real pipeline.
+    diarization_skip_confidence: float = 0.65
 
     # Live copilot (app/services/copilot/live.py, app/ws/live_session.py)
     copilot_trigger_segments: int = 4  # new transcript segments since the last cycle...

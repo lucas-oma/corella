@@ -40,6 +40,23 @@ class Cluster:
     speaker_id: str  # Speaker.id, as a str — every cluster gets one immediately on creation
 
 
+def _state_key(meeting_id: UUID, channel: Channel) -> str:
+    return f"diar:{meeting_id}:{channel.value}"
+
+
+def peek_clusters(meeting_id: UUID, channel: Channel) -> list[Cluster]:
+    """Lock-free read of the current cluster state — used only to make a
+    fast, best-effort confidence decision about whether the expensive
+    diarize() pass is even worth running for a new utterance
+    (app/workers/tasks.py:diarize_utterance's skip-check). A small race here
+    against a concurrent update only ever costs a possibly-one-utterance-
+    stale confidence read, never a wrong final assignment — the actual
+    cluster write always still goes through locked_state below.
+    """
+    raw = _redis().get(_state_key(meeting_id, channel))
+    return [Cluster(**c) for c in json.loads(raw)] if raw else []
+
+
 @contextmanager
 def locked_state(meeting_id: UUID, channel: Channel):
     """Per-meeting-per-channel lock around one read-decide-write cycle of
@@ -53,7 +70,7 @@ def locked_state(meeting_id: UUID, channel: Channel):
     when the block exits.
     """
     r = _redis()
-    key = f"diar:{meeting_id}:{channel.value}"
+    key = _state_key(meeting_id, channel)
     with r.lock(f"diar-lock:{meeting_id}:{channel.value}", timeout=10):
         raw = r.get(key)
         clusters = [Cluster(**c) for c in json.loads(raw)] if raw else []

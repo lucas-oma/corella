@@ -12,6 +12,14 @@ export interface TranscriptEvent {
   text: string;
 }
 
+/** A disposable, more-frequent preview of a not-yet-committed utterance —
+ * replaced in place by the real `transcript` event once the pause/endpoint
+ * actually lands. Never persisted, never has an id. */
+export interface PartialTranscriptEvent {
+  channel: LiveChannel;
+  text: string;
+}
+
 export interface CopilotEvent {
   suggestion: string | null;
   blockers: string[];
@@ -137,6 +145,7 @@ export class LiveSessionClient {
   private readyPromise: Promise<void>;
 
   onTranscript: ((event: TranscriptEvent) => void) | null = null;
+  onPartialTranscript: ((event: PartialTranscriptEvent) => void) | null = null;
   onCopilot: ((event: CopilotEvent) => void) | null = null;
   onCopilotUnavailable: (() => void) | null = null;
   onDiarizationUpdate: ((event: DiarizationUpdateEvent) => void) | null = null;
@@ -158,6 +167,8 @@ export class LiveSessionClient {
         let msg: {
           type?: string;
           segment?: TranscriptEvent;
+          channel?: LiveChannel;
+          text?: string;
           message?: string;
           suggestion?: string | null;
           blockers?: string[];
@@ -177,7 +188,9 @@ export class LiveSessionClient {
         }
         if (msg.type === "ready") resolve();
         else if (msg.type === "transcript" && msg.segment) this.onTranscript?.(msg.segment);
-        else if (msg.type === "copilot") {
+        else if (msg.type === "partial_transcript" && msg.channel && msg.text) {
+          this.onPartialTranscript?.({ channel: msg.channel, text: msg.text });
+        } else if (msg.type === "copilot") {
           this.onCopilot?.({
             suggestion: msg.suggestion ?? null,
             blockers: msg.blockers ?? [],

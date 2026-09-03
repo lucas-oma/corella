@@ -8,6 +8,7 @@ import time
 from datetime import UTC, datetime
 from uuid import UUID
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core import storage
@@ -17,6 +18,7 @@ from app.core.security import decode_access_token
 from app.models.meeting import Channel, Meeting, MeetingStatus, TranscriptSegment
 from app.models.user import User, UserRole
 from app.services.asr import deepgram
+from app.services.asr.deepgram_stream import DeepgramLiveStream, DeepgramStreamError, StreamResult
 from app.services.asr.resolve import ResolvedStt, resolve_stt_provider
 from app.services.asr.whisper import transcribe as whisper_transcribe
 from app.services.asr.whisper import warm_up
@@ -35,6 +37,16 @@ _CHANNEL_BY_BYTE = {0: Channel.ME, 1: Channel.THEM}
 _CHANNEL_KEY = {Channel.ME: "me", Channel.THEM: "them"}
 AUTH_TIMEOUT_SECONDS = 5.0
 SAMPLE_RATE = 16000
+
+# Rolling live-preview cadence (local whisper path only — see
+# LiveSession.maybe_schedule_preview). 1s reads as "words as you speak";
+# each preview re-decodes the whole accumulating utterance from its start
+# (never streamed word-by-word — a shorter re-decode restarting mid-sentence
+# would visibly backtrack), so the next one isn't scheduled until 2x the
+# last decode's own duration has passed — a fast machine previews every
+# second, a busy one backs off automatically instead of the preview decodes
+# themselves starving the real committed-segment transcription.
+_PREVIEW_BASE_SECONDS = 1.0
 
 # asyncio only holds a *weak* reference to a task once nothing else does —
 # an unreferenced background task can be garbage-collected mid-run. Keep a
@@ -102,6 +114,34 @@ class LiveSession:
         self.recordings: dict[str, list[tuple[int, bytes]]] = {"me": [], "them": []}
         self.queue: asyncio.Queue[_Utterance] = asyncio.Queue()
 
+        # Deepgram live streaming (stt.provider == "deepgram" only) — one
+        # persistent per-channel connection, opened right after auth
+        # (_open_deepgram_stream). None means "this channel is on local
+        # VAD/whisper right now", either because streaming was never
+        # attempted (whisper-only session) or because this channel's own
+        # stream failed/dropped and fell back — the other channel's entry
+        # is untouched either way (per-channel independence).
+        self.deepgram_streams: dict[Channel, DeepgramLiveStream | None] = {
+            Channel.ME: None,
+            Channel.THEM: None,
+        }
+        # Captured via elapsed_ms() at the moment each channel's stream
+        # connects — Deepgram's own start/duration fields are relative to
+        # when *that socket* opened, not this session's own clock; every
+        # timestamp derived from a Deepgram result gets this added back in
+        # before it's used anywhere downstream.
+        self.deepgram_offset_ms: dict[Channel, int] = {}
+
+        # Rolling live-preview state, per channel — local whisper path only
+        # (see maybe_schedule_preview). next_preview_at is a monotonic
+        # deadline, not yet reached for either channel at session start;
+        # preview_in_flight guards against overlapping decodes for the same
+        # channel (CTranslate2 models aren't guaranteed safe for concurrent
+        # calls from one instance, same constraint already documented for
+        # the committed-segment path).
+        self.next_preview_at: dict[Channel, float] = {}
+        self.preview_in_flight: dict[Channel, bool] = {Channel.ME: False, Channel.THEM: False}
+
         # Live copilot trigger state — see _maybe_trigger_copilot.
         self.segments_since_cycle = 0
         self.last_cycle_at = self._start
@@ -126,11 +166,20 @@ class LiveSession:
             logger.exception("Live session %s: failed to enqueue debug event %r", self.meeting_id, stage)
 
     def on_audio(self, channel: Channel, pcm: bytes) -> None:
-        """Feeds the VAD detector and enqueues any utterances it completes.
-        Timestamps are captured now (flush time), not when the queue
-        consumer eventually gets to them.
+        """Feeds the VAD detector and enqueues any utterances it completes
+        — unless this channel has a healthy Deepgram stream, in which case
+        the raw audio goes straight there instead (Deepgram does its own
+        endpointing; local VAD would be redundant and would never see
+        anything to flush). Timestamps are captured now (flush time), not
+        when the queue consumer eventually gets to them.
         """
         self.recordings[_CHANNEL_KEY[channel]].append((self.elapsed_ms(), pcm))
+
+        stream = self.deepgram_streams.get(channel)
+        if stream is not None:
+            stream.send(pcm)
+            return
+
         for utterance_pcm in self.detectors[channel].feed(pcm):
             end_ms = self.elapsed_ms()
             self.debug(
@@ -139,6 +188,35 @@ class LiveSession:
             self.queue.put_nowait(
                 _Utterance(channel, utterance_pcm, max(0, end_ms - _duration_ms(utterance_pcm)), end_ms)
             )
+
+    def maybe_schedule_preview(self, channel: Channel) -> bytes | None:
+        """A rolling live preview — re-decoding the utterance a channel's VAD
+        detector is still accumulating, well before the real pause-bounded
+        flush — is what actually makes local transcription feel live rather
+        than arriving in one lump per utterance. Local whisper path only — a
+        channel counts as "local" whenever it isn't currently routed to a
+        healthy Deepgram stream, which covers both a whisper-only session
+        and a Deepgram channel that's fallen back mid-session
+        (deepgram_streams[channel] is None either way). A channel still on
+        a healthy Deepgram stream gets true interim results pushed by
+        Deepgram itself, so no local re-decode is needed or wanted there.
+        Returns the buffer to preview-decode if one is genuinely due right
+        now (not before the self-paced deadline, not already mid-decode for
+        this channel, and there's enough buffered speech to bother with),
+        else None — the caller (_handle_audio_frame) does the actual
+        decode, since that's async and this method is sync.
+        """
+        if self.deepgram_streams.get(channel) is not None:
+            return None
+        if self.preview_in_flight[channel]:
+            return None
+        if time.monotonic() < self.next_preview_at.get(channel, 0):
+            return None
+        pending = self.detectors[channel].peek_current_utterance()
+        if pending is None:
+            return None
+        self.preview_in_flight[channel] = True
+        return pending
 
     def enqueue_leftovers(self) -> None:
         """Called at session end — flush any in-progress (no trailing
@@ -150,6 +228,67 @@ class LiveSession:
                 self.queue.put_nowait(
                     _Utterance(channel, leftover, max(0, end_ms - _duration_ms(leftover)), end_ms)
                 )
+
+
+async def _open_deepgram_stream(websocket: WebSocket, session: LiveSession, channel: Channel) -> None:
+    """Opens one channel's persistent Deepgram connection and wires its
+    callbacks in. A final result goes through the exact same _commit_segment
+    path a local VAD/whisper utterance uses — diarization dispatch and the
+    `transcript` WS event don't need to know which engine actually produced
+    a segment. A connect failure (or a later drop, via on_closed) just
+    leaves deepgram_streams[channel] at None, which is exactly what makes
+    LiveSession.on_audio/maybe_schedule_preview fall this one channel back
+    to local VAD/whisper for the rest of the session — the other channel is
+    never touched.
+    """
+    channel_key = _CHANNEL_KEY[channel]
+
+    async def on_result(result: StreamResult) -> None:
+        if not result.is_final:
+            try:
+                await websocket.send_json(
+                    {"type": "partial_transcript", "channel": channel_key, "text": result.text}
+                )
+            except Exception:
+                pass  # client may already be gone
+            return
+
+        offset_ms = session.deepgram_offset_ms.get(channel, 0)
+        start_ms = offset_ms + round(result.start_s * 1000)
+        end_ms = offset_ms + round((result.start_s + result.duration_s) * 1000)
+        try:
+            await _commit_segment(websocket, session, channel, start_ms, end_ms, result.text, result.words)
+        except Exception:
+            logger.exception(
+                "Live session %s: committing a Deepgram-streamed segment failed", session.meeting_id
+            )
+
+    async def on_closed() -> None:
+        logger.warning(
+            "Live session %s: Deepgram stream for the %s channel dropped — "
+            "falling back to local VAD/whisper for the rest of the session",
+            session.meeting_id,
+            channel_key,
+        )
+        session.deepgram_streams[channel] = None
+        session.debug("stt_fallback", provider="deepgram", channel=channel_key, reason="stream closed")
+
+    stream = DeepgramLiveStream(session.stt.api_key, session.stt.model, session.stt.language, on_result, on_closed)
+    try:
+        # Captured right before connecting, not after — the offset only
+        # needs to be close, and this keeps it simple; connect() itself is
+        # typically sub-second.
+        session.deepgram_offset_ms[channel] = session.elapsed_ms()
+        await stream.connect()
+        session.deepgram_streams[channel] = stream
+    except DeepgramStreamError:
+        logger.exception(
+            "Live session %s: failed to open a Deepgram stream for the %s channel — "
+            "using local VAD/whisper for the whole session on this channel",
+            session.meeting_id,
+            channel_key,
+        )
+        session.debug("stt_fallback", provider="deepgram", channel=channel_key, reason="connect failed")
 
 
 @router.websocket("/ws/meetings/{meeting_id}/live")
@@ -183,6 +322,19 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
     await asyncio.get_running_loop().run_in_executor(None, warm_up)
 
     session = LiveSession(meeting_id, user.id, provider, stt, is_admin=user.role == UserRole.ADMIN)
+
+    if stt.provider == "deepgram":
+        # One persistent connection per channel, opened right alongside the
+        # local whisper warm-up above (which stays unconditional — it's the
+        # fallback target for either channel, not just the local-only
+        # path). A failure to even connect just means that channel starts
+        # the session on local VAD/whisper already — see
+        # _open_deepgram_stream, never a reason to fail the whole session.
+        await asyncio.gather(
+            _open_deepgram_stream(websocket, session, Channel.ME),
+            _open_deepgram_stream(websocket, session, Channel.THEM),
+        )
+
     consumer_task = asyncio.create_task(_consume_utterances(websocket, session))
     diarization_poll_task = asyncio.create_task(_poll_diarization_updates(websocket, session))
     debug_pump_task = asyncio.create_task(_pump_debug_events(websocket, session))
@@ -201,7 +353,7 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
             if message["type"] == "websocket.disconnect":
                 break
             if message.get("bytes") is not None:
-                _handle_audio_frame(session, message["bytes"])
+                _handle_audio_frame(session, websocket, message["bytes"])
             elif message.get("text") is not None:
                 if _is_stop(message["text"]):
                     stopped_gracefully = True
@@ -225,6 +377,7 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         # already uses; the real finalize keeps running detached from this
         # connection.
         session.enqueue_leftovers()
+        await _close_deepgram_streams(session)
         await _mark_processing(meeting_id)
 
         # Unlike consumer_task, nothing left to push events to once the
@@ -244,6 +397,29 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
             pass
 
         _spawn_background(_drain_and_finalize(session, consumer_task))
+
+
+async def _close_deepgram_streams(session: LiveSession) -> None:
+    """Closes whichever channels still have a healthy Deepgram stream open
+    — awaited, not fire-and-forget, so a still-in-flight final utterance
+    (the caller stopped mid-sentence) gets committed via _commit_segment
+    *before* _mark_processing/_drain_and_finalize run, same as how a local
+    VAD channel's own leftover gets flushed via enqueue_leftovers() first.
+    A channel already on local VAD/whisper (deepgram_streams[channel] is
+    None, whether it never streamed or already fell back) has nothing to
+    close here.
+    """
+    streams = [s for s in session.deepgram_streams.values() if s is not None]
+    if not streams:
+        return
+    results = await asyncio.gather(*(s.close() for s in streams), return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception):
+            logger.exception(
+                "Live session %s: failed to close a Deepgram stream cleanly",
+                session.meeting_id,
+                exc_info=result,
+            )
 
 
 async def _authenticate(websocket: WebSocket) -> User | None:
@@ -302,13 +478,16 @@ def _handle_control_frame(session: LiveSession, raw: str) -> None:
     session.debug_enabled = bool(payload.get("enabled"))
 
 
-def _handle_audio_frame(session: LiveSession, data: bytes) -> None:
+def _handle_audio_frame(session: LiveSession, websocket: WebSocket, data: bytes) -> None:
     if len(data) < 2:
         return
     channel = _CHANNEL_BY_BYTE.get(data[0])
     if channel is None:
         return
     session.on_audio(channel, data[1:])
+    pending_preview = session.maybe_schedule_preview(channel)
+    if pending_preview is not None:
+        _spawn_background(_run_preview_decode(websocket, session, channel, pending_preview))
 
 
 async def _consume_utterances(websocket: WebSocket, session: LiveSession) -> None:
@@ -329,6 +508,9 @@ async def _consume_utterances(websocket: WebSocket, session: LiveSession) -> Non
             session.queue.task_done()
 
 
+_DIARIZATION_FALLBACK_INTERVAL_SECONDS = 5.0
+
+
 async def _poll_diarization_updates(websocket: WebSocket, session: LiveSession) -> None:
     """Bridges the worker's per-utterance diarize_utterance task (a separate
     Celery process) back to this live connection. Runs for the life of the
@@ -342,22 +524,44 @@ async def _poll_diarization_updates(websocket: WebSocket, session: LiveSession) 
     backfill once that gate first opens — rather than this loop trying to
     infer what changed by diffing DB state itself; drains and forwards
     whatever's pending, unmodified, each cycle.
-    """
-    while True:
-        await asyncio.sleep(1)
-        try:
-            events = await asyncio.get_running_loop().run_in_executor(
-                None, diar_events.drain_events, session.meeting_id
-            )
-        except Exception:
-            logger.exception("Live session %s: diarization-event drain failed", session.meeting_id)
-            continue
 
-        for event in events:
+    Woken by Redis pub/sub the moment the worker pushes something (near-
+    instant), not a fixed poll interval — a flat 1s sleep here used to add up
+    to a full second of pure dead latency on top of whatever the worker's own
+    diarize_utterance call took. Pub/sub delivery isn't guaranteed (a message
+    published with no subscriber connected is simply dropped), so this still
+    falls back to draining on a much longer timer regardless of whether a
+    ping arrived — the correctness guarantee lives in drain_events reading
+    real state, not in never missing a ping.
+    """
+    client = aioredis.Redis.from_url(get_settings().redis_url, decode_responses=True)
+    pubsub = client.pubsub()
+    try:
+        await pubsub.subscribe(diar_events.notify_channel(session.meeting_id))
+        while True:
             try:
-                await websocket.send_json(event)
+                await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=_DIARIZATION_FALLBACK_INTERVAL_SECONDS
+                )
             except Exception:
-                pass  # client may already be gone
+                logger.exception("Live session %s: diarization pub/sub wait failed", session.meeting_id)
+
+            try:
+                events = await asyncio.get_running_loop().run_in_executor(
+                    None, diar_events.drain_events, session.meeting_id
+                )
+            except Exception:
+                logger.exception("Live session %s: diarization-event drain failed", session.meeting_id)
+                continue
+
+            for event in events:
+                try:
+                    await websocket.send_json(event)
+                except Exception:
+                    pass  # client may already be gone
+    finally:
+        await pubsub.aclose()
+        await client.aclose()
 
 
 async def _pump_debug_events(websocket: WebSocket, session: LiveSession) -> None:
@@ -423,6 +627,38 @@ async def _run_copilot_and_send(websocket: WebSocket, session: LiveSession) -> N
         pass  # client may already be gone
 
 
+async def _run_preview_decode(
+    websocket: WebSocket, session: LiveSession, channel: Channel, pcm: bytes
+) -> None:
+    """The actual rolling-preview decode `maybe_schedule_preview` decided is
+    due — a full re-decode of the channel's still-accumulating utterance,
+    pushed as a draft the frontend replaces in place on each update and
+    clears the moment the real committed segment for that channel arrives.
+    Never touches the committed-segment path (session.queue) at all — this
+    is purely an additional, disposable, more-frequent read of the same
+    buffer the real VAD-triggered flush also reads.
+    """
+    started = time.monotonic()
+    text = ""
+    try:
+        text, _words = await _transcribe_pcm_whisper(pcm, word_timestamps=False, debug=session.debug)
+    except Exception:
+        logger.exception("Live session %s: preview decode failed for %s", session.meeting_id, channel.value)
+    finally:
+        # Self-paces regardless of outcome (including a failed decode) —
+        # never schedule faster than 2x what a decode actually just cost.
+        elapsed = time.monotonic() - started
+        session.next_preview_at[channel] = time.monotonic() + max(_PREVIEW_BASE_SECONDS, elapsed * 2)
+        session.preview_in_flight[channel] = False
+
+    if not text:
+        return
+    try:
+        await websocket.send_json({"type": "partial_transcript", "channel": channel.value, "text": text})
+    except Exception:
+        pass  # client may already be gone
+
+
 async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utterance: _Utterance) -> bool:
     # Both Me (one mic, possibly several people around it) and Them (one
     # shared tab/system-audio track, possibly several remote participants)
@@ -439,13 +675,36 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
         )
         return False
 
+    return await _commit_segment(
+        websocket, session, utterance.channel, utterance.start_ms, utterance.end_ms, text, words
+    )
+
+
+async def _commit_segment(
+    websocket: WebSocket,
+    session: LiveSession,
+    channel: Channel,
+    start_ms: int,
+    end_ms: int,
+    text: str,
+    words: list,
+) -> bool:
+    """Persists one committed transcript segment, dispatches same-room
+    diarization off it if applicable, and pushes the `transcript` WS event
+    — shared by both STT paths: the local VAD/whisper queue consumer
+    (_transcribe_and_send above) and a Deepgram stream's own final results
+    (_open_deepgram_stream's on_result). Neither diarization dispatch nor
+    the frontend needs to know which engine actually produced the text.
+    """
+    needs_diarization = channel in (Channel.ME, Channel.THEM)
+
     async with SessionLocal() as db:
         row = TranscriptSegment(
             meeting_id=session.meeting_id,
             speaker_id=None,
-            channel=utterance.channel,
-            start_ms=utterance.start_ms,
-            end_ms=utterance.end_ms,
+            channel=channel,
+            start_ms=start_ms,
+            end_ms=end_ms,
             text=text,
             is_partial=False,
         )
@@ -462,19 +721,18 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
         # — diarize()'s pipeline needs several seconds of context to
         # reliably place a speaker-change point (verified empirically:
         # unreliable well under ~10s). session.recordings already
-        # accumulates both channels regardless (needed for the final
-        # mixdown either way), so this is just reading the matching one.
+        # accumulates both channels regardless of which STT engine is
+        # active (needed for the final mixdown either way), so this is just
+        # reading the matching one.
         settings = get_settings()
-        window_start_ms = max(0, utterance.end_ms - settings.diarization_context_window_ms)
-        channel_key = _CHANNEL_KEY[utterance.channel]
-        window_pcm = extract_channel_window(
-            session.recordings[channel_key], window_start_ms, utterance.end_ms
-        )
+        window_start_ms = max(0, end_ms - settings.diarization_context_window_ms)
+        channel_key = _CHANNEL_KEY[channel]
+        window_pcm = extract_channel_window(session.recordings[channel_key], window_start_ms, end_ms)
         session.debug(
             "diarization_dispatched",
             segment_id=str(row.id),
-            channel=utterance.channel.value,
-            window_ms=utterance.end_ms - window_start_ms,
+            channel=channel.value,
+            window_ms=end_ms - window_start_ms,
         )
         celery_app.send_task(
             "corella.diarize_utterance",
@@ -482,8 +740,8 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
                 str(session.meeting_id),
                 str(row.id),
                 base64.b64encode(window_pcm).decode(),
-                utterance.start_ms - window_start_ms,
-                utterance.end_ms - utterance.start_ms,
+                start_ms - window_start_ms,
+                end_ms - start_ms,
                 json.dumps([{"word": w.word, "start": w.start, "end": w.end} for w in words]),
             ],
         )
@@ -494,9 +752,9 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
                 "type": "transcript",
                 "segment": {
                     "id": str(row.id),
-                    "channel": utterance.channel.value,
-                    "start_ms": utterance.start_ms,
-                    "end_ms": utterance.end_ms,
+                    "channel": channel.value,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
                     "text": text,
                 },
             }

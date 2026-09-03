@@ -59,6 +59,17 @@ class UtteranceDetector:
 
         return flushed
 
+    def peek_current_utterance(self) -> bytes | None:
+        """A copy of the in-progress (not yet flushed) utterance buffer, for
+        a live rolling-preview decode (app/ws/live_session.py) — a read
+        only, never consumes or resets any state, unlike feed()/
+        flush_remaining(). None if there isn't yet enough speech to be worth
+        decoding, same live_min_utterance_ms floor the real flush uses.
+        """
+        if self._speech_ms < self._min_utterance_ms:
+            return None
+        return bytes(self._utterance)
+
     def flush_remaining(self) -> bytes | None:
         """Called at session end — return any in-progress utterance even
         without trailing silence, as long as it's long enough to bother

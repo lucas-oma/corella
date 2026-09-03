@@ -52,6 +52,11 @@ dependencies = [
     # to the worker's sentence-transformers path for the same model, so the
     # api process can embed retrieval queries in-process.
     "fastembed==0.8.0",
+    # Deepgram live streaming (app/services/asr/deepgram_stream.py): was only
+    # ever present transitively via uvicorn[standard], same latent-dependency
+    # class as greenlet above — now genuinely imported and used directly, so
+    # it needs to be declared here too.
+    "websockets==17.1",
 ]
 
 [project.optional-dependencies]
