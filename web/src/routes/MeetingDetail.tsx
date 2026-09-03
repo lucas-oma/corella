@@ -6,15 +6,30 @@ import { ApiError, api, type ActionItem, type Meeting, type TranscriptSegment } 
 import { useAuth } from "@/lib/auth";
 
 const POLL_INTERVAL_MS = 3000;
-// Same-room diarization (server/app/workers/tasks.py:diarize_utterance) is a
-// background Celery task, independent of the live WS session — it keeps
-// running and correctly labels a segment even after the call has ended and
-// this page has already loaded, but nothing pushes that update to an
-// already-loaded page on its own. These bound how long the transcript-
-// loading effect below re-polls specifically for segments still missing a
-// real speaker_label; most resolve within a few seconds, well inside this
-// window.
-const DIARIZATION_GRACE_MS = 45000;
+// Same-room diarization (server/app/workers/tasks.py:reconcile_diarization)
+// runs periodically as a background Celery task, independent of the live WS
+// session — it keeps running and correctly labels a segment even after the
+// call has ended and this page has already loaded, but nothing pushes that
+// update to an already-loaded page on its own. These bound how long the
+// transcript-loading effect below re-polls specifically for segments still
+// missing a real speaker_label.
+//
+// A real, non-obvious segment can also never resolve at all — a voice that
+// never accumulates enough assigned speech to clear the guest floor
+// (diarization_guest_min_ms/diarization_guest_min_share in
+// app/core/config.py) across the *whole* call stays permanently unlabeled;
+// confirmed live in this app's own real Postgres data: meetings that ended
+// 20+ minutes ago still carry unresolved live segments, and nothing is ever
+// going to revisit them again. So this poll is gated on the meeting having
+// ended *recently* (see isDiarizationRecent below) — an old meeting reopened
+// later shows its final state immediately, no fake "Identifying…" spinner
+// replaying on every visit; only a meeting that just finished gets the
+// benefit of the doubt and a real chance to catch up. The window itself is
+// generous (well above the reconciliation loop's own ~25s interval) because
+// a real reconciliation pass is a full diarize() call — genuinely tens of
+// seconds under load, not the near-instant per-utterance resolution this
+// constant was originally sized for before that architecture changed.
+const DIARIZATION_GRACE_MS = 90000;
 const DIARIZATION_POLL_INTERVAL_MS = 4000;
 // The auto-generated post-call report (server/app/workers/tasks.py:
 // _generate_report_async, dispatched fire-and-forget once a meeting reaches
@@ -43,15 +58,23 @@ function formatCost(usd: number): string {
  * own meeting), anyone else with legitimate access (an admin, per Phase J —
  * a group member never reaches this view at all) sees the real name.
  *
- * A live-recorded segment with no speaker_label *yet* is not the same as
- * one that's genuinely just the channel owner talking alone — same-room
- * diarization (server/app/workers/tasks.py:diarize_utterance) runs as a
- * background task and can still be catching up right after the call ends,
- * and this segment might turn out to belong to a different speaker
- * entirely (a real, previously-reported bug: confidently guessing "Me"
- * here before diarization has had a chance to run). Only fall back to the
- * plain channel guess once the bounded catch-up window has actually given
- * up — see DIARIZATION_GRACE_MS and the transcript-loading effect below. */
+ * A live-recorded segment with no speaker_label is not the same as one
+ * that's genuinely just the channel owner talking alone — same-room
+ * diarization (server/app/workers/tasks.py:reconcile_diarization) runs
+ * periodically as a background task and can still be catching up right
+ * after the call ends, and this segment might turn out to belong to a
+ * different speaker entirely once it does. Worse, a segment can stay
+ * unresolved *permanently* — a voice that never accumulates enough real
+ * assigned speech across the whole call to clear the guest floor
+ * (diarization_guest_min_ms/_min_share) never gets a real label, by
+ * design, not a bug. Guessing "Me" for either case is a real
+ * mislabeling risk (a previously-reported bug this project already fixed
+ * once, for the "still catching up" half of it) — it falsely claims a
+ * specific identity (the account owner) for a segment that was never
+ * actually confirmed to be them, which could just as easily be a guest.
+ * "Unknown" is the honest label once the catch-up window has actually
+ * given up — see DIARIZATION_GRACE_MS and the transcript-loading effect
+ * below. */
 function speakerLabel(
   segment: TranscriptSegment,
   viewerId: string | undefined,
@@ -63,8 +86,7 @@ function speakerLabel(
       : segment.speaker_label;
   }
   if (segment.channel === "me" || segment.channel === "them") {
-    if (diarizationCatchingUp) return "Identifying…";
-    return segment.channel === "me" ? "Me" : "Them";
+    return diarizationCatchingUp ? "Identifying…" : "Unknown";
   }
   return null;
 }
@@ -161,22 +183,33 @@ export default function MeetingDetail() {
     if (canViewFull) {
       // Re-poll, bounded, specifically while a live-recorded segment is
       // still missing a resolved speaker — see speakerLabel's and
-      // DIARIZATION_GRACE_MS's docstrings above.
-      (async () => {
-        const deadline = Date.now() + DIARIZATION_GRACE_MS;
-        while (!cancelled) {
-          const fresh = await api.getTranscript(meetingId);
-          if (cancelled) return;
-          setTranscript(fresh);
-          const stillPending = hasUnresolvedLiveSpeaker(fresh);
-          if (!stillPending || Date.now() >= deadline) {
-            setDiarizationCatchingUp(false);
-            return;
+      // DIARIZATION_GRACE_MS's docstrings above. Only worth attempting at
+      // all if the call ended recently enough that the backend could
+      // plausibly still be working on it — an old meeting reopened later
+      // gets its final ("Unknown" for anything that never resolved) state
+      // immediately instead of replaying a 90-second spinner that can only
+      // ever end in the exact same place.
+      const endedRecently =
+        !!meeting.ended_at && Date.now() - new Date(meeting.ended_at).getTime() < DIARIZATION_GRACE_MS;
+      if (!endedRecently) {
+        setDiarizationCatchingUp(false);
+      } else {
+        (async () => {
+          const deadline = Date.now() + DIARIZATION_GRACE_MS;
+          while (!cancelled) {
+            const fresh = await api.getTranscript(meetingId);
+            if (cancelled) return;
+            setTranscript(fresh);
+            const stillPending = hasUnresolvedLiveSpeaker(fresh);
+            if (!stillPending || Date.now() >= deadline) {
+              setDiarizationCatchingUp(false);
+              return;
+            }
+            setDiarizationCatchingUp(true);
+            await new Promise((resolve) => setTimeout(resolve, DIARIZATION_POLL_INTERVAL_MS));
           }
-          setDiarizationCatchingUp(true);
-          await new Promise((resolve) => setTimeout(resolve, DIARIZATION_POLL_INTERVAL_MS));
-        }
-      })();
+        })();
+      }
       if (meeting.has_audio) {
         api.getAudioObjectUrl(meetingId).then(setAudioUrl);
       }
@@ -532,7 +565,7 @@ export default function MeetingDetail() {
                             {label && (
                               <span
                                 className={`mr-2 text-xs font-medium text-ink-muted ${
-                                  label === "Identifying…" ? "italic opacity-70" : ""
+                                  label === "Identifying…" || label === "Unknown" ? "italic opacity-70" : ""
                                 }`}
                               >
                                 {label}

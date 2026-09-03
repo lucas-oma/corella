@@ -39,6 +39,11 @@ const SPEAKER_DOT_COLORS = ["bg-accent", "bg-status-success", "bg-status-danger"
 // on a long call.
 const MAX_DEBUG_EVENTS = 200;
 
+// How long a just-resolved/changed speaker label stays visually "pulsed"
+// (see justLabeled/animate-speaker-pop) — long enough to actually notice,
+// short enough not to look stuck once it's served its purpose.
+const PULSE_MS = 1800;
+
 function speakerDotColor(label: string): string {
   let hash = 0;
   for (let i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) >>> 0;
@@ -64,6 +69,14 @@ export default function LiveSession() {
   const [copilot, setCopilot] = useState<CopilotEvent | null>(null);
   const [copilotAvailable, setCopilotAvailable] = useState(true);
   const [speakerLabels, setSpeakerLabels] = useState<Record<string, SpeakerInfo>>({});
+  // Segment ids whose label resolved (or changed) in the last PULSE_MS —
+  // purely a transient visual cue (see the label's animate-speaker-pop
+  // class below), not a durable record. Without this, a diarization_update
+  // silently relabels an already-scrolled-past bubble with zero visual cue
+  // at all — easy to miss entirely (a real, reported gap: the mechanism
+  // works, but a live relabel was invisible in practice).
+  const [justLabeled, setJustLabeled] = useState<Set<string>>(new Set());
+  const pulseTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [debugEnabled, setDebugEnabled] = useState(false);
   const [debugEvents, setDebugEvents] = useState<DebugEvent[]>([]);
   const debugEndRef = useRef<HTMLDivElement>(null);
@@ -92,6 +105,12 @@ export default function LiveSession() {
   useEffect(() => {
     debugEndRef.current?.scrollIntoView({ block: "end" });
   }, [debugEvents]);
+
+  useEffect(() => {
+    return () => {
+      for (const timeout of pulseTimeoutsRef.current) clearTimeout(timeout);
+    };
+  }, []);
 
   // A speaker change mid-utterance means the server deletes the one coarse
   // bubble it first sent (on whichever channel it was) and replaces it with
@@ -123,6 +142,26 @@ export default function LiveSession() {
       }
       return Array.from(byId.values()).sort((a, b) => a.start_ms - b.start_ms);
     });
+
+    // Every segment in this event just resolved or changed, by definition
+    // — pulse them all (a first-time snapshot pulsing every already-labeled
+    // bubble at once is the correct read: that IS the moment they all
+    // became known). Each id clears itself independently after PULSE_MS
+    // rather than the whole set clearing together, so a fast run of
+    // separate events doesn't cut an earlier pulse short.
+    const ids = event.segments.map((s) => s.id);
+    setJustLabeled((prev) => new Set([...prev, ...ids]));
+    for (const id of ids) {
+      const timeout = setTimeout(() => {
+        setJustLabeled((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }, PULSE_MS);
+      pulseTimeoutsRef.current.push(timeout);
+    }
   }
 
   useEffect(() => {
@@ -228,6 +267,18 @@ export default function LiveSession() {
     if (!next) setDebugEvents([]);
   }
 
+  // Same-room diarization (reconcile_diarization) is a periodic background
+  // task — it can genuinely take a while (12s minimum, tens of seconds
+  // realistically) before the first label ever arrives, during which the
+  // transcript panel shows nothing to indicate it's even trying. Once at
+  // least one label has resolved, hide this — showing "Identifying…"
+  // forever after real names/numbers already appeared would read as wrong,
+  // not reassuring.
+  const identifyingSpeakers =
+    connection === "connected" &&
+    Object.keys(speakerLabels).length === 0 &&
+    transcript.some((s) => s.channel === "me" || s.channel === "them");
+
   return (
     <AppShell>
       <div className="mb-6 flex items-center justify-between">
@@ -251,6 +302,11 @@ export default function LiveSession() {
           <span className={`h-2 w-2 rounded-full ${micActive ? "bg-status-success" : "bg-ink-subtle"}`} />
           Mic
         </span>
+        {identifyingSpeakers && (
+          <span className="italic text-ink-subtle" title="Same-room diarization runs periodically in the background — labels appear above the bubble once a voice is confirmed.">
+            Identifying speakers…
+          </span>
+        )}
         <span className="flex items-center gap-1.5 text-ink-muted">
           <span className={`h-2 w-2 rounded-full ${themActive ? "bg-status-success" : "bg-ink-subtle"}`} />
           Tab audio
@@ -285,7 +341,11 @@ export default function LiveSession() {
               >
                 <div className={`max-w-[75%] ${segment.channel === "me" ? "text-right" : "text-left"}`}>
                   {label && (
-                    <p className="mb-0.5 flex items-center gap-1.5 text-xs text-ink-subtle">
+                    <p
+                      className={`mb-0.5 flex items-center gap-1.5 text-xs text-ink-subtle ${
+                        justLabeled.has(segment.id) ? "animate-speaker-pop" : ""
+                      }`}
+                    >
                       <span className={`h-1.5 w-1.5 rounded-full ${speakerDotColor(label)}`} />
                       {label}
                     </p>

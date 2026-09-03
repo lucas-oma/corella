@@ -198,7 +198,13 @@ export class LiveSessionClient {
             coach_score: msg.coach_score ?? null,
           });
         } else if (msg.type === "copilot_unavailable") this.onCopilotUnavailable?.();
-        else if (msg.type === "diarization_update") {
+        else if (msg.type === "diarization_update" || msg.type === "speaker_hint") {
+          // A speaker_hint is a fast, read-only "already recognized this
+          // voice" guess (corella.quick_label_hint) — same wire shape as
+          // the authoritative diarization_update on purpose, so it's
+          // handled identically here; a later real diarization_update for
+          // the same segment simply overwrites it, self-correcting on the
+          // rare case a hint and the real pass ever disagreed.
           this.onDiarizationUpdate?.({
             isSnapshot: msg.is_snapshot ?? false,
             removedSegmentIds: msg.removed_segment_ids ?? [],
