@@ -1,9 +1,24 @@
 import { useEffect, useState } from "react";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type CallTypeConfig, type CostSummary, type Group, type User } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  type CallTypeConfig,
+  type CostPeriod,
+  type CostSummary,
+  type Group,
+  type User,
+} from "@/lib/api";
 
 const NO_GROUP = "__none__";
+
+const COST_PERIODS: { id: CostPeriod; label: string }[] = [
+  { id: "7d", label: "7 days" },
+  { id: "30d", label: "30 days" },
+  { id: "month", label: "Month" },
+  { id: "year", label: "Year" },
+];
 
 function slugify(name: string): string {
   return name
@@ -54,13 +69,43 @@ function draftFromCallType(ct: CallTypeConfig): CallTypeDraft {
 /** Same sub-cent precision rule as MeetingDetail's per-meeting badge —
  * "$0.00" would misleadingly read as free for a genuinely small amount. */
 function formatUsd(usd: number): string {
-  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+  return usd < 0.01 && usd > 0 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
+function formatDayLabel(day: string, period: CostPeriod, index: number, total: number): string {
+  // day is ISO date "YYYY-MM-DD"
+  const [, month, d] = day.split("-");
+  const dayNum = String(Number(d));
+  if (period === "7d") {
+    const weekday = new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: "short" });
+    return `${weekday} ${dayNum}`;
+  }
+  if (period === "30d" || period === "month") {
+    // Label first, last, and roughly weekly ticks so the axis stays readable.
+    if (index === 0 || index === total - 1 || index % 7 === 0) {
+      return `${Number(month)}/${dayNum}`;
+    }
+    return "";
+  }
+  // year — month starts only
+  if (dayNum === "1" || index === 0 || index === total - 1) {
+    return new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { month: "short" });
+  }
+  return "";
+}
+
+function periodCaption(period: CostPeriod, dayCount: number): string {
+  if (period === "7d") return "last 7 days";
+  if (period === "30d") return "last 30 days";
+  if (period === "month") return `this month (${dayCount} days)`;
+  return "last 365 days";
 }
 
 export default function Admin() {
   const [groups, setGroups] = useState<Group[] | null>(null);
   const [users, setUsers] = useState<User[] | null>(null);
   const [costs, setCosts] = useState<CostSummary | null>(null);
+  const [costPeriod, setCostPeriod] = useState<CostPeriod>("30d");
   const [callTypes, setCallTypes] = useState<CallTypeConfig[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -83,9 +128,18 @@ export default function Admin() {
   useEffect(() => {
     api.adminListGroups().then(setGroups);
     api.adminListUsers().then(setUsers);
-    api.adminGetCostSummary().then(setCosts);
     api.adminListCallTypes().then(setCallTypes);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.adminGetCostSummary(costPeriod).then((data) => {
+      if (!cancelled) setCosts(data);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [costPeriod]);
 
   function groupName(groupId: string | null): string {
     if (!groupId) return "No group";
@@ -525,24 +579,91 @@ export default function Admin() {
               </div>
             </div>
 
-            {costs.daily.length > 0 && (
-              <div className="mt-6">
-                <p className="label mb-2">Daily cost (last {costs.daily.length} days)</p>
-                <div className="flex h-24 items-end gap-0.5">
-                  {(() => {
-                    const max = Math.max(...costs.daily.map((d) => d.total_usd), 0.0001);
-                    return costs.daily.map((d) => (
-                      <div
-                        key={d.day}
-                        className="min-h-[2px] flex-1 rounded-t-sm bg-accent/70"
-                        style={{ height: `${Math.max((d.total_usd / max) * 100, 2)}%` }}
-                        title={`${d.day}: ${formatUsd(d.total_usd)}`}
-                      />
-                    ));
-                  })()}
+            <div className="mt-6">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-sm font-medium text-ink-muted">
+                  Daily cost
+                  <span className="ml-2 font-normal text-ink-subtle">
+                    {periodCaption(costPeriod, costs.daily.length)}
+                  </span>
+                </p>
+                <div className="flex items-center gap-1">
+                  {COST_PERIODS.map((p) => {
+                    const active = costPeriod === p.id;
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => setCostPeriod(p.id)}
+                        className={`rounded px-2.5 py-1 text-xs transition-colors ${
+                          active
+                            ? "bg-accent text-accent-foreground"
+                            : "text-ink-muted hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
-            )}
+
+              {costs.daily.length === 0 ? (
+                <p className="text-sm text-ink-muted">No daily history yet.</p>
+              ) : (
+                (() => {
+                  const max = Math.max(...costs.daily.map((d) => d.total_usd), 0);
+                  const showValues = costs.daily.length <= 14;
+                  const periodTotal = costs.daily.reduce((sum, d) => sum + d.total_usd, 0);
+                  return (
+                    <>
+                      <div className="mb-2 flex items-baseline justify-between gap-3">
+                        <p className="text-xs text-ink-subtle">
+                          Period total{" "}
+                          <span className="text-ink-muted">{formatUsd(periodTotal)}</span>
+                        </p>
+                        <p className="text-xs text-ink-subtle">
+                          Peak day{" "}
+                          <span className="text-ink-muted">{formatUsd(max)}</span>
+                        </p>
+                      </div>
+                      <div className="flex items-end gap-px">
+                        {costs.daily.map((d, i) => {
+                          const pct = max > 0 ? (d.total_usd / max) * 100 : 0;
+                          const label = formatDayLabel(d.day, costPeriod, i, costs.daily.length);
+                          return (
+                            <div
+                              key={d.day}
+                              className="flex min-w-0 flex-1 flex-col items-center"
+                              title={`${d.day}: ${formatUsd(d.total_usd)}`}
+                            >
+                              {showValues && (
+                                <span className="mb-1 h-3 text-[10px] leading-none text-ink-subtle tabular-nums">
+                                  {d.total_usd > 0 ? formatUsd(d.total_usd) : ""}
+                                </span>
+                              )}
+                              <div className="flex h-28 w-full items-end justify-center">
+                                <div
+                                  className={`w-full max-w-[2.5rem] rounded-t-sm ${
+                                    d.total_usd > 0
+                                      ? "bg-accent"
+                                      : "bg-border dark:bg-border-dark"
+                                  }`}
+                                  style={{ height: `${Math.max(pct, d.total_usd > 0 ? 4 : 1)}%` }}
+                                />
+                              </div>
+                              <span className="mt-1 h-3 text-[10px] leading-none text-ink-subtle">
+                                {label}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  );
+                })()
+              )}
+            </div>
 
             <div className="mt-6">
               <p className="label mb-2">By user</p>

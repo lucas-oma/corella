@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -26,3 +27,5 @@ class CostSummaryRead(BaseModel):
     by_user: list[UserCostBreakdownRead]
     daily: list[DailyCostRead]
     projected_next_7_days_usd: float | None
+    period: Literal["7d", "30d", "month", "year"]
+    period: Literal["7d", "30d", "month", "year"]

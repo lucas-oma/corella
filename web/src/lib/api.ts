@@ -243,6 +243,8 @@ export interface DailyCost {
   total_usd: number;
 }
 
+export type CostPeriod = "7d" | "30d" | "month" | "year";
+
 export interface CostSummary {
   total_usd: number;
   priced_call_count: number;
@@ -253,6 +255,7 @@ export interface CostSummary {
   by_user: UserCostBreakdown[];
   daily: DailyCost[];
   projected_next_7_days_usd: number | null;
+  period: CostPeriod;
 }
 
 export interface KBDocument {
@@ -348,7 +351,8 @@ export const api = {
   adminCreateGroup: (name: string) =>
     request<Group>("/api/admin/groups", { method: "POST", body: JSON.stringify({ name }) }),
   adminDeleteGroup: (id: string) => request<void>(`/api/admin/groups/${id}`, { method: "DELETE" }),
-  adminGetCostSummary: () => request<CostSummary>("/api/admin/costs"),
+  adminGetCostSummary: (period: CostPeriod = "30d") =>
+    request<CostSummary>(`/api/admin/costs?period=${period}`),
   getCallTypes: () => request<CallTypeOption[]>("/api/call-types"),
   adminListCallTypes: () => request<CallTypeConfig[]>("/api/admin/call-types"),
   adminCreateCallType: (payload: Partial<CallTypeConfig> & { name: string; slug: string; webhook_headers?: string }) =>
