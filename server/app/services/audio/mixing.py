@@ -46,13 +46,14 @@ def extract_channel_window(
     """A bounded slice of one channel's timestamped chunks as contiguous
     mono PCM16LE, [start_ms, end_ms) — silence-padded over any gaps.
 
-    Used to give same-room diarization (app/workers/tasks.py:diarize_utterance)
-    a wider window of *already-received* audio than just one VAD utterance —
-    the pyannote pipeline needs several seconds of context to reliably place
-    a speaker-change point (verified empirically: unreliable well under 10s).
-    Reuses the same recordings buffer mix_channel_recordings() reads at
-    session end, just for one channel and a bounded range instead of the
-    whole session.
+    Used by same-room diarization's periodic reconciliation pass
+    (app/workers/tasks.py:reconcile_diarization, dispatched from
+    app/ws/live_session.py's _reconcile_diarization_loop) to slice a rolling
+    window of already-received per-channel audio — the pyannote pipeline
+    needs several seconds of context to reliably place speaker-change points
+    (verified empirically: unreliable well under 10s). Reuses the same
+    recordings buffer mix_channel_recordings() reads at session end, just
+    for one channel and a bounded range instead of the whole session.
     """
     if end_ms <= start_ms:
         return b""

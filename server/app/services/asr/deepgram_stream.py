@@ -34,9 +34,9 @@ class StreamResult:
     text: str
     is_final: bool
     # Utterance-relative seconds (matching whisper.py's WhisperWord contract
-    # exactly, so app/workers/tasks.py:diarize_utterance's words_in_range
-    # doesn't need to know which engine produced them) — only ever
-    # populated on a final result; interim previews carry none.
+    # exactly, so any caller needing per-word timing doesn't need to know
+    # which engine produced them) — only ever populated on a final result;
+    # interim previews carry none.
     words: list[WhisperWord] = field(default_factory=list)
     start_s: float = 0.0  # stream-relative seconds — only meaningful when is_final
     duration_s: float = 0.0  # seconds — only meaningful when is_final
