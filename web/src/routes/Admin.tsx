@@ -13,6 +13,14 @@ import {
 
 const NO_GROUP = "__none__";
 
+const EMPTY_NEW_USER = {
+  email: "",
+  password: "",
+  full_name: "",
+  role: "member" as const,
+  group_id: NO_GROUP,
+};
+
 const COST_PERIODS: { id: CostPeriod; label: string }[] = [
   { id: "7d", label: "7 days" },
   { id: "30d", label: "30 days" },
@@ -117,13 +125,15 @@ export default function Admin() {
   const [callTypeDraft, setCallTypeDraft] = useState<CallTypeDraft>(EMPTY_CALL_TYPE_DRAFT);
 
   const [newGroupName, setNewGroupName] = useState("");
-  const [newUser, setNewUser] = useState({
-    email: "",
-    password: "",
-    full_name: "",
-    role: "member" as User["role"],
-    group_id: NO_GROUP,
-  });
+  const [addingGroup, setAddingGroup] = useState(false);
+  const [addingUser, setAddingUser] = useState(false);
+  const [newUser, setNewUser] = useState<{
+    email: string;
+    password: string;
+    full_name: string;
+    role: User["role"];
+    group_id: string;
+  }>(EMPTY_NEW_USER);
 
   useEffect(() => {
     api.adminListGroups().then(setGroups);
@@ -141,11 +151,6 @@ export default function Admin() {
     };
   }, [costPeriod]);
 
-  function groupName(groupId: string | null): string {
-    if (!groupId) return "No group";
-    return groups?.find((g) => g.id === groupId)?.name ?? "—";
-  }
-
   async function onCreateGroup() {
     const name = newGroupName.trim();
     if (!name) return;
@@ -155,6 +160,7 @@ export default function Admin() {
       const group = await api.adminCreateGroup(name);
       setGroups((prev) => [...(prev ?? []), group]);
       setNewGroupName("");
+      setAddingGroup(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't create group");
     } finally {
@@ -197,7 +203,8 @@ export default function Admin() {
           prev?.map((g) => (g.id === user.group_id ? { ...g, member_count: g.member_count + 1 } : g)) ??
           null,
       );
-      setNewUser({ email: "", password: "", full_name: "", role: "member", group_id: NO_GROUP });
+      setNewUser(EMPTY_NEW_USER);
+      setAddingUser(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't create user");
     } finally {
@@ -208,12 +215,24 @@ export default function Admin() {
   async function onUpdateUser(user: User, patch: { role?: User["role"]; group_id?: string | null }) {
     setError(null);
     setBusy(user.id);
+    const previousGroupId = user.group_id;
     try {
       const updated = await api.adminUpdateUser(user.id, {
         ...patch,
         clear_group: "group_id" in patch && patch.group_id === null,
       });
       setUsers((prev) => prev?.map((u) => (u.id === user.id ? updated : u)) ?? null);
+      if ("group_id" in patch && patch.group_id !== previousGroupId) {
+        setGroups(
+          (prev) =>
+            prev?.map((g) => {
+              let count = g.member_count;
+              if (g.id === previousGroupId) count = Math.max(0, count - 1);
+              if (g.id === patch.group_id) count += 1;
+              return count === g.member_count ? g : { ...g, member_count: count };
+            }) ?? null,
+        );
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't update user");
     } finally {
@@ -301,86 +320,161 @@ export default function Admin() {
     <AppShell>
       <div className="mb-8">
         <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">Admin</h1>
-        <p className="mt-1 text-sm text-ink-muted">Manage accounts and groups.</p>
+        <p className="mt-1 text-sm text-ink-muted">Accounts, groups, call types, and spend.</p>
       </div>
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
 
       <section className="card p-6">
-        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Groups</h2>
+        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">People</h2>
         <p className="mt-1 text-sm text-ink-muted">
-          Members of a group share a knowledge base and can see each other's call reports.
-          Deleting a group only unassigns its members — their accounts aren't affected.
+          Members of a group share a knowledge base and can see each other&apos;s call reports.
+          Deleting a group only unassigns its members — their accounts aren&apos;t affected.
         </p>
 
-        <ul className="mt-5 divide-y divide-border dark:divide-border-dark">
-          {groups === null && <li className="py-3 text-sm text-ink-muted">Loading…</li>}
-          {groups?.length === 0 && (
-            <li className="py-3 text-sm text-ink-muted">No groups yet.</li>
-          )}
-          {groups?.map((group) => (
-            <li key={group.id} className="flex items-center justify-between py-3">
-              <div>
-                <p className="text-sm font-medium text-ink dark:text-ink-inverted">{group.name}</p>
-                <p className="text-xs text-ink-subtle">
-                  {group.member_count} member{group.member_count === 1 ? "" : "s"}
-                </p>
-              </div>
-              <button
-                onClick={() => onDeleteGroup(group)}
-                disabled={busy === group.id}
-                className="text-xs text-ink-subtle hover:text-status-danger"
-              >
-                {busy === group.id ? "Deleting…" : "Delete"}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="mt-6 grid grid-cols-1 gap-8 md:grid-cols-3">
+          {/* Groups — ≈1/3 */}
+          <div className="md:col-span-1 md:border-r md:border-border md:pr-8 dark:md:border-border-dark">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium text-ink dark:text-ink-inverted">Groups</p>
+              {!addingGroup && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setNewGroupName("");
+                    setAddingGroup(true);
+                  }}
+                  className="text-xs text-accent hover:underline"
+                >
+                  Add
+                </button>
+              )}
+            </div>
 
-        <div className="mt-4 flex gap-2">
-          <input
-            type="text"
-            placeholder="New group name"
-            value={newGroupName}
-            onChange={(e) => setNewGroupName(e.target.value)}
-            className="field flex-1 text-sm"
-          />
-          <button
-            onClick={onCreateGroup}
-            disabled={busy === "new-group" || !newGroupName.trim()}
-            className="btn-secondary shrink-0"
-          >
-            {busy === "new-group" ? "Creating…" : "Create group"}
-          </button>
-        </div>
-      </section>
-
-      <section className="card mt-6 p-6">
-        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Users</h2>
-        <p className="mt-1 text-sm text-ink-muted">All accounts, their role, and group.</p>
-
-        <ul className="mt-5 divide-y divide-border dark:divide-border-dark">
-          {users === null && <li className="py-3 text-sm text-ink-muted">Loading…</li>}
-          {users?.map((user) => (
-            <li key={user.id} className="py-3">
-              <div className="flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-ink dark:text-ink-inverted">
-                    {user.full_name}
-                  </p>
-                  <p className="truncate text-xs text-ink-subtle">{user.email}</p>
+            {addingGroup && (
+              <div className="mt-4 rounded border border-border bg-surface p-4 dark:border-border-dark dark:bg-surface-dark">
+                <p className="text-sm font-medium text-ink dark:text-ink-inverted">New group</p>
+                <label className="label mt-3" htmlFor="new-group-name">
+                  Group name
+                </label>
+                <input
+                  id="new-group-name"
+                  type="text"
+                  autoFocus
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") onCreateGroup();
+                  }}
+                  className="field text-sm"
+                />
+                <div className="mt-3 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={onCreateGroup}
+                    disabled={busy === "new-group" || !newGroupName.trim()}
+                    className="btn-secondary"
+                  >
+                    {busy === "new-group" ? "Creating…" : "Create group"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAddingGroup(false);
+                      setNewGroupName("");
+                    }}
+                    className="text-xs text-ink-muted hover:text-ink dark:hover:text-ink-inverted"
+                  >
+                    Cancel
+                  </button>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
+              </div>
+            )}
+
+            <ul className="mt-4 divide-y divide-border dark:divide-border-dark">
+              {groups === null && <li className="py-3 text-sm text-ink-muted">Loading…</li>}
+              {groups?.length === 0 && !addingGroup && (
+                <li className="py-3 text-sm text-ink-muted">No groups yet.</li>
+              )}
+              {groups?.map((group) => (
+                <li key={group.id} className="flex items-center justify-between gap-3 py-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-ink dark:text-ink-inverted">
+                      {group.name}
+                    </p>
+                    <p className="text-xs text-ink-subtle">
+                      {group.member_count} member{group.member_count === 1 ? "" : "s"}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onDeleteGroup(group)}
+                    disabled={busy === group.id}
+                    className="shrink-0 text-xs text-ink-subtle hover:text-status-danger"
+                  >
+                    {busy === group.id ? "Deleting…" : "Delete"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {/* Users — ≈2/3 */}
+          <div className="md:col-span-2">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium text-ink dark:text-ink-inverted">Users</p>
+              {!addingUser && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setNewUser(EMPTY_NEW_USER);
+                    setAddingUser(true);
+                  }}
+                  className="text-xs text-accent hover:underline"
+                >
+                  Add user
+                </button>
+              )}
+            </div>
+
+            {users !== null && users.length > 0 && (
+              <div className="mt-4 hidden grid-cols-[minmax(0,1fr)_7rem_10rem] gap-3 px-0 text-xs text-ink-subtle sm:grid">
+                <span>Name</span>
+                <span>Role</span>
+                <span>Group</span>
+              </div>
+            )}
+
+            <ul className="mt-1 divide-y divide-border dark:divide-border-dark sm:mt-0">
+              {users === null && <li className="py-3 text-sm text-ink-muted">Loading…</li>}
+              {users?.length === 0 && !addingUser && (
+                <li className="py-3 text-sm text-ink-muted">No users yet.</li>
+              )}
+              {users?.map((user) => (
+                <li
+                  key={user.id}
+                  className="grid grid-cols-1 items-center gap-2 py-3 sm:grid-cols-[minmax(0,1fr)_7rem_10rem] sm:gap-3"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-ink dark:text-ink-inverted">
+                      {user.full_name}
+                    </p>
+                    <p className="truncate text-xs text-ink-subtle">{user.email}</p>
+                  </div>
                   <select
+                    aria-label={`Role for ${user.full_name}`}
                     value={user.role}
                     onChange={(e) => onUpdateUser(user, { role: e.target.value as User["role"] })}
                     disabled={busy === user.id}
-                    className="field w-auto py-1 text-xs"
+                    className="field w-full py-1.5 text-xs"
                   >
                     <option value="member">Member</option>
                     <option value="admin">Admin</option>
                   </select>
                   <select
+                    aria-label={`Group for ${user.full_name}`}
                     value={user.group_id ?? NO_GROUP}
                     onChange={(e) =>
                       onUpdateUser(user, {
@@ -388,7 +482,7 @@ export default function Admin() {
                       })
                     }
                     disabled={busy === user.id}
-                    className="field w-auto py-1 text-xs"
+                    className="field w-full py-1.5 text-xs"
                   >
                     <option value={NO_GROUP}>No group</option>
                     {groups?.map((g) => (
@@ -397,79 +491,121 @@ export default function Admin() {
                       </option>
                     ))}
                   </select>
+                </li>
+              ))}
+            </ul>
+
+            {addingUser && (
+              <div className="mt-4 rounded border border-border bg-surface p-4 dark:border-border-dark dark:bg-surface-dark">
+                <p className="text-sm font-medium text-ink dark:text-ink-inverted">New user</p>
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="label" htmlFor="new-user-name">
+                      Full name
+                    </label>
+                    <input
+                      id="new-user-name"
+                      type="text"
+                      autoFocus
+                      value={newUser.full_name}
+                      onChange={(e) => setNewUser((prev) => ({ ...prev, full_name: e.target.value }))}
+                      className="field text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="new-user-email">
+                      Email
+                    </label>
+                    <input
+                      id="new-user-email"
+                      type="email"
+                      value={newUser.email}
+                      onChange={(e) => setNewUser((prev) => ({ ...prev, email: e.target.value }))}
+                      className="field text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="new-user-password">
+                      Password
+                    </label>
+                    <input
+                      id="new-user-password"
+                      type="password"
+                      value={newUser.password}
+                      onChange={(e) => setNewUser((prev) => ({ ...prev, password: e.target.value }))}
+                      className="field text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="new-user-role">
+                      Role
+                    </label>
+                    <select
+                      id="new-user-role"
+                      value={newUser.role}
+                      onChange={(e) =>
+                        setNewUser((prev) => ({ ...prev, role: e.target.value as User["role"] }))
+                      }
+                      className="field text-sm"
+                    >
+                      <option value="member">Member</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="label" htmlFor="new-user-group">
+                      Group
+                    </label>
+                    <select
+                      id="new-user-group"
+                      value={newUser.group_id}
+                      onChange={(e) => setNewUser((prev) => ({ ...prev, group_id: e.target.value }))}
+                      className="field text-sm"
+                    >
+                      <option value={NO_GROUP}>No group</option>
+                      {groups?.map((g) => (
+                        <option key={g.id} value={g.id}>
+                          {g.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="mt-4 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={onCreateUser}
+                    disabled={
+                      busy === "new-user" ||
+                      !newUser.email.trim() ||
+                      !newUser.password ||
+                      !newUser.full_name.trim()
+                    }
+                    className="btn-secondary"
+                  >
+                    {busy === "new-user" ? "Creating…" : "Create user"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAddingUser(false);
+                      setNewUser(EMPTY_NEW_USER);
+                    }}
+                    className="text-xs text-ink-muted hover:text-ink dark:hover:text-ink-inverted"
+                  >
+                    Cancel
+                  </button>
                 </div>
               </div>
-              <p className="mt-1 text-xs text-ink-subtle">{groupName(user.group_id)}</p>
-            </li>
-          ))}
-        </ul>
-
-        <div className="mt-5 border-t border-border pt-4 dark:border-border-dark">
-          <p className="label mb-2">New user</p>
-          <div className="grid grid-cols-2 gap-2">
-            <input
-              type="text"
-              placeholder="Full name"
-              value={newUser.full_name}
-              onChange={(e) => setNewUser((prev) => ({ ...prev, full_name: e.target.value }))}
-              className="field text-sm"
-            />
-            <input
-              type="email"
-              placeholder="Email"
-              value={newUser.email}
-              onChange={(e) => setNewUser((prev) => ({ ...prev, email: e.target.value }))}
-              className="field text-sm"
-            />
-            <input
-              type="password"
-              placeholder="Password"
-              value={newUser.password}
-              onChange={(e) => setNewUser((prev) => ({ ...prev, password: e.target.value }))}
-              className="field text-sm"
-            />
-            <select
-              value={newUser.role}
-              onChange={(e) =>
-                setNewUser((prev) => ({ ...prev, role: e.target.value as User["role"] }))
-              }
-              className="field text-sm"
-            >
-              <option value="member">Member</option>
-              <option value="admin">Admin</option>
-            </select>
-            <select
-              value={newUser.group_id}
-              onChange={(e) => setNewUser((prev) => ({ ...prev, group_id: e.target.value }))}
-              className="field col-span-2 text-sm"
-            >
-              <option value={NO_GROUP}>No group</option>
-              {groups?.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.name}
-                </option>
-              ))}
-            </select>
+            )}
           </div>
-          <button
-            onClick={onCreateUser}
-            disabled={
-              busy === "new-user" ||
-              !newUser.email.trim() ||
-              !newUser.password ||
-              !newUser.full_name.trim()
-            }
-            className="btn-secondary mt-3"
-          >
-            {busy === "new-user" ? "Creating…" : "Create user"}
-          </button>
         </div>
       </section>
 
       <section className="card mt-6 p-6">
         <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Call types</h2>
         <p className="mt-1 text-sm text-ink-muted">
-          What steers the post-call report's focus, and an optional webhook fired once a call of
+          What steers the post-call report&apos;s focus, and an optional webhook fired once a call of
           that type finishes automatic processing.
         </p>
 
