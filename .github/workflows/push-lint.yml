@@ -1,0 +1,22 @@
+name: Push lint
+
+# Fast, non-blocking feedback on every push to any branch — deliberately
+# NOT added to required status checks (see pr-checks.yml for those). The
+# point is catching a style issue the moment it's pushed, not gating
+# anything; this exists so a PR never arrives with a pile of ruff findings
+# nobody noticed along the way.
+on:
+  push:
+
+jobs:
+  ruff:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - working-directory: server
+        run: pip install -e ".[dev]"
+      - run: ruff check server/app server/tests

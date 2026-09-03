@@ -5,7 +5,7 @@ import logging
 import os
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -168,7 +168,7 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         if meeting.status != MeetingStatus.RECORDING:
             await websocket.close(code=4409, reason="Meeting is not in a recording state")
             return
-        meeting.started_at = datetime.now(timezone.utc)
+        meeting.started_at = datetime.now(UTC)
         await db.commit()
         provider = await resolve_provider(db, user.id)
         stt = await resolve_stt_provider(db, user.id)
@@ -643,7 +643,7 @@ async def _finalize(session: LiveSession) -> None:
                 write_wav(str(wav_path), mixed_pcm)
                 meeting.audio_path = str(wav_path)
                 meeting.duration_seconds = round(_duration_ms(mixed_pcm) / 1000)
-            meeting.ended_at = datetime.now(timezone.utc)
+            meeting.ended_at = datetime.now(UTC)
             meeting.status = MeetingStatus.READY
             meeting.processing_error = None
             await db.commit()

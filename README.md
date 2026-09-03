@@ -180,6 +180,8 @@ The UI follows a deliberate, documented visual language — see [`BRANDING.md`](
 
 ## Development
 
+Contributing? See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, this project's conventions (credential handling, migrations, adding a new LLM/STT provider), and what a good PR looks like here.
+
 Backend:
 
 ```bash
@@ -204,7 +206,7 @@ cd web
 npx tsc -b && npx vite build
 ```
 
-There's no automated test suite yet — changes are currently verified by hand against a running Docker stack (see any recent commit message for the pattern) rather than `pytest`/`vitest`. Contributions that add real test coverage are welcome.
+A backend `pytest` suite (`server/tests/`) covers the highest-value logic — permission boundaries, credential/provider resolution, webhook templating, pricing math — not every endpoint; growing it is a welcome contribution. `ruff` and `pytest` are both required checks on any PR into `main`/`release`, and `ruff` alone runs on every push for fast feedback (`.github/workflows/`). Frontend correctness is still `tsc -b` + `vite build`, no component-test suite yet. Beyond what's covered by these, changes are verified by hand against a real, isolated Docker stack (see `CONTRIBUTING.md` and any recent commit message for the pattern) — several real bugs in this project's history were only ever caught that way, not by a unit test.
 
 ## Status
 

@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 
 import logoDark from "@/assets/logo-dark.svg";
 import logoLight from "@/assets/logo-light.svg";
+import Footer from "@/components/Footer";
 import { useAuth } from "@/lib/auth";
 
 const NAV = [
@@ -17,14 +18,16 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const nav = user?.role === "admin" ? [...NAV, { to: "/admin", label: "Admin" }] : NAV;
 
   return (
-    <div className="min-h-screen">
+    <div className="flex min-h-screen flex-col">
       <header className="border-b border-border dark:border-border-dark">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-8">
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-end gap-1.5">
               <img src={logoLight} alt="" className="h-7 dark:hidden" />
               <img src={logoDark} alt="" className="hidden h-7 dark:block" />
-              <span className="font-serif text-lg text-ink dark:text-ink-inverted">Corella</span>
+              <span className="font-serif text-2xl leading-none text-ink dark:text-ink-inverted">
+                Corella
+              </span>
             </div>
             <nav className="flex items-center gap-1">
               {nav.map((item) => {
@@ -53,7 +56,8 @@ export default function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-5xl px-6 py-10">{children}</main>
+      <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">{children}</main>
+      <Footer />
     </div>
   );
 }

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -83,7 +83,7 @@ async def get_cost_summary(db: AsyncSession) -> CostSummary:
         for owner_id, full_name, total, count in by_user_rows
     ]
 
-    since = datetime.now(timezone.utc) - timedelta(days=_DAILY_HISTORY_DAYS)
+    since = datetime.now(UTC) - timedelta(days=_DAILY_HISTORY_DAYS)
     day_col = func.date(LLMUsageEvent.created_at)
     daily_totals = func.coalesce(func.sum(LLMUsageEvent.cost_usd), 0.0)
     daily_rows = (

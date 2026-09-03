@@ -2,8 +2,8 @@ from functools import lru_cache
 from uuid import UUID, uuid4
 
 from qdrant_client import QdrantClient
-from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http import models as qmodels
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.core.config import get_settings
 from app.services.embeddings.embed import EMBEDDING_DIM

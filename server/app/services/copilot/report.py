@@ -126,7 +126,7 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
     sentiment = str(parsed.get("sentiment") or "").strip() or None
     notable_quotes = as_str_list(parsed.get("notable_quotes"))
     raw_score = parsed.get("coach_score")
-    coach_score = int(raw_score) if isinstance(raw_score, (int, float)) else None
+    coach_score = int(raw_score) if isinstance(raw_score, int | float) else None
 
     new_items = as_str_list(parsed.get("action_items"))
     if new_items:
