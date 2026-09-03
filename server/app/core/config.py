@@ -94,6 +94,27 @@ class Settings(BaseSettings):
     # on real recordings) with margin below it, so a genuinely ambiguous
     # match still falls through to the real pipeline.
     diarization_skip_confidence: float = 0.65
+    # An utterance shorter than this is too short to trust a lone "doesn't
+    # match any existing speaker" verdict — its own embedding is noisy
+    # enough to score below cluster.SIMILARITY_THRESHOLD against the
+    # *correct* speaker just from being short, not because a new speaker
+    # actually started (app/workers/tasks.py:_cluster_and_assign gets a
+    # second, wider-window look before minting a new one; see
+    # diarization_corroboration_window_ms). Verified empirically against
+    # real conversational audio, not guessed: a real same-speaker 0.5s clip
+    # scored 0.53 against its own true speaker (just under the 0.55
+    # threshold — a genuine near-miss), a 0.3s clip scored 0.08-0.38; both
+    # are well under this floor.
+    diarization_short_utterance_ms: int = 1500
+    # How much *already-received* same-channel audio (window_pcm, the same
+    # buffer diarization_context_window_ms already sizes) the second look
+    # above is allowed to use, trailing backward from the short utterance's
+    # own end — naturally clamped to whatever's actually accumulated so
+    # far, same as diarization_context_window_ms. Verified empirically: on
+    # the same real short clips above, widening by as little as 800ms-1s of
+    # real preceding audio already recovered a confident match (0.72-0.84);
+    # this leaves comfortable margin above that.
+    diarization_corroboration_window_ms: int = 3000
 
     # Live copilot (app/services/copilot/live.py, app/ws/live_session.py)
     copilot_trigger_segments: int = 4  # new transcript segments since the last cycle...

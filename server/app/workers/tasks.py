@@ -53,6 +53,7 @@ from app.services.embeddings.qdrant_store import (
 from app.services.llm.base import LLMError, LLMMessage, complete
 from app.services.llm.pricing import estimate_cost_usd
 from app.services.llm.resolve import resolve_provider
+from app.services.vad.vad import trailing_contiguous_ms
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -289,32 +290,61 @@ def _recognize_voice_identity(
 
 
 def _cluster_and_assign(
-    db, meeting: Meeting, clusters: list[Cluster], embedding, channel: Channel
-) -> tuple[Speaker, bool]:
+    db,
+    meeting: Meeting,
+    clusters: list[Cluster],
+    embedding,
+    channel: Channel,
+    fallback_embedding=None,
+) -> tuple[Speaker, bool, object]:
     """One pre-computed embedding -> one clustering decision -> that
     cluster's Speaker (plus whether it's a *newly created* cluster with no
     resolved identity yet — the caller uses that to decide whether to
     dispatch corella.identify_speaker_name, exactly once per cluster, not
-    on every utterance that matches an already-decided one). Shared by
-    both the simple (no-split) and split paths below. Takes an embedding,
+    on every utterance that matches an already-decided one — and whichever
+    embedding actually decided this call, so the caller can reuse *that*
+    one, not blindly its own original, for anything downstream). Shared by
+    both the simple (no-split) and split paths below. Takes embeddings,
     not raw PCM: extraction is slow on a cold model load (the first call
     in a worker process), and this runs inside the per-meeting-per-channel
     Redis lock (locked_state) — embedding *before* acquiring the lock, not
     during, is what keeps that lock's hold time short (verified this
     mattered: a cold-start extraction held inside the lock outlasted its
     10s timeout, so the lock auto-expired mid-hold and releasing it at the
-    end raised redis.exceptions.LockNotOwnedError)."""
+    end raised redis.exceptions.LockNotOwnedError).
+
+    `fallback_embedding` (the caller only computes and passes one when
+    `embedding` came from a short utterance — see diarize_utterance) is a
+    second, wider-window look at the same channel's already-received audio,
+    tried only if `embedding` alone doesn't confidently match anything —
+    a short utterance's own embedding is genuinely noisy (verified
+    empirically: a real same-speaker 0.5s clip scored 0.53 against its own
+    true speaker, just under SIMILARITY_THRESHOLD), so a lone "no match"
+    from it shouldn't be trusted enough to permanently mint a new speaker.
+    Whichever embedding actually produces a match — or `embedding` itself,
+    if neither does — is what gets used consistently for the centroid
+    update/new cluster and the durable voice-identity lookup below, so a
+    weak primary embedding can't poison either of those once a better one
+    was already computed anyway.
+    """
     idx, similarity = best_match(clusters, embedding)
+    used_embedding = embedding
+
+    if (idx is None or similarity < SIMILARITY_THRESHOLD) and fallback_embedding is not None:
+        fb_idx, fb_similarity = best_match(clusters, fallback_embedding)
+        if fb_idx is not None and fb_similarity >= SIMILARITY_THRESHOLD:
+            idx, similarity, used_embedding = fb_idx, fb_similarity, fallback_embedding
+
     if idx is not None and similarity >= SIMILARITY_THRESHOLD:
         cluster = clusters[idx]
-        update_centroid(cluster, embedding)
+        update_centroid(cluster, used_embedding)
         speaker = db.get(Speaker, UUID(cluster.speaker_id))
-        return speaker, False
+        return speaker, False, used_embedding
 
     # A genuinely new cluster for this meeting — before falling back to a
     # fresh anonymous "Speaker N"/"Them N", check whether this voice is
     # already durably recognized.
-    identity = _recognize_voice_identity(db, embedding, meeting.owner.group_id, meeting.owner_id)
+    identity = _recognize_voice_identity(db, used_embedding, meeting.owner.group_id, meeting.owner_id)
 
     speaker = Speaker(
         owner_id=meeting.owner_id,
@@ -325,8 +355,8 @@ def _cluster_and_assign(
     )
     db.add(speaker)
     db.flush()  # assign speaker.id before the cluster references it
-    clusters.append(Cluster(centroid=embedding.tolist(), count=1, speaker_id=str(speaker.id)))
-    return speaker, identity is None
+    clusters.append(Cluster(centroid=used_embedding.tolist(), count=1, speaker_id=str(speaker.id)))
+    return speaker, identity is None, used_embedding
 
 
 def _segment_payload(segment: TranscriptSegment, speaker_label: str) -> dict:
@@ -396,11 +426,71 @@ def diarize_utterance(
         utterance_pcm = slice_pcm(window_pcm, utterance_offset_ms, utterance_duration_ms)
         whole_embedding = embed_utterance(utterance_pcm)
 
+        settings = get_settings()
+
         # best_match returns (None, -1.0) when there are no clusters yet for
         # this channel — correctly never confident, so a meeting's very
         # first utterance on a channel always gets the careful full pass.
         _best_idx, best_sim = best_match(peek_clusters(meeting.id, channel), whole_embedding)
-        confident_single_speaker = best_sim >= get_settings().diarization_skip_confidence
+        confident_single_speaker = best_sim >= settings.diarization_skip_confidence
+
+        # A short utterance's own embedding is genuinely noisy (verified
+        # empirically — see diarization_short_utterance_ms's docstring) —
+        # if it's short *and* about to fail to match anything (the case
+        # that would otherwise permanently mint a spurious new speaker),
+        # get a second, wider-window look at the same channel's already-
+        # received audio before trusting that "no match" verdict. Computed
+        # here, before the lock, same discipline as whole_embedding itself
+        # — never do slow model inference while holding locked_state's
+        # lock. `best_sim` above is a lock-free peek (may be a cluster or
+        # two stale by the time _cluster_and_assign runs for real), so this
+        # is a heuristic trigger, not a guarantee — worst case, an
+        # unnecessary embedding gets computed, or a genuinely-warranted one
+        # doesn't; _cluster_and_assign's own real decision still always
+        # goes through the fresh, locked cluster state.
+        fallback_embedding = None
+        if utterance_duration_ms < settings.diarization_short_utterance_ms and best_sim < SIMILARITY_THRESHOLD:
+            # A blind fixed-duration trailing window is NOT safe here —
+            # reproduced live: widening straight into audio that actually
+            # belongs to the *previous* speaker's own turn (across the very
+            # silence gap that caused this utterance's own boundary in the
+            # first place) blended two real people's voices into one
+            # embedding, which then confidently matched the WRONG existing
+            # cluster (0.78 similarity to the wrong speaker, verified on
+            # real audio) instead of correctly finding no match. Capping the
+            # window at the previous *committed segment's* own boundary
+            # instead was tried and also rejected — verified live that it
+            # collapses to zero extra context whenever utterances are
+            # dispatched back-to-back with no gap at all, which is the
+            # common case this whole mechanism exists for. A real detected
+            # silence gap (trailing_contiguous_ms, the same
+            # SILENCE_TO_FLUSH_MS-based signal local VAD itself uses to
+            # decide "this is a real pause") is the actual right signal:
+            # widen freely through genuinely continuous speech, stop at the
+            # first real pause. Cheap — no ML model involved, unlike the
+            # embedding extraction it's gating.
+            # window_pcm always ends exactly at this utterance's own end
+            # (that's how live_session.py builds it — extract_channel_window
+            # is called with the utterance's own end_ms as the window's
+            # end), so scanning backward from window_pcm's own end is
+            # already scanning backward from the right reference point.
+            contiguous_ms = trailing_contiguous_ms(
+                window_pcm,
+                settings.live_vad_aggressiveness,
+                max_ms=settings.diarization_corroboration_window_ms,
+            )
+            utterance_end_within_window_ms = utterance_offset_ms + utterance_duration_ms
+            corroboration_start_ms = max(0, utterance_end_within_window_ms - contiguous_ms)
+            corroboration_pcm = slice_pcm(
+                window_pcm, corroboration_start_ms, utterance_end_within_window_ms - corroboration_start_ms
+            )
+            # Only worth it if widening actually gives more audio than the
+            # utterance's own span already was — early in a session, or
+            # right after a real speaker change, there may be little to no
+            # extra *same-speaker* context available yet, in which case
+            # this would just re-embed the same short clip for no benefit.
+            if len(corroboration_pcm) > len(utterance_pcm):
+                fallback_embedding = embed_utterance(corroboration_pcm)
 
         # diarize()'s pipeline is only reliable well above ~10s of audio
         # (verified empirically — an isolated ~4-6s clip either missed a real
@@ -486,8 +576,8 @@ def diarize_utterance(
                 resulting: list[tuple[TranscriptSegment, str]] = []
 
                 if not did_split:
-                    speaker, needs_naming = _cluster_and_assign(
-                        db, meeting, clusters, whole_embedding, channel
+                    speaker, needs_naming, used_embedding = _cluster_and_assign(
+                        db, meeting, clusters, whole_embedding, channel, fallback_embedding
                     )
                     # Assign the relationship object, not just the FK column
                     # — segment.speaker was already loaded (as None) when it
@@ -498,12 +588,12 @@ def diarize_utterance(
                     segment.speaker = speaker
                     resulting.append((segment, speaker.display_label))
                     if needs_naming:
-                        pending_name_inference.append((speaker.id, whole_embedding.tolist()))
+                        pending_name_inference.append((speaker.id, used_embedding.tolist()))
                     has_resolved_identity = has_resolved_identity or speaker.voice_identity_id is not None
                 else:
                     base_start_ms = segment.start_ms
                     for rel_start, rel_end, text, embedding in split_turns:
-                        speaker, needs_naming = _cluster_and_assign(
+                        speaker, needs_naming, used_embedding = _cluster_and_assign(
                             db, meeting, clusters, embedding, channel
                         )
                         new_row = TranscriptSegment(
