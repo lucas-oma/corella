@@ -121,3 +121,26 @@ def trailing_contiguous_ms(
                 break
         usable_frames = i
     return usable_frames * FRAME_MS
+
+
+def speech_ms(pcm: bytes, aggressiveness: int) -> int:
+    """Total real speech content in `pcm`, summed across every 30ms frame
+    that's actually voice (not required to be contiguous) — unlike raw
+    `len(pcm)`, this isn't fooled by a clip that's mostly silence padding.
+
+    Used by app/workers/tasks.py:diarize_utterance as the actual "is this
+    utterance's own audio too thin to trust a lone embedding comparison"
+    signal, in place of wall-clock duration — reproduced live that a
+    3.5-second utterance can be 92% silence (a single short trailing word
+    after a long pause), so its raw duration alone said "plenty of audio"
+    while its real speech content was under a second. Cheap — no ML model,
+    same webrtcvad frame checks as trailing_contiguous_ms.
+    """
+    vad = webrtcvad.Vad(aggressiveness)
+    n_frames = len(pcm) // FRAME_BYTES
+    total = 0
+    for i in range(n_frames):
+        frame = pcm[i * FRAME_BYTES : (i + 1) * FRAME_BYTES]
+        if vad.is_speech(frame, SAMPLE_RATE):
+            total += FRAME_MS
+    return total

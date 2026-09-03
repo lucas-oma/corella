@@ -94,27 +94,68 @@ class Settings(BaseSettings):
     # on real recordings) with margin below it, so a genuinely ambiguous
     # match still falls through to the real pipeline.
     diarization_skip_confidence: float = 0.65
-    # An utterance shorter than this is too short to trust a lone "doesn't
-    # match any existing speaker" verdict — its own embedding is noisy
-    # enough to score below cluster.SIMILARITY_THRESHOLD against the
-    # *correct* speaker just from being short, not because a new speaker
-    # actually started (app/workers/tasks.py:_cluster_and_assign gets a
-    # second, wider-window look before minting a new one; see
-    # diarization_corroboration_window_ms). Verified empirically against
-    # real conversational audio, not guessed: a real same-speaker 0.5s clip
-    # scored 0.53 against its own true speaker (just under the 0.55
-    # threshold — a genuine near-miss), a 0.3s clip scored 0.08-0.38; both
-    # are well under this floor.
+    # An utterance with less real speech content than this (measured via
+    # vad.speech_ms — actual detected voice, not raw wall-clock duration; a
+    # clip can run several seconds and still be almost entirely silence
+    # padding, verified live on a real trailing "one word after a long
+    # pause" utterance that was 92% silence) — and that also has a real
+    # existing cluster on this channel it failed to match — is too thin to
+    # trust that "no match" verdict at face value; a second, wider-window
+    # look gets a chance to find a genuinely better embedding before
+    # accepting it (app/workers/tasks.py:diarize_utterance; see
+    # diarization_corroboration_window_ms). Deliberately NOT based on raw
+    # similarity score — tried that and rejected it after a real
+    # counter-example: two different genuinely-short real utterances, one a
+    # different speaker and one the same speaker caught by a nearby real
+    # gap, scored the identical 0.141 against their closest cluster: score
+    # alone cannot tell those apart at this duration, only content and
+    # clipping can flag that the *embedding itself* isn't trustworthy.
+    # Verified empirically against real conversational audio, not guessed:
+    # a real same-speaker 0.5s clip scored 0.53 against its own true
+    # speaker (just under the 0.55 threshold — a genuine near-miss), a 0.3s
+    # clip scored 0.08-0.38; both are well under this floor.
     diarization_short_utterance_ms: int = 1500
     # How much *already-received* same-channel audio (window_pcm, the same
     # buffer diarization_context_window_ms already sizes) the second look
-    # above is allowed to use, trailing backward from the short utterance's
-    # own end — naturally clamped to whatever's actually accumulated so
-    # far, same as diarization_context_window_ms. Verified empirically: on
-    # the same real short clips above, widening by as little as 800ms-1s of
-    # real preceding audio already recovered a confident match (0.72-0.84);
-    # this leaves comfortable margin above that.
+    # above is allowed to use, trailing backward from the thin or clipped
+    # utterance's own end — naturally clamped to whatever's actually
+    # accumulated so far, same as diarization_context_window_ms. Verified
+    # empirically: on the same real short clips above, widening by as
+    # little as 800ms-1s of real preceding audio already recovered a
+    # confident match (0.72-0.84); a real different-speaker utterance
+    # sitting right at the start of its own turn correctly recovered
+    # nothing extra (there was nothing earlier belonging to it), and a
+    # clean 0.78s clip that scored a deceptively low 0.14 on its own — a
+    # false negative caused entirely by brevity, not a real mismatch —
+    # correctly recovered 2.4s of real matching context and scored 0.70
+    # once corroboration ran. This leaves comfortable margin above the
+    # smaller recoveries.
     diarization_corroboration_window_ms: int = 3000
+    # How much real speech content a corroboration window itself needs
+    # before the embedding built from it is trusted over the utterance's
+    # own — deliberately lower than diarization_short_utterance_ms (that
+    # one gates whether corroboration is worth *attempting* at all; this
+    # one gates whether what it actually found is good enough to *trust*).
+    # Verified empirically — a real corroboration window with exactly
+    # diarization_short_utterance_ms's own value (1500ms) of recovered
+    # speech content was rejected by this check before it existed and
+    # discarded a sim=0.684 confident, correct match purely because it fell
+    # 60ms short of that bar; Phase V's own original calibration already
+    # showed 1.0s clips reliably scoring 0.77-0.78, well above
+    # SIMILARITY_THRESHOLD, which is the real precedent this floor is set
+    # from.
+    diarization_corroboration_min_speech_ms: int = 1000
+    # A more lenient bar than SIMILARITY_THRESHOLD (0.55), used only to
+    # retroactively backfill a segment that was left unlabeled earlier in
+    # the same meeting (app/workers/tasks.py:diarize_utterance's backfill
+    # pass) once a real cluster now exists to check it against — a lower
+    # bar is acceptable here specifically because the risk is different
+    # from creating a brand-new speaker: worst case a backfilled label is
+    # only roughly right, not confidently wrong, and it only ever runs
+    # against a segment that already had no label at all. Starting value
+    # only — needs the same real-audio validation the other diarization
+    # constants here got before being trusted at scale.
+    diarization_backfill_similarity_threshold: float = 0.45
 
     # Live copilot (app/services/copilot/live.py, app/ws/live_session.py)
     copilot_trigger_segments: int = 4  # new transcript segments since the last cycle...
