@@ -27,30 +27,18 @@ A self-hosted meeting assistant: it records a call from your browser (or takes a
 
 ## Architecture
 
-```
-                     ┌─────────────┐
-   Browser  ───────▶ │     web     │  React SPA (nginx)
-  (mic + tab audio)  └──────┬──────┘
-                            │ REST + WebSocket
-                    ┌───────▼─────────┐
-                    │      api        │  FastAPI
-                    └───┬────────┬────┘
-                        │        │
-              ┌─────────▼──┐   ┌─▼──────────┐
-              │  postgres  │   │   redis    │  queue + pub/sub
-              └────────────┘   └───────┬────┘
-                                       │
-                              ┌────────▼────────┐
-                              │      worker     │  Celery: faster-whisper,
-                              └────────┬────────┘  pyannote.audio, embeddings
-                                       │
-                                ┌──────▼──────┐
-                                │    qdrant   │  vector search (knowledge
-                                └─────────────┘   base + meeting search)
+```mermaid
+flowchart TB
+    Browser["Browser\n(mic + tab audio)"] --> Web["web\nReact SPA (nginx)"]
+    Web -->|"REST + WebSocket"| API["api\nFastAPI"]
+    API --> Postgres[("postgres")]
+    API --> Redis[("redis\nqueue + pub/sub")]
+    Redis --> Worker["worker\nCelery: faster-whisper,\npyannote.audio, embeddings"]
+    Worker --> Qdrant[("qdrant\nvector search\n(knowledge base +\nmeeting search)")]
 ```
 
 - **api** — FastAPI. Auth, meeting/KB/admin CRUD, WebSocket audio ingestion and live event push (transcript, copilot, diarization updates, admin debug events). Also runs `faster-whisper` directly for live transcription (it's torch-free, so it's light enough for this process) — everything torch-dependent (diarization, offline transcription's diarize step, voice-embedding extraction) stays worker-only.
-- **worker** — Celery. Runs the heavier/blocking jobs: offline transcription + diarization for uploads, live per-utterance diarization and voice-identity matching, knowledge-base/meeting-search embedding, report generation, and voice enrollment — so none of it blocks the API process or the live WebSocket loop.
+- **worker** — Celery. Runs the heavier/blocking jobs: offline transcription + diarization for uploads, live periodic-reconciliation diarization and voice-identity matching, knowledge-base/meeting-search embedding, report generation, and voice enrollment — so none of it blocks the API process or the live WebSocket loop.
 - **postgres** — structured data: users, groups, meetings, transcript segments, speakers, voice identities, action items, provider/STT credentials, per-call LLM usage ledger.
 - **qdrant** — vector search, three collections: knowledge-base document chunks, meeting-transcript chunks (search), and speaker voice embeddings (cross-meeting recognition).
 - **redis** — Celery broker/result backend, plus pub/sub for bridging worker-side events (diarization, live labels) back to the right live WebSocket connection.
@@ -103,6 +91,7 @@ corella/
   docker-compose.gpu.yml     optional NVIDIA runtime override
   .env.example
   BRANDING.md                UI visual language + component conventions
+  VERSIONING.md              three-digit version guide — when to bump what
   docs/
     AUDIO_PIPELINE.md        transcription/live-streaming/diarization deep dive
 ```
@@ -182,7 +171,7 @@ The UI follows a deliberate, documented visual language — see [`BRANDING.md`](
 
 ## Development
 
-Contributing? See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, this project's conventions (credential handling, migrations, adding a new LLM/STT provider), and what a good PR looks like here.
+Contributing? See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, this project's conventions (credential handling, migrations, adding a new LLM/STT provider), and what a good PR looks like here — and [`VERSIONING.md`](VERSIONING.md) for which digit to bump on a `main` → `release` cut.
 
 Backend:
 

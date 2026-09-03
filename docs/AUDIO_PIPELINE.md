@@ -13,10 +13,9 @@ real, hard-won iterations before it worked reliably. If you're touching
 - [Component map](#component-map)
 - [Live ingestion: VAD, rolling preview, STT](#live-ingestion-vad-rolling-preview-stt)
 - [Speaker diarization](#speaker-diarization)
-  - [Two separate mechanisms](#two-separate-mechanisms)
-  - [Within-utterance splitting](#within-utterance-splitting)
-  - [Cross-utterance online clustering (the hard part)](#cross-utterance-online-clustering-the-hard-part)
-  - [Full decision flow](#full-decision-flow)
+  - [Two mechanisms: authoritative reconciliation + a fast recognition hint](#two-mechanisms-authoritative-reconciliation--a-fast-recognition-hint)
+  - [The persistent voice registry](#the-persistent-voice-registry)
+  - [The fast recognition hint](#the-fast-recognition-hint)
 - [The debugging history](#the-debugging-history)
 - [Debugging tools](#debugging-tools)
   - [Content-addressed caching for `--chunker deepgram`](#content-addressed-caching-for---chunker-deepgram)
@@ -44,8 +43,9 @@ flowchart TB
     end
 
     subgraph Worker["worker — Celery (app/workers/tasks.py)"]
-        DU["diarize_utterance\n(same-room diarization)"]
-        Redis[("Redis\ncluster + pending state\nper meeting+channel")]
+        DU["reconcile_diarization\n(periodic, per channel,\nthe sole authority)"]
+        QLH["quick_label_hint\n(instant, per segment,\nread-only)"]
+        Redis[("Redis\nvoice registry + pending\nper meeting+channel")]
     end
 
     subgraph Upload["Upload path — process_meeting_audio"]
@@ -68,11 +68,14 @@ flowchart TB
     DG -.->|"interim result"| FE
     Commit -->|"partial_transcript / transcript WS events"| FE
     Commit --> Postgres
-    Commit -->|"send_task corella.diarize_utterance"| DU
+    Commit -->|"send_task, per segment"| QLH
+    QLH -.->|"peek only,\nno lock"| Redis
+    QLH -->|"push_event, if a match"| PubSub
+    WS -.->|"_reconcile_diarization_loop\nevery ~20s per channel"| DU
     DU <--> Redis
     DU --> Postgres
     DU -->|"push_event"| PubSub
-    PubSub -->|"diarization_update"| FE
+    PubSub -->|"diarization_update /\nspeaker_hint"| FE
 
     Norm --> WFull --> DFull --> Align --> Postgres
 ```
@@ -95,13 +98,14 @@ meeting was captured.
 | Local whisper (both live and uploads) | `app/services/asr/whisper.py` |
 | STT/LLM provider resolution | `app/services/asr/resolve.py`, `app/services/llm/resolve.py` |
 | Speaker-embedding extraction | `app/services/diarization/embedding.py` |
-| Full pyannote pipeline (within-utterance splits, offline diarization) | `app/services/diarization/pyannote.py` |
-| Online clustering (cross-utterance identity) | `app/services/diarization/cluster.py` |
-| Worker task orchestration (the decision logic) | `app/workers/tasks.py` — see `diarize_utterance` |
+| Full pyannote pipeline (periodic reconciliation, offline diarization) | `app/services/diarization/pyannote.py` |
+| Persistent voice registry (per meeting+channel) | `app/services/diarization/cluster.py` |
+| Periodic reconciliation dispatch (live) | `app/ws/live_session.py` — `_reconcile_diarization_loop`, `_dispatch_reconciliation` |
+| Worker task orchestration (the decision logic) | `app/workers/tasks.py` — see `reconcile_diarization` (authoritative) and `quick_label_hint` (fast, read-only) |
 | Worker → live WS event bridge | `app/services/diarization/events.py`, `live_session.py:_poll_diarization_updates` |
 | Cross-meeting/group voice identity | `app/models/voice_identity.py`, `app/services/embeddings/qdrant_store.py` (`speaker_embeddings` collection) |
 | Audio mixing/windowing/WAV I/O | `app/services/audio/mixing.py` |
-| Debugging tools (this session's additions) | `server/scripts/diarize_debug.py`, `server/scripts/verify_production_diarize.py` |
+| Debugging tools | `server/scripts/verify_reconcile_diarization.py` (current); `server/scripts/diarize_debug.py`/`verify_production_diarize.py` (Phase V-era, per-utterance design — see [Debugging tools](#debugging-tools)) |
 
 ## Live ingestion: VAD, rolling preview, STT
 
@@ -127,161 +131,172 @@ of two paths:
   to local VAD/whisper for the rest of the session — the healthy channel is
   untouched.
 
-Either way, a committed segment triggers the same downstream step:
-same-room diarization dispatch (`me`/`them` only — `Channel.UNKNOWN` never
-reaches this WS path at all).
+Same-room diarization is no longer triggered per committed segment — see
+[Speaker diarization](#speaker-diarization) below for the periodic
+reconciliation loop that replaced that dispatch.
 
 ## Speaker diarization
 
-### Two separate mechanisms
+### Two mechanisms: authoritative reconciliation + a fast recognition hint
 
-Corella never runs pyannote's full `SpeakerDiarization` pipeline on live
-audio in real time — it's a whole-file batch API with no notion of "here's
-one more utterance, update your answer," and it's unreliable on anything
-under ~10 seconds of audio (verified empirically: an isolated ~4-6s clip
-either missed a real speaker change entirely or produced garbage
-overlapping turns). Instead there are two distinct mechanisms, used for two
-different questions:
+Corella never runs pyannote's full `SpeakerDiarization` pipeline on a single
+short utterance in real time — it's unreliable on anything under ~10
+seconds of audio (verified empirically: an isolated ~4-6s clip either
+missed a real speaker change entirely or produced garbage overlapping
+turns), and a short/noisy embedding from one Deepgram-chopped utterance is
+*structurally* unable to safely decide "is this a new speaker" on its own
+(see [The debugging history](#the-debugging-history) for the per-utterance
+design this replaced, and why it kept breaking).
 
-1. **Within-utterance splitting** — "did the speaker change *inside* this
-   one committed utterance?" (e.g. someone interrupts mid-sentence). Uses
-   the real pyannote pipeline, but only on a wider windowed slice, and only
-   when there's reason to think it's needed.
-2. **Cross-utterance online clustering** — "which already-known speaker is
-   *this whole utterance*, or is it someone new?" A cheap speaker-embedding
-   model (`pyannote/wespeaker-voxceleb-resnet34-LM`, not gated) plus
-   cosine-similarity clustering, updated incrementally per meeting+channel.
-   **This is the mechanism that had the hard bugs** — see
-   [The debugging history](#the-debugging-history).
+Instead there's a **periodic full diarization pass over a rolling window**
+of already-received per-channel audio, reconciled against a persistent
+per-channel voice registry, rather than ever clustering one utterance's own
+embedding in isolation — adopted from a reference macOS app's own proven
+live-diarization design (workflow inspiration only — this codebase, never
+named). This pass is the sole authority: the only thing that ever creates a
+new speaker, promotes a provisional one, or writes a label to Postgres.
 
-### Within-utterance splitting
+- **Live dispatch** (`app/ws/live_session.py:_reconcile_diarization_loop`):
+  every ~2s, checks each active channel (`me`/`them`); once a channel has
+  accumulated at least `diarization_reconcile_min_window_ms` (12000ms) of
+  audio and its own per-channel interval
+  (`diarization_reconcile_interval_ms`, 20000ms) has elapsed, slices the
+  last `diarization_reconcile_window_ms` (25000ms) of that channel's audio
+  (`extract_channel_window`, reused as-is from the old design) and
+  dispatches `corella.reconcile_diarization`. One more pass per channel is
+  dispatched in `_drain_and_finalize`, after the loop itself is cancelled,
+  to catch any trailing audio before the meeting finalizes.
+- **The worker task** (`app/workers/tasks.py:reconcile_diarization`) runs
+  the real `diarize()` pipeline once over the whole window, groups the
+  resulting turns by local pyannote label, extracts one mean embedding per
+  local label, and reconciles each against the channel's persistent
+  registry — matching an existing entry or registering a new one,
+  **claim-once per pass** (the busiest local voice claims first, so two
+  real speakers active in the same window can never both match the same
+  stored voice). Segments already committed in that window are relabeled
+  by turn overlap — segments are never split or deleted by this mechanism
+  (a real, accepted scope reduction from the old per-utterance design's
+  mid-utterance splitting — see the note at the end of this section).
 
-Before even considering a split, two conditions skip the expensive full
-pipeline entirely and send the utterance straight to clustering as one
-whole: the whole-utterance embedding already confidently matches an
-existing cluster (`≥ diarization_skip_confidence`, 0.65 — inside the real
-measured same-speaker range of 0.67-0.75, with margin), or the accumulated
-context window is under 9 seconds (pyannote's own reliability floor,
-verified empirically). Otherwise `diarize()` runs on the windowed audio
-(`diarization_context_window_ms` = 12000ms of already-received same-channel
-audio, ending at the utterance's own end), turns are clipped to the
-utterance's own span, adjacent same-label turns are merged, and — only if
-**2 or more** distinct local speakers remain after merging — the utterance
-is split into multiple `TranscriptSegment` rows, each independently
-embedded and clustered.
+This pass alone was still not enough for a genuinely *live* feel — see
+[The fast recognition hint](#the-fast-recognition-hint) below for the
+second mechanism added in response to a real user report.
 
-### Cross-utterance online clustering (the hard part)
+### The persistent voice registry
 
-This is a per-meeting, per-channel online clustering process. State lives
-in Redis (`diar:{meeting_id}:{channel}`), guarded by a lock
-(`diar-lock:{meeting_id}:{channel}`) so two utterances dispatched close
-together can't both decide "new speaker" for what's actually the same one.
-
-Core data structure (`app/services/diarization/cluster.py`):
+Still a per-meeting, per-channel structure in Redis
+(`diar:{meeting_id}:{channel}`, guarded by `diar-lock:{meeting_id}:{channel}`
+so two overlapping reconciliation passes can't double-claim it), but its
+entries now carry more state than a single clustering decision needs:
 
 ```python
 @dataclass
 class Cluster:
-    centroid: list[float]  # running average embedding
-    count: int              # how many utterances fed this cluster
-    speaker_id: str          # Speaker.id
+    centroid: list[float]   # running average embedding
+    count: int               # how many reconciliation passes fed this cluster
+    weight_ms: int            # real, non-double-counted assigned speech time
+    speaker_id: str | None     # None = provisional, not yet a real "Speaker N"/"Them N"
 ```
 
-`best_match(clusters, embedding)` returns the closest cluster and its
-cosine similarity (or `(None, -1.0)` if there are no clusters yet).
-`SIMILARITY_THRESHOLD = 0.55` is the "is this the same person at all" bar —
-calibrated against real recorded conversation (not synthetic TTS, which
-this specific embedding model doesn't discriminate at all): same-speaker
-similarity clustered at 0.67–0.75, different-speaker at 0.01–0.14, a wide
-clean gap this threshold sits comfortably inside.
+`best_match(clusters, embedding, exclude=...)` returns the closest
+non-excluded cluster and its cosine similarity — the `exclude` set is what
+implements claim-once matching within one pass. `SIMILARITY_THRESHOLD =
+0.55` is unchanged from the old design and still the "is this the same
+person at all" bar: same-speaker similarity clustered at 0.67–0.75 on real
+recorded conversation, different-speaker at 0.01–0.14.
 
-**The problem this whole system exists to solve**: a *short* utterance's
-embedding is genuinely noisy. A real same-speaker 0.5s clip scored 0.53
-against its own true speaker — just under threshold, a real near-miss.
-Deepgram's own endpointing (tuned for natural-feeling transcription
-chunking, not speaker-identity signal strength) produces many more, shorter
-utterances than local VAD did — so this noise floor gets hit constantly in
-real usage, and every miss used to permanently mint a new spurious
-"Speaker N".
+**`speaker_id is None` — a provisional entry — is the direct fix for the
+regression this whole rebuild was for.** A registry entry doesn't get to
+surface as a real "Speaker N"/"Them N" label purely because it clustered as
+distinct from anything seen so far; it needs to hold real assigned speech
+first (`meets_guest_floor`: `diarization_guest_min_ms`, 2000ms, **and**
+`diarization_guest_min_share`, 8% of the channel's total tracked speech,
+whichever is stricter — this app's version of the reference design's "guest
+folding"; recalibrated down from the reference app's own starting 5000ms/10%
+after a real production case — see
+[The debugging history](#the-debugging-history)'s Phase W2 entry). Two
+exemptions bypass the floor entirely: the very first voice
+ever registered on a channel (nothing to compare it against yet), and any
+voice recognized against the durable cross-meeting library (Phase O) — a
+resolved identity is real information regardless of how little it's said
+so far. A segment matched to a still-provisional entry is held in
+`PendingSegment` (Redis, same list shape the old design's `PendingEmbedding`
+used) until that entry either crosses the floor — every pending segment
+pointing at it gets labeled at once — or the meeting ends still folded, in
+which case it stays unlabeled (`MeetingDetail.tsx` already degrades that
+gracefully, same as every other "no signal" case this app has always had).
 
-### Full decision flow
+**Why weight_ms is safe to compare against the floor despite overlapping
+windows**: it's only ever incremented by a segment's own duration the first
+time that segment is newly resolved (matched to a turn and either labeled
+directly or added to `pending`) — never by raw window/turn duration, which
+would double-count the same real speech across two passes whose 45-second
+windows overlap by design. `count`/centroid updates, by contrast, happen on
+*every* re-observation regardless of overlap — harmless, even desirable,
+for centroid quality.
 
-```mermaid
-flowchart TD
-    Start(["New committed utterance,\nchannel me/them"]) --> Embed["embed_utterance(utterance_pcm)\n→ whole_embedding"]
-    Embed --> Peek["peek_clusters (lock-free)\nbest_match → best_sim"]
-    Peek --> SkipCheck{"best_sim ≥ 0.65\nOR window < 9s?"}
-    SkipCheck -->|yes| SimpleAssign
-    SkipCheck -->|no| RunDiarize["diarize() on windowed audio\n(pyannote, real pipeline)"]
-    RunDiarize --> SplitCheck{"≥2 distinct\nspeakers found?"}
-    SplitCheck -->|yes| SplitPath["Split into N segments,\neach independently clustered\n(see below, same cluster logic\nper turn)"]
-    SplitCheck -->|no| SimpleAssign
+Segments a turn doesn't cover at all this pass are left alone, not guessed
+at — the next pass's window will very likely include a turn for them as
+more audio streams in, so there's no separate nearest-turn fallback the way
+a one-shot design would need.
 
-    SimpleAssign["Acquire per-channel lock\n(locked_state → clusters, pending)"]
-    SimpleAssign --> Clipped{"is_clipped(utterance)\nOR best_sim < 0.55\nwith an existing cluster?"}
-    Clipped -->|no, needs_second_look=false| DryRun
-    Clipped -->|yes, needs_second_look=true| Corrob["trailing_contiguous_ms:\nwiden backward through\ncontinuous real speech,\nstop at first real pause\n(≥500ms silence)"]
-    Corrob --> CorrobUsable{"corroboration_pcm longer,\n≥1000ms real speech,\nnot clipped?"}
-    CorrobUsable -->|yes| FallbackEmbed["fallback_embedding =\nembed_utterance(corroboration_pcm)"]
-    CorrobUsable -->|no, and clipped| Insufficient["insufficient_signal = true"]
-    CorrobUsable -->|no, thin but clean| DryRun
-    FallbackEmbed --> DryRun
+**Scope reduction, stated plainly**: the old per-utterance design could
+split one committed `TranscriptSegment` into several when a genuine
+speaker-change happened *inside* it (Phase F-2). This redesign doesn't —
+segments keep their VAD/Deepgram-determined boundaries and only ever get
+relabeled by overlap, never split. Deepgram's own aggressive endpointing
+(the very thing that made per-utterance clustering unreliable — see
+[The debugging history](#the-debugging-history)) already keeps individual
+committed segments short in practice, so a single segment spanning a real
+speaker change is rare with this STT path; if it turns out to matter,
+segment splitting on ambiguous multi-turn overlap is a natural, contained
+follow-up (the turns are already computed each pass — nothing new to
+extract, just a decision to act on).
 
-    DryRun["Dry-run best_match against\nwhole_embedding, then\nfallback_embedding if needed"]
-    DryRun --> WouldMatch{"Would either\nconfidently match\n(≥0.55) an existing\ncluster?"}
-    WouldMatch -->|yes| ClusterAssign["_cluster_and_assign:\nupdate matched cluster's\ncentroid, use existing Speaker"]
-    WouldMatch -->|no, and clusters exist| Defer["DEFER:\nPendingEmbedding queued,\nsegment left unlabeled\n(no new cluster minted yet)"]
-    WouldMatch -->|no clusters exist at all| NewSpeaker["_create_speaker_cluster:\ncheck durable VoiceIdentity,\nelse mint 'Speaker N'/'Them N'"]
+### The fast recognition hint
 
-    Insufficient --> LastActive["Default to _last_active_speaker\non this channel, if any —\nelse leave unresolved"]
+The periodic pass above is the only mechanism that decides anything new,
+but it's a real `diarize()` call — measured at 6-33s of real worker CPU
+time in production — on top of however much of its own
+`diarization_reconcile_interval_ms` had already elapsed. A real user report
+("it's not live at all, it only shows once I click Stop") traced directly
+to this: on a short call, the *first* label often simply hadn't computed
+yet by the time the call ended.
 
-    ClusterAssign --> BackfillOld["_backfill_unresolved_segments:\nif this created a NEW cluster,\nretry any earlier unlabeled\nsegment against it\n(lenient 0.45 bar)"]
-    NewSpeaker --> ResolvePending
-    ClusterAssign --> ResolvePending
-    Defer --> ResolvePending
-    LastActive --> ResolvePending
-    BackfillOld --> ResolvePending
+`corella.quick_label_hint` (`app/workers/tasks.py`), dispatched from
+`app/ws/live_session.py:_commit_segment` the instant a segment commits, is
+a fast, read-only shortcut for the common case — "the same person is still
+talking":
 
-    ResolvePending["_resolve_pending (every utterance,\nnot just the one that just deferred):\n1) retry every pending embedding\nagainst current clusters (0.45 bar)\n2) promote a mutually-agreeing PAIR\nof pending embeddings into a\nbrand-new cluster (0.55 bar)"]
-    ResolvePending --> Gate{"≥2 clusters on this\nchannel, OR a resolved\ndurable identity?"}
-    Gate -->|no| End(["Commit; no WS event yet\n(single-speaker channel stays\nplain 'Me'/'Them')"])
-    Gate -->|yes, first time| Snapshot["Full snapshot of every\nlabeled segment on this channel"]
-    Gate -->|yes, already open| Incremental["Just this round's changes"]
-    Snapshot --> Push["push_event → Redis pub/sub\n→ live WS diarization_update"]
-    Incremental --> Push
-```
+1. Checks that the "2+ confirmed speakers" gate
+   (`diar_events.has_reported_anything`) has already opened for this
+   channel — the same gate `reconcile_diarization`'s own WS push respects,
+   so a genuinely solo channel never gets a premature "Speaker 1" from
+   this path either (verified live that skipping this check lets exactly
+   that happen — see [The debugging history](#the-debugging-history)'s
+   Phase W3 entry).
+2. Extracts one cheap embedding (`embed_utterance`, not a full `diarize()`
+   call) from just that segment's own audio.
+3. Checks it against the channel's current registry with **no lock**
+   (`peek_clusters` — a stale-by-one-pass read costs nothing worse than a
+   slightly-delayed hint, never a wrong permanent write, since this path
+   writes nothing).
+4. If it confidently matches (`SIMILARITY_THRESHOLD`) a cluster that's
+   already **promoted** (a real, confirmed `Speaker` row from an earlier
+   reconciliation pass), pushes an advisory `speaker_hint` event — same
+   wire shape as `diarization_update`, reusing the exact same Redis
+   list/pub-sub bridge and the exact same frontend handling (`live.ts`
+   dispatches both to `onDiarizationUpdate`). If it doesn't confidently
+   match an already-promoted cluster — a genuinely new voice, or one still
+   provisional — it does nothing at all, silently deferring to the real
+   pass. It can never create a speaker, promote one, or touch Postgres.
 
-Key design decisions worth calling out explicitly:
-
-- **Embeddings are always extracted before the lock is acquired.** A cold
-  model load can take several seconds; doing it while holding
-  `locked_state`'s lock once outlasted the lock's own 10s timeout, auto-
-  expiring it mid-hold and raising `redis.exceptions.LockNotOwnedError` on
-  release. Only the fast read-decide-write step happens inside the lock.
-- **`trailing_contiguous_ms` widens through continuous speech but stops at
-  the first real pause** — deliberately, not a fixed duration. A naive
-  fixed-duration widen was tried first and rejected: it blended a
-  *different* speaker's audio across a real pause into one embedding,
-  which then confidently (0.775 similarity) matched the wrong cluster.
-  Capping at the previous committed segment's own boundary was tried next
-  and also rejected: it collapses to zero extra context whenever
-  utterances are dispatched back-to-back with no gap — the common case
-  this mechanism exists for in the first place.
-- **A deferred (`PendingEmbedding`) utterance can never single-handedly
-  create a new cluster.** Only two pending embeddings *mutually agreeing*
-  with each other can. Deferring without this was tried and found
-  structurally broken: it can never form a second cluster once a first one
-  exists (see [the debugging history](#the-debugging-history)) — a real
-  2-speaker file collapsed to 1 cluster, silently erasing the second
-  speaker.
-- **Never a blind "default to last speaker" guess** for a low-confidence
-  match. Tried once, rejected: it misattributed a genuinely different
-  speaker's utterance to the wrong existing one — a **false merge**, judged
-  worse than the over-segmentation it was meant to fix, because it
-  permanently blends two real people's words together. `insufficient_signal`
-  is the one narrow exception (clipped audio that even corroboration
-  couldn't rescue), and even there it only ever *reuses* an already-real
-  speaker, never invents one.
+This doesn't help the very first moments of a brand-new call (nothing's
+been confirmed yet for a hint to recognize), but for every later utterance
+by a voice the periodic pass has already confirmed, labeling goes from
+"wait up to `diarization_reconcile_interval_ms` plus real compute time" to
+"near-instant" — the majority of any real conversation once it's a few
+turns in.
 
 ## The debugging history
 
@@ -344,54 +359,165 @@ you're tempted to simplify this system, read what already failed first.
    Both real 2-speaker files produced exactly 2 Speaker rows; both real
    1-speaker files produced exactly 1 — matching ground truth.
 
-One issue was found and deliberately **not** fixed this round — the
-existing corroboration mechanism can still blend two different real
-speakers when their natural pause is under `SILENCE_TO_FLUSH_MS` (500ms).
-See [Known open issues](#known-open-issues).
+One issue was found and deliberately **not** fixed in round 2 — the
+existing corroboration mechanism could still blend two different real
+speakers when their natural pause was under `SILENCE_TO_FLUSH_MS` (500ms).
+
+6. **Phase W (this rebuild): replaced the per-utterance design entirely.**
+   Rounds 1-2 above kept the same core shape — cluster one utterance's own
+   embedding, with increasingly careful heuristics bolted on to catch the
+   cases where that embedding was too noisy to trust — and each round found
+   a new case the previous one missed. Investigated how a reference macOS
+   meeting-copilot app (workflow inspiration only) solved the identical
+   problem: it never clusters one short utterance in isolation at all —
+   instead it periodically re-runs full diarization over a rolling window
+   of already-received audio and reconciles the result against a persistent
+   voice registry, with a "guest folding" floor (real assigned talk-time,
+   not just a clustering decision) before a freshly-seen voice earns a real
+   label. Adopted that architecture directly (see
+   [Speaker diarization](#speaker-diarization) above) — this is structurally
+   immune to the short/noisy-embedding failure mode that rounds 1-2 were
+   working around, rather than one more heuristic on top of it. The old
+   per-utterance mechanism (`diarize_utterance`, `PendingEmbedding`,
+   `try_promote_mutual_pair`, `trailing_contiguous_ms`, `is_clipped`'s
+   diarization-specific caller, and every setting under
+   `diarization_skip_confidence`/`diarization_corroboration_*`/
+   `diarization_backfill_similarity_threshold`) was removed outright, not
+   kept alongside the new one. Verified against the real production task
+   function directly (`scripts/verify_reconcile_diarization.py`, same
+   in-process/real-Postgres-Redis-Qdrant approach `verify_production_
+   diarize.py` used for round 2): a real 60-second slice of real 2-speaker
+   ground-truth audio, chopped into many short (~700ms) consecutive
+   segments — deliberately simulating the aggressive-Deepgram-endpointing
+   shape that produced the original "8 speakers for 2 real people" report —
+   correctly produced exactly 2 real Speaker rows, not 8+. Also confirmed
+   the guest-floor mechanism itself on a shorter (6s) window: a genuine
+   second voice with only 2920ms of assigned speech correctly stayed
+   provisional (held in `PendingSegment`, not labeled) — below the 5000ms
+   absolute floor even though its *relative* share (49%) already cleared
+   10%, exactly the intended "don't mint a label from a few seconds of
+   evidence" behavior, not a bug.
+
+This closed one issue from round 2 as a side effect (there's no longer a
+`trailing_contiguous_ms` corroboration step for it to affect) and traded it
+for a different, explicitly accepted one — see
+[Known open issues](#known-open-issues).
+
+7. **Phase W2: recalibrated the guest floor down after a real
+   permanently-stuck case.** A user reported a live-recorded meeting still
+   showing segments stuck at "Identifying…" in the post-call view. Traced
+   directly against the real deployed data (not reproduced synthetically):
+   a genuine second voice on a real ~1-minute call — 3430ms of real
+   assigned speech across 2 real committed segments, not one noisy
+   fragment — cleared neither the original 5000ms absolute floor nor the
+   original 10% relative share (it measured 9.7%). Since no reconciliation
+   pass ever revisits a meeting once its live session has ended, this
+   wasn't "still catching up" — it was permanent; the segments could never
+   have resolved no matter how long the frontend waited. Recalibrated
+   `diarization_guest_min_ms`/`diarization_guest_min_share` down to
+   2000ms/8% based on this one real measurement (still a single data
+   point, not exhaustively tuned — flagged as such in
+   [Known open issues](#known-open-issues)). Separately, confirmed the
+   embedding-crash floor (`live_min_utterance_ms`, 300ms, Phase U's fix)
+   still comfortably protects against a single spurious fragment at the
+   new, lower guest floor — the two are independent safeguards, and
+   lowering one didn't weaken the other.
+
+   The frontend side of the same report also needed two real fixes, in
+   `MeetingDetail.tsx`: (1) the post-call catch-up poll re-ran its full
+   grace window on *every page load* regardless of how long ago the
+   meeting had actually ended, replaying a spinner that could only ever
+   end the same way for an old meeting — fixed by gating the poll on
+   whether the meeting ended recently enough that the backend could
+   plausibly still be working on it; an old meeting now shows its final
+   state immediately. (2) An unresolved segment's fallback label was
+   `"Me"`/`"Them"` — a confident, specific, and potentially wrong guess
+   (this project already fixed the identical mistake once, for the
+   still-catching-up case only; turned out the same risk existed in the
+   give-up fallback too) — changed to the honest `"Unknown"`.
+
+8. **Phase W3: added the fast recognition hint after "it's not live at
+   all" feedback.** Correctness had been fully restored by Phase W (right
+   speaker counts) and W2 (fewer permanently-stuck segments), but a direct
+   user comparison against the reference macOS app's own live labeling
+   made a real, separate gap obvious: periodic reconciliation alone, even
+   working perfectly, still means every label waits on a real `diarize()`
+   call — measured at 6-33s of real worker CPU time in production, on top
+   of its own interval — so a short call could end before its first label
+   ever computed. Investigated why the reference app doesn't have this
+   problem: it turns out it uses the *identical* periodic-window
+   architecture (its own numbers — 60s window, 30s interval, 12s minimum —
+   are the same order of magnitude Corella's are), not a per-utterance-
+   instant one; the real difference is that its full pass runs on
+   CoreML/ANE hardware in low single-digit seconds, not CPU Python. Not a
+   gap closeable by re-architecting — added `corella.quick_label_hint`
+   instead (see [The fast recognition hint](#the-fast-recognition-hint)): a
+   fast, read-only recognition check dispatched per segment, which can
+   only ever repeat what an earlier reconciliation pass already decided,
+   sooner — it never creates a speaker or writes to Postgres, so none of
+   Phase W/W2's correctness guarantees are at risk. Also shrank
+   `diarization_reconcile_window_ms`/`_interval_ms` (45000/25000 →
+   25000/20000) based on the same production timing data, so even the
+   *first* label of a call (which the hint can't help, since nothing's
+   confirmed yet to recognize against) lands faster too.
+
+   Verified live against the real deployed stack, not just reasoned about:
+   streamed real 2-speaker audio for 100s+ and watched the raw WS events.
+   One hint fired for real and worked exactly as intended — a segment
+   labeled 2.3s after it committed, versus the ~43s it would have taken
+   waiting for the periodic pass alone. But the same run caught a real bug
+   before it could ship further: that one hint fired *before* the "2+
+   confirmed speakers" gate (`has_reported_anything`) had ever opened for
+   that channel — `quick_label_hint` was checking only "does a real
+   Speaker row exist" (true the moment the very first voice on a channel
+   auto-promotes, long before a second one is confirmed), not the separate
+   gate that exists specifically so a genuinely solo channel never flashes
+   a needless "Speaker 1". Fixed by making the hint path check the same
+   gate the authoritative push already does — from then on every
+   subsequent utterance from either confirmed speaker is fair game, but
+   nothing reveals ahead of what the real mechanism itself would have
+   allowed. Also observed directly: most hints in that same run correctly
+   found nothing to say (silently deferring, as designed) for genuinely
+   short utterances ("Sí.", "Podría ser") — the single embedding a hint
+   checks is subject to the identical short-utterance noise Phase U/V/W
+   already found and built the authoritative pass's extra care around;
+   abstaining there and letting the real pass (with its actual acoustic
+   context) handle it is correct, not a shortfall.
 
 ## Debugging tools
 
-Two scripts, both under `server/scripts/`, built specifically so
-diarization behavior can be iterated on with real audio without a Docker
-rebuild loop:
+- **`verify_reconcile_diarization.py`** (current) — the real end-to-end
+  check for the periodic-reconciliation design: creates a real throwaway
+  User/Meeting, tiles a real WAV file into many short, gap-free
+  `TranscriptSegment` rows (simulating aggressive Deepgram endpointing —
+  the exact shape that caused the original regression), then calls the
+  actual `corella.reconcile_diarization` Celery task function directly
+  (in-process, no broker round-trip needed) against real isolated
+  Postgres/Redis/Qdrant with a real, continuous slice of the source WAV as
+  the window — exactly what `_reconcile_diarization_loop` would have
+  sliced from `session.recordings` in production. Prints every segment's
+  ground-truth label (if supplied via `--speaker-a`/`--speaker-b`) next to
+  what the real code assigned, plus the final Redis registry state. Run it
+  inside a throwaway container from the already-built `corella-worker:latest`
+  image with local `app`/`scripts` bind-mounted read-only (so code edits
+  are picked up on `docker restart`, no image rebuild needed) — see the
+  script's own docstring for the exact isolated-infra setup (throwaway
+  Postgres/Redis/Qdrant containers, real `HF_TOKEN`).
 
-- **`diarize_debug.py`** — a standalone, no-DB/no-Redis replay of the
-  `diarize_utterance` decision flow against a real WAV file. Clusters are
-  tracked in a plain in-memory list across utterances — the same clustering
-  math (`best_match`/`update_centroid`) real production code uses, just not
-  the surrounding persistence plumbing. Two chunking modes:
-  `--chunker vad` (local webrtcvad, matching what a local-whisper session
-  produces) or `--chunker deepgram` (a real, cached Deepgram prerecorded
-  call — reproduces actual production endpointing). Prints every
-  utterance's decision (skip-confidence, second-look trigger, corroboration
-  outcome, defer/promote/backfill) plus a final summary of how many
-  speakers were created and why. Run it directly:
-
-  ```bash
-  cd server
-  .venv/bin/python scripts/diarize_debug.py ../audio-samples/some-call.wav --chunker deepgram
-  ```
-
-  Its own module docstring tracks current status — which fixes are shipped,
-  which hypotheses were tried and rejected (with the real numbers that
-  rejected them), and what's still open.
-
-- **`verify_production_diarize.py`** — the real end-to-end check: creates a
-  real throwaway User/Meeting/TranscriptSegment set and calls the actual
-  `diarize_utterance` Celery task function directly (in-process, no broker
-  round-trip needed) against real isolated Postgres/Redis/Qdrant. Use this
-  before trusting any change the harness alone can't fully validate (this
-  fix touches Redis-persisted state — `PendingEmbedding`, the extended
-  `locked_state` shape — that the DB/Redis-free harness deliberately can't
-  exercise). See the script's own docstring for the isolated-infra setup
-  (throwaway Postgres/Redis/Qdrant containers + a throwaway container from
-  the already-built `corella-worker:latest` image with local code
-  bind-mounted read-only, so code edits are picked up on `docker restart`
-  without a slow image rebuild).
+- **`diarize_debug.py`** / **`verify_production_diarize.py`** (Phase V-era,
+  legacy) — built for the old per-utterance design (`diarize_utterance`,
+  `PendingEmbedding`) this rebuild removed; their module docstrings still
+  describe that design's decision flow accurately as history, but they no
+  longer exercise any code path that exists in this codebase. Left in place
+  as a record of that investigation rather than deleted outright — don't
+  use them to validate current behavior.
 
 ### Content-addressed caching for `--chunker deepgram`
 
-Debugging real over-segmentation needed *real* Deepgram chunking — a
+Applied to the legacy `diarize_debug.py` harness (see above) — kept here as
+a documented technique in case a future debugging tool needs the same
+approach, not as instructions for a tool current code still uses. Debugging
+real over-segmentation needed *real* Deepgram chunking — a
 synthetic or local-VAD approximation wouldn't reproduce the actual
 utterance boundaries production traffic gets, which is exactly what this
 whole investigation turned on. But a real fix-hypothesis session runs the
@@ -430,33 +556,49 @@ in that file for the full empirical justification.
 
 | Setting | Value | What it governs |
 |---|---|---|
-| `SIMILARITY_THRESHOLD` (`cluster.py`) | 0.55 | "Is this the same person at all" — the core clustering bar. |
-| `diarization_skip_confidence` | 0.65 | Above this, skip the expensive within-utterance `diarize()` pass entirely. |
-| `diarization_context_window_ms` | 12000 | How much already-received audio backs the within-utterance split pass. |
-| `diarization_corroboration_window_ms` | 3000 | Upper cap on how far `trailing_contiguous_ms` is allowed to widen. |
-| `diarization_corroboration_min_speech_ms` | 1000 | How much real speech a corroboration window needs before it's trusted. |
-| `diarization_backfill_similarity_threshold` | 0.45 | Lenient bar for retroactively resolving an unlabeled/pending segment. |
-| `SILENCE_TO_FLUSH_MS` (`vad.py`) | 500 | Local VAD's own utterance-boundary pause threshold; also what `trailing_contiguous_ms` treats as "a real pause" for corroboration purposes. |
+| `SIMILARITY_THRESHOLD` (`cluster.py`) | 0.55 | "Is this the same person at all" — the core registry-matching bar. |
+| `diarization_reconcile_window_ms` | 25000 | How much already-received per-channel audio one reconciliation pass looks at, trailing backward from "now". |
+| `diarization_reconcile_interval_ms` | 20000 | How often a reconciliation pass runs per active channel — this is CPU-bound Python, not ANE-accelerated like the reference app's. |
+| `diarization_reconcile_min_window_ms` | 12000 | Below this much accumulated per-channel audio, a pass doesn't run at all yet (diarize()'s own reliability floor). |
+| `diarization_guest_min_ms` | 2000 | Absolute floor on real assigned speech before a provisional registry entry earns a real "Speaker N"/"Them N" label. |
+| `diarization_guest_min_share` | 0.08 | Floor relative to the channel's total tracked speech so far, whichever is stricter than the absolute floor above. |
+| `SILENCE_TO_FLUSH_MS` (`vad.py`) | 500 | Local VAD's own utterance-boundary pause threshold — unrelated to diarization now (no corroboration step reads it). |
 | `live_max_utterance_seconds` | 12 | Safety cap forcing a flush on continuous pause-free speech (local-VAD path only). |
+
+All four `diarization_reconcile_*`/`diarization_guest_*` values are
+starting points, not settled — see [Known open issues](#known-open-issues).
 
 ## Known open issues
 
-- **Cross-speaker corroboration blending on short pauses.** The existing
-  corroboration mechanism (`trailing_contiguous_ms`) widens through
-  "continuous" speech and stops at the first gap ≥ `SILENCE_TO_FLUSH_MS`
-  (500ms). Deepgram's own utterance gap between two *different* real
-  speakers can be shorter than that in fast back-and-forth dialogue — when
-  it is, corroboration widens straight across the boundary and can blend
-  the wrong speaker's audio into the embedding. Reproduced on real
-  ground-truth audio: a genuine speaker-B utterance ("Sí,") corroboration-
-  matched into speaker A's cluster at 0.775. **Does not affect final
-  speaker counts** (verified: both real 2-speaker test files still produce
-  exactly 2 real Speaker rows) but can still mislabel an individual
-  utterance in this scenario. A tighter global silence-gap threshold was
-  tried and made things *worse* overall (broke other genuine same-speaker
-  corroboration rescues that also happen to have short preceding pauses) —
-  a real fix needs something smarter than one constant. Not yet found;
-  tracked in `diarize_debug.py`'s own docstring.
+- **The four reconciliation/guest-floor constants are still not fully
+  calibrated**, despite one real recalibration (Phase W2, guest floor
+  5000ms/10% → 2000ms/8%, after a real permanently-stuck production case —
+  see [The debugging history](#the-debugging-history)). `diarization_
+  reconcile_window_ms`/`_interval_ms` still mirror the reference app's own
+  numbers loosely adjusted for this being a CPU-bound Python pipeline
+  instead of ANE-accelerated CoreML, not measured against Corella's own
+  sustained multi-meeting worker load. `diarization_guest_min_ms`/
+  `_min_share`'s new values are grounded in one real measurement (a
+  genuine second voice at 3430ms/9.7% that should have resolved and
+  didn't), not a large set of real multi-speaker calls the way
+  `SIMILARITY_THRESHOLD` itself was — a real second data point in either
+  direction (a genuinely spurious short fragment that now *does* cross
+  2000ms/8%, or another legitimate voice that still doesn't) would be
+  worth deliberately going looking for, not just waiting to stumble into.
+- **Real CPU cost at scale is a real, not-yet-measured tradeoff.** A single
+  60-second reconciliation pass was observed taking on the order of
+  20-30s of worker CPU time in verification — several active live meetings
+  each running a pass roughly every 25s per channel is a materially
+  heavier sustained worker load than the old per-utterance design's
+  (mostly-skipped) per-segment dispatch. `--concurrency=2` (Phase U) bounds
+  how many passes run in parallel, but hasn't been load-tested against
+  several genuinely concurrent live calls.
+- **Mid-utterance speaker-change splitting is gone** (see
+  [Speaker diarization](#speaker-diarization)'s scope-reduction note) — a
+  committed segment that genuinely spans two speakers with no pause between
+  them is labeled as whichever speaker's turn overlaps it most, not split.
+  Believed rare given Deepgram's own aggressive endpointing already keeps
+  segments short, but not specifically measured.
 - **Real-world "Them" tab-audio separability is unmeasured.** The
   same-room clustering numbers above (0.67–0.75 same-speaker, 0.01–0.14
   different-speaker) come from a clean single-microphone capture. A shared
@@ -464,8 +606,8 @@ in that file for the full empirical justification.
   mixed by whatever call software produced it) is technically just another
   mono waveform to the same embedding model, but its real separability on
   a genuine multi-party call recording has never specifically been
-  measured against ground truth.
-- **No periodic cluster consolidation.** This system prevents *new*
-  spurious clusters going forward; it doesn't retroactively merge clusters
-  that were already spuriously split earlier in an in-progress call before
-  a fix landed.
+  measured against ground truth. Unaffected by this rebuild either way.
+- **No periodic cluster consolidation.** This system prevents spurious
+  clusters going forward; it doesn't retroactively merge clusters that were
+  already spuriously split earlier in an in-progress call before a fix
+  landed (same limitation the old design had).
