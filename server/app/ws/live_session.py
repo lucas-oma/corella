@@ -337,6 +337,7 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
 
     consumer_task = asyncio.create_task(_consume_utterances(websocket, session))
     diarization_poll_task = asyncio.create_task(_poll_diarization_updates(websocket, session))
+    reconcile_task = asyncio.create_task(_reconcile_diarization_loop(session))
     debug_pump_task = asyncio.create_task(_pump_debug_events(websocket, session))
 
     await websocket.send_json({"type": "ready"})
@@ -382,8 +383,11 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
 
         # Unlike consumer_task, nothing left to push events to once the
         # connection is ending — stop them here rather than surviving into
-        # the background _drain_and_finalize task.
+        # the background _drain_and_finalize task. A final reconciliation
+        # pass for any trailing audio this loop hasn't gotten to yet is
+        # dispatched separately, inside _drain_and_finalize.
         diarization_poll_task.cancel()
+        reconcile_task.cancel()
         debug_pump_task.cancel()
 
         if stopped_gracefully:
@@ -512,23 +516,24 @@ _DIARIZATION_FALLBACK_INTERVAL_SECONDS = 5.0
 
 
 async def _poll_diarization_updates(websocket: WebSocket, session: LiveSession) -> None:
-    """Bridges the worker's per-utterance diarize_utterance task (a separate
-    Celery process) back to this live connection. Runs for the life of the
-    connection — cancelled directly in the main handler's `finally`, unlike
-    `consumer_task` which deliberately survives into the background; there's
-    nothing left to push events to once the connection is gone.
+    """Bridges the worker's periodic reconcile_diarization task (a separate
+    Celery process, dispatched by _reconcile_diarization_loop below) back to
+    this live connection. Runs for the life of the connection — cancelled
+    directly in the main handler's `finally`, unlike `consumer_task` which
+    deliberately survives into the background; there's nothing left to push
+    events to once the connection is gone.
 
     The worker pushes an explicit event to a per-meeting Redis list the
     moment it decides something changed (app/services/diarization/events.py)
-    — including the "2+ distinct speakers" gating and the one-time full
-    backfill once that gate first opens — rather than this loop trying to
-    infer what changed by diffing DB state itself; drains and forwards
-    whatever's pending, unmodified, each cycle.
+    — including the "promoted speaker" gating and the one-time full backfill
+    once that gate first opens — rather than this loop trying to infer what
+    changed by diffing DB state itself; drains and forwards whatever's
+    pending, unmodified, each cycle.
 
     Woken by Redis pub/sub the moment the worker pushes something (near-
     instant), not a fixed poll interval — a flat 1s sleep here used to add up
     to a full second of pure dead latency on top of whatever the worker's own
-    diarize_utterance call took. Pub/sub delivery isn't guaranteed (a message
+    reconciliation pass took. Pub/sub delivery isn't guaranteed (a message
     published with no subscriber connected is simply dropped), so this still
     falls back to draining on a much longer timer regardless of whether a
     ping arrived — the correctness guarantee lives in drain_events reading
@@ -562,6 +567,60 @@ async def _poll_diarization_updates(websocket: WebSocket, session: LiveSession) 
     finally:
         await pubsub.aclose()
         await client.aclose()
+
+
+_RECONCILE_CHECK_INTERVAL_SECONDS = 2.0
+
+
+def _dispatch_reconciliation(session: LiveSession, channel: Channel, settings) -> bool:
+    """Slices this channel's rolling window (already-received audio,
+    app/services/audio/mixing.py:extract_channel_window — session.recordings
+    accumulates both channels regardless of STT engine, needed for the final
+    mixdown either way) and dispatches one corella.reconcile_diarization
+    task, if there's enough accumulated audio yet
+    (diarization_reconcile_min_window_ms). Returns whether it actually
+    dispatched — the caller uses this to decide whether to reset that
+    channel's next-dispatch clock; a channel with too little audio so far
+    should be re-checked again soon, not made to wait a full interval for
+    nothing.
+    """
+    end_ms = session.elapsed_ms()
+    start_ms = max(0, end_ms - settings.diarization_reconcile_window_ms)
+    if end_ms - start_ms < settings.diarization_reconcile_min_window_ms:
+        return False
+    channel_key = _CHANNEL_KEY[channel]
+    window_pcm = extract_channel_window(session.recordings[channel_key], start_ms, end_ms)
+    if not window_pcm:
+        return False
+    session.debug("diarization_reconcile_dispatched", channel=channel_key, window_ms=end_ms - start_ms)
+    celery_app.send_task(
+        "corella.reconcile_diarization",
+        args=[str(session.meeting_id), channel.value, base64.b64encode(window_pcm).decode(), start_ms],
+    )
+    return True
+
+
+async def _reconcile_diarization_loop(session: LiveSession) -> None:
+    """Periodically dispatches app/workers/tasks.py:reconcile_diarization
+    for each active channel — the live-session half of the periodic-window
+    diarization design (see app/core/config.py's diarization_reconcile_*
+    settings docstring for why this replaced per-utterance dispatch). Runs
+    for the life of the connection, cancelled in the main handler's
+    `finally` alongside diarization_poll_task; a final catch-up pass for any
+    trailing audio this loop hasn't gotten around to yet is dispatched
+    separately in _drain_and_finalize, after the connection itself has
+    already ended.
+    """
+    settings = get_settings()
+    next_at: dict[Channel, float] = {Channel.ME: 0.0, Channel.THEM: 0.0}
+    while True:
+        await asyncio.sleep(_RECONCILE_CHECK_INTERVAL_SECONDS)
+        now = time.monotonic()
+        for channel in (Channel.ME, Channel.THEM):
+            if now < next_at[channel]:
+                continue
+            if _dispatch_reconciliation(session, channel, settings):
+                next_at[channel] = now + settings.diarization_reconcile_interval_ms / 1000
 
 
 async def _pump_debug_events(websocket: WebSocket, session: LiveSession) -> None:
@@ -660,15 +719,11 @@ async def _run_preview_decode(
 
 
 async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utterance: _Utterance) -> bool:
-    # Both Me (one mic, possibly several people around it) and Them (one
-    # shared tab/system-audio track, possibly several remote participants)
-    # get live diarization — Channel.UNKNOWN, never actually reachable from
-    # this WS path (_CHANNEL_BY_BYTE only maps 0/1 to ME/THEM), deliberately
-    # excluded rather than assuming every channel needs it.
-    needs_diarization = utterance.channel in (Channel.ME, Channel.THEM)
-    text, words = await _transcribe_pcm(
-        utterance.pcm, session.stt, word_timestamps=needs_diarization, debug=session.debug
-    )
+    # word_timestamps is no longer needed for diarization purposes (Phase
+    # W's periodic reconciliation relabels already-committed segments by
+    # turn overlap, never splits one — see reconcile_diarization's own
+    # docstring), so it's always False on the committed-segment path now.
+    text, words = await _transcribe_pcm(utterance.pcm, session.stt, word_timestamps=False, debug=session.debug)
     if not text:
         session.debug(
             "transcript_empty", channel=utterance.channel.value, duration_ms=_duration_ms(utterance.pcm)
@@ -689,15 +744,21 @@ async def _commit_segment(
     text: str,
     words: list,
 ) -> bool:
-    """Persists one committed transcript segment, dispatches same-room
-    diarization off it if applicable, and pushes the `transcript` WS event
-    — shared by both STT paths: the local VAD/whisper queue consumer
-    (_transcribe_and_send above) and a Deepgram stream's own final results
-    (_open_deepgram_stream's on_result). Neither diarization dispatch nor
-    the frontend needs to know which engine actually produced the text.
+    """Persists one committed transcript segment and pushes the `transcript`
+    WS event — shared by both STT paths: the local VAD/whisper queue
+    consumer (_transcribe_and_send above) and a Deepgram stream's own final
+    results (_open_deepgram_stream's on_result). The authoritative same-room
+    diarization decision is not made per-segment here — see
+    _reconcile_diarization_loop, which periodically reconciles a rolling
+    window of each channel's audio against the persistent voice registry
+    and is the only thing that ever creates/promotes a speaker or writes a
+    label to Postgres. A fast, read-only *hint* dispatch is, though (see
+    corella.quick_label_hint) — a real user report that live labeling felt
+    "not live at all" traced to that periodic pass's own real compute time
+    (6-33s measured in production) stacking on top of its own interval; the
+    hint recognizes an *already-confirmed* voice almost instantly, without
+    waiting for the next pass, while never itself deciding anything new.
     """
-    needs_diarization = channel in (Channel.ME, Channel.THEM)
-
     async with SessionLocal() as db:
         row = TranscriptSegment(
             meeting_id=session.meeting_id,
@@ -712,39 +773,15 @@ async def _commit_segment(
         await db.commit()
         await db.refresh(row)
 
-    if needs_diarization:
-        # Live diarization: fire-and-forget, never delays the transcript
-        # itself. See app/workers/tasks.py:diarize_utterance and
-        # _poll_diarization_updates below for how a label eventually comes
-        # back. The dispatched audio is a wider window of already-received
-        # audio on *this utterance's own channel*, not just this utterance
-        # — diarize()'s pipeline needs several seconds of context to
-        # reliably place a speaker-change point (verified empirically:
-        # unreliable well under ~10s). session.recordings already
-        # accumulates both channels regardless of which STT engine is
-        # active (needed for the final mixdown either way), so this is just
-        # reading the matching one.
-        settings = get_settings()
-        window_start_ms = max(0, end_ms - settings.diarization_context_window_ms)
+    if channel in (Channel.ME, Channel.THEM):
         channel_key = _CHANNEL_KEY[channel]
-        window_pcm = extract_channel_window(session.recordings[channel_key], window_start_ms, end_ms)
-        session.debug(
-            "diarization_dispatched",
-            segment_id=str(row.id),
-            channel=channel.value,
-            window_ms=end_ms - window_start_ms,
-        )
-        celery_app.send_task(
-            "corella.diarize_utterance",
-            args=[
-                str(session.meeting_id),
-                str(row.id),
-                base64.b64encode(window_pcm).decode(),
-                start_ms - window_start_ms,
-                end_ms - start_ms,
-                json.dumps([{"word": w.word, "start": w.start, "end": w.end} for w in words]),
-            ],
-        )
+        utterance_pcm = extract_channel_window(session.recordings[channel_key], start_ms, end_ms)
+        if utterance_pcm:
+            session.debug("quick_label_hint_dispatched", segment_id=str(row.id), channel=channel.value)
+            celery_app.send_task(
+                "corella.quick_label_hint",
+                args=[str(session.meeting_id), str(row.id), channel.value, base64.b64encode(utterance_pcm).decode()],
+            )
 
     try:
         await websocket.send_json(
@@ -879,6 +916,24 @@ async def _drain_and_finalize(session: LiveSession, consumer_task: asyncio.Task)
             "Live session %s: draining the utterance queue failed", session.meeting_id
         )
     consumer_task.cancel()
+
+    # One last reconciliation pass per channel — the periodic loop was
+    # already cancelled when the connection ended, so without this, any
+    # trailing audio in its window that hadn't been reconciled yet would
+    # never get a label at all. Fire-and-forget, same as index_meeting_search
+    # / generate_report below: the meeting still finalizes as READY without
+    # waiting on it, and the frontend degrades an unlabeled segment
+    # gracefully either way.
+    settings = get_settings()
+    for channel in (Channel.ME, Channel.THEM):
+        try:
+            _dispatch_reconciliation(session, channel, settings)
+        except Exception:
+            logger.exception(
+                "Live session %s: final reconciliation dispatch failed for %s",
+                session.meeting_id,
+                channel.value,
+            )
 
     try:
         await _finalize(session)

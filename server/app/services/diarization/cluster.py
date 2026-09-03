@@ -35,27 +35,38 @@ def _redis() -> redis.Redis:
 
 @dataclass
 class Cluster:
+    """One voice in a meeting-channel's registry — persisted across every
+    periodic reconciliation pass (app/workers/tasks.py:reconcile_diarization),
+    not just one decision. `speaker_id` is None for a *provisional* entry: a
+    voice the registry has noticed but hasn't yet earned a real "Speaker
+    N"/"Them N" label (see diarization_guest_min_ms/diarization_guest_min_share
+    in app/core/config.py) — this app's version of the reference design's
+    "guest folding", the actual fix for a short/noisy fragment permanently
+    minting a spurious extra speaker. `weight_ms` is real, non-double-counted
+    assigned speech time (only ever incremented by a segment's own duration
+    the first time that segment is resolved, never by raw window/turn
+    duration, which would double-count across passes' overlapping windows) —
+    the only thing the guest floor is measured against.
+    """
+
     centroid: list[float]
     count: int
-    speaker_id: str  # Speaker.id, as a str — every cluster gets one immediately on creation
+    weight_ms: int = 0
+    speaker_id: str | None = None  # Speaker.id, as a str — None until promoted
 
 
 @dataclass
-class PendingEmbedding:
-    """A whole-utterance embedding that didn't confidently match any
-    existing cluster but wasn't trusted enough to mint a brand-new one from
-    on its own either (app/workers/tasks.py:diarize_utterance's defer path)
-    — held here, per meeting+channel, until either a later cluster update
-    makes it match (diarization_backfill_similarity_threshold) or another
-    pending embedding mutually corroborates it (see
-    try_promote_mutual_pair) enough to jointly seed a real new cluster.
-    Segment stays unlabeled in Postgres for as long as this stays pending —
-    same accepted trade-off as insufficient_signal's own unresolved
-    segments, MeetingDetail.tsx already degrades those gracefully.
+class PendingSegment:
+    """A TranscriptSegment matched (by turn overlap) to a still-provisional
+    Cluster — held here, per meeting+channel, until that cluster either
+    crosses the guest floor (promoted, every pending entry pointing at it
+    gets labeled at once) or the meeting ends still folded (segment stays
+    unlabeled — MeetingDetail.tsx already degrades that gracefully, same as
+    every other "no signal" case this app has always had).
     """
 
     segment_id: str  # TranscriptSegment.id, as a str
-    embedding: list[float]
+    cluster_index: int  # index into the same meeting+channel's `clusters` list
 
 
 def _state_key(meeting_id: UUID, channel: Channel) -> str:
@@ -66,82 +77,66 @@ def _pending_key(meeting_id: UUID, channel: Channel) -> str:
     return f"diar-pending:{meeting_id}:{channel.value}"
 
 
-def peek_clusters(meeting_id: UUID, channel: Channel) -> list[Cluster]:
-    """Lock-free read of the current cluster state — used only to make a
-    fast, best-effort confidence decision about whether the expensive
-    diarize() pass is even worth running for a new utterance
-    (app/workers/tasks.py:diarize_utterance's skip-check). A small race here
-    against a concurrent update only ever costs a possibly-one-utterance-
-    stale confidence read, never a wrong final assignment — the actual
-    cluster write always still goes through locked_state below.
-    """
-    raw = _redis().get(_state_key(meeting_id, channel))
-    return [Cluster(**c) for c in json.loads(raw)] if raw else []
-
-
 @contextmanager
 def locked_state(meeting_id: UUID, channel: Channel):
-    """Per-meeting-per-channel lock around one read-decide-write cycle of
-    online speaker clustering — without it, two utterances dispatched close
-    together could both see no matching cluster and both decide "new
-    speaker" for what's actually the same one. Scoped by channel (not just
-    meeting) so a "Me" voice and a "Them" voice never get clustered against
-    each other's centroids — Me and Them are unrelated pools of people, one
-    a local mic capture, the other a shared tab/system-audio track. Yields
-    a mutable (list[Cluster], list[PendingEmbedding]) pair; mutate either in
-    place, both are saved back to Redis together when the block exits — the
-    same lock covers both because a single utterance's decision can touch
-    both at once (e.g. resolving a pending embedding also updates a
-    cluster's centroid), and they'd drift out of sync under separate locks.
+    """Per-meeting-per-channel lock around one reconciliation pass's
+    read-decide-write cycle — without it, two passes dispatched close
+    together (the reconcile loop and a final catch-up pass, say) could both
+    see the same registry state and double-claim it. Scoped by channel (not
+    just meeting) so a "Me" voice and a "Them" voice never get clustered
+    against each other's centroids — Me and Them are unrelated pools of
+    people, one a local mic capture, the other a shared tab/system-audio
+    track. Yields a mutable (list[Cluster], list[PendingSegment]) pair;
+    mutate either in place, both are saved back to Redis together when the
+    block exits — a single pass's decision can touch both at once (e.g.
+    promoting a cluster drains pending entries pointing at it), and they'd
+    drift out of sync under separate locks.
     """
     r = _redis()
     key = _state_key(meeting_id, channel)
     pending_key = _pending_key(meeting_id, channel)
-    with r.lock(f"diar-lock:{meeting_id}:{channel.value}", timeout=10):
+    with r.lock(f"diar-lock:{meeting_id}:{channel.value}", timeout=30):
         raw = r.get(key)
         clusters = [Cluster(**c) for c in json.loads(raw)] if raw else []
         pending_raw = r.get(pending_key)
-        pending = [PendingEmbedding(**p) for p in json.loads(pending_raw)] if pending_raw else []
+        pending = [PendingSegment(**p) for p in json.loads(pending_raw)] if pending_raw else []
         yield clusters, pending
         r.set(key, json.dumps([asdict(c) for c in clusters]), ex=STATE_TTL_SECONDS)
         r.set(pending_key, json.dumps([asdict(p) for p in pending]), ex=STATE_TTL_SECONDS)
 
 
-def try_promote_mutual_pair(pending: list[PendingEmbedding]) -> tuple[int, int] | None:
-    """The first pair of still-pending embeddings that mutually agree with
-    each other at SIMILARITY_THRESHOLD — real corroborating evidence from
-    two independent utterances, not one weak score trusted alone. Returns
-    their (index, index) into `pending`, or None.
-
-    Why this exists at all: without it, once a channel's first cluster is
-    created, no utterance that fails to confidently match it can ever
-    become a new cluster on its own (it would just defer forever) — a real,
-    genuinely different second speaker would never get their own identity,
-    silently absorbed into "unresolved" or the wrong cluster instead.
-    Verified live against real 2-speaker ground-truth audio: this alone
-    (deferring but never promoting) collapsed a real 2-speaker file down to
-    1 cluster, erasing the second speaker entirely — worse than the
-    over-segmentation bug being fixed. Requiring two pending embeddings to
-    agree with each other before minting a cluster from them fixed it
-    (verified: both real 2-speaker test files then correctly converged to
-    2 clusters, matching ground truth, with no regression on real
-    single-speaker files).
+def peek_clusters(meeting_id: UUID, channel: Channel) -> list[Cluster]:
+    """Lock-free read of the current registry state — used only by
+    app/workers/tasks.py:quick_label_hint, the fast advisory "does this
+    match someone already confirmed" check dispatched the instant a
+    segment commits (see that task's own docstring for why this needs to
+    be lock-free and read-only: it must never contend with, or mutate,
+    reconcile_diarization's own locked_state). A small race against a
+    concurrent reconciliation pass here only ever costs a possibly-one-pass-
+    stale hint, never a wrong permanent write — hints never touch Postgres
+    or this registry, only reconcile_diarization does that, under the real
+    lock.
     """
-    for a in range(len(pending)):
-        for b in range(a + 1, len(pending)):
-            ea, eb = np.array(pending[a].embedding), np.array(pending[b].embedding)
-            sim = float(np.dot(ea, eb) / (np.linalg.norm(ea) * np.linalg.norm(eb)))
-            if sim >= SIMILARITY_THRESHOLD:
-                return a, b
-    return None
+    raw = _redis().get(_state_key(meeting_id, channel))
+    return [Cluster(**c) for c in json.loads(raw)] if raw else []
 
 
-def best_match(clusters: list[Cluster], embedding: np.ndarray) -> tuple[int | None, float]:
+def best_match(
+    clusters: list[Cluster], embedding: np.ndarray, exclude: set[int] | None = None
+) -> tuple[int | None, float]:
     """Index of the most similar existing cluster and its cosine similarity
-    to `embedding` — (None, -1.0) if there are no clusters yet."""
+    to `embedding` — (None, -1.0) if there are no (non-excluded) clusters.
+    `exclude` backs claim-once matching (reconcile_diarization): a registry
+    entry already claimed by a busier local voice this same pass can't also
+    be claimed by a second one — without that, two different real speakers
+    active in the same reconciliation window could both match the same
+    stored voice and get merged.
+    """
     best_idx: int | None = None
     best_sim = -1.0
     for i, c in enumerate(clusters):
+        if exclude and i in exclude:
+            continue
         centroid = np.array(c.centroid)
         sim = float(np.dot(embedding, centroid) / (np.linalg.norm(embedding) * np.linalg.norm(centroid)))
         if sim > best_sim:
@@ -150,10 +145,28 @@ def best_match(clusters: list[Cluster], embedding: np.ndarray) -> tuple[int | No
 
 
 def update_centroid(cluster: Cluster, embedding: np.ndarray) -> None:
-    """Running average, weighted by how many utterances already fed this
-    cluster — one loud outlier utterance shouldn't swing an established
-    speaker's centroid as much as it would a brand new one."""
+    """Running average, weighted by how many reconciliation passes already
+    fed this cluster — one noisy pass shouldn't swing an established
+    speaker's centroid as much as it would a brand new one. Runs on every
+    pass a voice is re-observed, independent of weight_ms (which only moves
+    on newly-resolved segments) — re-observing the same speaker across
+    overlapping windows is harmless, even desirable, for centroid quality."""
     centroid = np.array(cluster.centroid)
     updated = (centroid * cluster.count + embedding) / (cluster.count + 1)
     cluster.centroid = updated.tolist()
     cluster.count += 1
+
+
+def meets_guest_floor(cluster: Cluster, total_channel_weight_ms: int, settings) -> bool:
+    """Whether a provisional cluster has earned a real "Speaker N"/"Them N"
+    label yet — both an absolute floor (diarization_guest_min_ms) and a
+    floor relative to everything tracked on this channel so far
+    (diarization_guest_min_share), whichever is stricter. See Cluster's own
+    docstring for why weight_ms is safe to compare here (never
+    double-counted across overlapping reconciliation windows)."""
+    if total_channel_weight_ms <= 0:
+        return False
+    return (
+        cluster.weight_ms >= settings.diarization_guest_min_ms
+        and cluster.weight_ms / total_channel_weight_ms >= settings.diarization_guest_min_share
+    )

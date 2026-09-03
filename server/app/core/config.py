@@ -76,82 +76,93 @@ class Settings(BaseSettings):
     live_max_utterance_seconds: int = 12  # force a flush even without a detected pause
     live_min_utterance_ms: int = 300  # ignore speech blips shorter than this
 
-    # Same-room live diarization (app/workers/tasks.py:diarize_utterance) — how
-    # much *already-received* "Me"-channel audio to feed the pipeline for
-    # within-utterance speaker-change detection, ending at the utterance's own
-    # end (no forward padding needed/available at dispatch time). Verified
-    # empirically: pyannote/speaker-diarization-3.1 is unreliable well under
-    # 10s (an isolated ~4s clip missed a real speaker change entirely); 12s
-    # gives comfortable margin above that floor.
-    diarization_context_window_ms: int = 12000
-    # Above this cosine similarity to an existing cluster, an utterance's
-    # whole-embedding match is confident enough to skip the expensive full
-    # diarize() pass entirely (app/workers/tasks.py:diarize_utterance) —
-    # deliberately higher than cluster.SIMILARITY_THRESHOLD (0.55, "is this
-    # the same person at all"): this is "confident enough that a within-
-    # utterance speaker change is implausible," not just "same speaker
-    # overall." Sits inside the real measured same-speaker range (0.67-0.75
-    # on real recordings) with margin below it, so a genuinely ambiguous
-    # match still falls through to the real pipeline.
-    diarization_skip_confidence: float = 0.65
-    # A whole-utterance embedding that doesn't confidently match an existing
-    # cluster on this channel (or is genuinely clipped, regardless of match)
-    # doesn't get to mint a brand-new speaker on the strength of that one
-    # verdict alone — a second, wider-window look gets a chance to find a
-    # genuinely better embedding first (app/workers/tasks.py:
-    # diarize_utterance; see diarization_corroboration_window_ms).
-    # Originally gated on content thinness alone (speech_ms below a
-    # threshold) rather than any miss — reproduced live, against real
-    # Deepgram-chunked ground-truth audio, that this was too narrow: a
-    # genuinely NOT-thin utterance (1.5-2s of real speech) can still score
-    # just under SIMILARITY_THRESHOLD from ordinary embedding variance
-    # (real examples: 0.524, 0.544, both against the correct matching
-    # speaker), and a thinness-only gate never gives those a second look at
-    # all. Deliberately NOT based on raw similarity score to decide whether
-    # a *result* should be trusted, only whether one is even attempted —
-    # tried scoring-based triggering for that instead and rejected it after
-    # a real counter-example: two different genuinely-short real
-    # utterances, one a different speaker and one the same speaker caught
-    # by a nearby real gap, scored the identical 0.141 against their
-    # closest cluster.
-    # How much *already-received* same-channel audio (window_pcm, the same
-    # buffer diarization_context_window_ms already sizes) that second look
-    # is allowed to use, trailing backward from the miss/clipped
-    # utterance's own end — naturally clamped to whatever's actually
-    # accumulated so far, same as diarization_context_window_ms. Verified
-    # empirically: widening by as little as 800ms-1s of real preceding
-    # audio already recovered a confident match (0.72-0.84) on a real short
-    # same-speaker clip; a real different-speaker utterance sitting right
-    # at the start of its own turn correctly recovered nothing extra (there
-    # was nothing earlier belonging to it), and a clean 0.78s clip that
-    # scored a deceptively low 0.14 on its own — a false negative caused
-    # entirely by brevity, not a real mismatch — correctly recovered 2.4s
-    # of real matching context and scored 0.70 once corroboration ran.
-    diarization_corroboration_window_ms: int = 3000
-    # How much real speech content a corroboration window itself needs
-    # before the embedding built from it is trusted over the utterance's
-    # own — deliberately lower than what would gate attempting it at all
-    # (there's no separate "is this worth trying" content floor anymore,
-    # see above; this only gates whether what was actually found is good
-    # enough to *trust*). Verified empirically — a real corroboration
-    # window with 1500ms of recovered speech content was once rejected by
-    # this check before it existed, discarding a sim=0.684 confident,
-    # correct match purely because it fell 60ms short of that bar; Phase
-    # V's own original calibration already showed 1.0s clips reliably
-    # scoring 0.77-0.78, well above SIMILARITY_THRESHOLD, which is the real
-    # precedent this floor is set from.
-    diarization_corroboration_min_speech_ms: int = 1000
-    # A more lenient bar than SIMILARITY_THRESHOLD (0.55), used only to
-    # retroactively backfill a segment that was left unlabeled earlier in
-    # the same meeting (app/workers/tasks.py:diarize_utterance's backfill
-    # pass) once a real cluster now exists to check it against — a lower
-    # bar is acceptable here specifically because the risk is different
-    # from creating a brand-new speaker: worst case a backfilled label is
-    # only roughly right, not confidently wrong, and it only ever runs
-    # against a segment that already had no label at all. Starting value
-    # only — needs the same real-audio validation the other diarization
-    # constants here got before being trusted at scale.
-    diarization_backfill_similarity_threshold: float = 0.45
+    # Same-room live diarization (app/workers/tasks.py:reconcile_diarization)
+    # — periodic full pyannote diarize() passes over a rolling window of
+    # already-received per-channel audio, reconciled against a persistent
+    # per-channel voice registry (app/services/diarization/cluster.py),
+    # rather than clustering one utterance's own embedding in isolation
+    # (the old design, removed). Architecture adopted from a reference
+    # macOS app's own proven live-diarization design after a real user
+    # report of aggressive over-segmentation (up to 8 spurious speakers for
+    # a real 2-person call) traced to Phase U's move to Deepgram live
+    # streaming: Deepgram's own aggressive endpointing produces many more,
+    # much shorter finalized utterances than local VAD ever did, and a
+    # short utterance's own embedding is measurably too noisy to safely
+    # decide "new speaker" on its own (Phase V found a real same-speaker
+    # 0.5s clip scoring 0.53 — under SIMILARITY_THRESHOLD — against its own
+    # true speaker). Running the full diarize() pipeline over several
+    # seconds of continuous audio at a time, instead of one short/noisy
+    # fragment alone, is structurally immune to that failure mode rather
+    # than working around it with corroboration/deferral heuristics
+    # (Phase V's approach, now removed along with the settings it used).
+    #
+    # How much already-received per-channel audio one reconciliation pass
+    # looks at, trailing backward from "now" — naturally clamped to
+    # whatever's actually accumulated so far. Lowered from an initial 45000
+    # after a real user report that live labeling felt "not live at all":
+    # real production measurements showed a pass over a 45s window taking
+    # up to 33s of real worker CPU time, on top of however much of its own
+    # interval had already elapsed — the actual reason the *first* label of
+    # a call so often arrived only after the call had already ended.
+    # Smaller windows measured meaningfully faster in the same production
+    # logs (a ~14s window: 6.7-9.2s; a ~40s window: 25.8-33.5s) — 25000 is a
+    # deliberate middle point, comfortably above the ~10s reliability floor
+    # (diarization_reconcile_min_window_ms) with margin, not a re-measured
+    # value of its own yet. See corella.quick_label_hint
+    # (app/workers/tasks.py) for the complementary fix that doesn't wait on
+    # this pass at all for a voice already confirmed by an earlier one.
+    diarization_reconcile_window_ms: int = 25000
+    # How often a reconciliation pass runs per active channel. Lowered
+    # alongside the window above for the same reason (see that setting's
+    # docstring) — a smaller window is cheaper per pass, so a shorter
+    # interval no longer means proportionally more worker CPU spent than
+    # the original 45s/25s pairing did. Still CPU-bound Python, not the
+    # reference app's ANE-accelerated CoreML pipeline (their own interval
+    # is 30s, but their pass finishes in low single-digit seconds regardless
+    # of interval) — starting point, not tuned against real sustained
+    # multi-meeting worker load.
+    diarization_reconcile_interval_ms: int = 20000
+    # Below this much accumulated per-channel audio, a reconciliation pass
+    # doesn't run at all yet — diarize() is unreliable well under ~10s
+    # (Phase F-2's own empirical finding, reused here since it's the same
+    # pipeline call). Matches the reference app's own measured floor (12s).
+    diarization_reconcile_min_window_ms: int = 12000
+    # A freshly-registered voice on a channel doesn't get to surface as a
+    # real "Speaker N"/"Them N" label purely because it clustered as
+    # distinct from anything else seen so far — it needs to hold at least
+    # this much real assigned speech first (this app's version of the
+    # reference design's "guest folding": a registry entry below this
+    # floor stays folded into the channel's plain "Me"/"Them" fallback
+    # instead of minting a probably-spurious extra speaker from a
+    # short/noisy fragment). The very first voice ever registered on a
+    # channel is exempt (nothing to compare it against yet — same
+    # precedent the old per-utterance design used for a channel's
+    # first-ever cluster), as is any voice recognized against the durable
+    # cross-meeting library (Phase O) regardless of how little it's said
+    # so far — a resolved identity is real information, not noise.
+    #
+    # Recalibrated down from the reference app's own 5s/10% (this app's
+    # original starting values) after a real, permanently-stuck production
+    # case: a genuine second voice on a real ~1-minute call — 3430ms of real
+    # assigned speech across 2 real committed segments, not one noisy
+    # fragment — cleared neither the old 5000ms absolute floor nor the old
+    # 10% share (it was at 9.7%), and since no reconciliation pass ever
+    # revisits a meeting once its live session has ended, that's not "still
+    # catching up," it's permanent — the segment can never resolve. The
+    # reference app's own numbers were tuned for its own (unmeasured here)
+    # call-length assumptions, not validated against this app's actual
+    # short-test-call usage pattern. Still a single real data point, not
+    # exhaustively tuned — but a single stray ~20-25ms fragment (the
+    # embedding-crash floor found separately, see live_min_utterance_ms)
+    # still can't cross even this lower bar on its own, so the spurious-
+    # single-fragment protection this floor exists for is intact.
+    diarization_guest_min_ms: int = 2000
+    # ...and this much of the channel's total tracked speech so far,
+    # whichever is stricter — a voice that's barely spoken at all shouldn't
+    # surface even if the call itself is still short. See diarization_
+    # guest_min_ms's docstring for the real case this was lowered from 0.10
+    # (10%) in response to.
+    diarization_guest_min_share: float = 0.08
 
     # Live copilot (app/services/copilot/live.py, app/ws/live_session.py)
     copilot_trigger_segments: int = 4  # new transcript segments since the last cycle...

@@ -33,8 +33,8 @@ def _prewarm_models(**_kwargs) -> None:
     """Eagerly loads every heavy model this worker process will eventually
     need, once, right after Celery forks it — rather than leaving each
     @lru_cache singleton (pyannote.py, embedding.py, whisper.py) to cold-load
-    on whichever task happens to hit it first. A live diarize_utterance call
-    landing on a cold process was a real, measured multi-second latency
+    on whichever task happens to hit it first. A live reconcile_diarization
+    call landing on a cold process was a real, measured multi-second latency
     source; this moves that cost to worker startup, off the critical path of
     any real task.
 

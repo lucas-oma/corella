@@ -48,11 +48,11 @@ def transcribe(audio_path: str, word_timestamps: bool = False) -> list[WhisperSe
     process (module-level lazy singleton) — reloading it per task would
     dominate processing time.
 
-    word_timestamps=True is needed by the live "Me" channel path
-    (app/ws/live_session.py) to attribute text to a specific speaker-turn
-    span once same-room diarization splits one utterance into several
-    (app/workers/tasks.py:diarize_utterance) — off by default since nothing
-    else needs the extra decode cost.
+    word_timestamps=True is currently unused by any caller in this codebase
+    (same-room diarization no longer splits an utterance into several
+    speaker-turn spans — see reconcile_diarization's own docstring) but
+    kept as real API surface for a future caller that needs per-word
+    timing; off by default since nothing today needs the extra decode cost.
     """
     segments, _info = _model().transcribe(audio_path, vad_filter=True, word_timestamps=word_timestamps)
     result = []

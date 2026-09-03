@@ -84,63 +84,8 @@ class UtteranceDetector:
         self._speech_ms = 0
 
 
-def trailing_contiguous_ms(
-    pcm: bytes, aggressiveness: int, silence_gap_ms: int = SILENCE_TO_FLUSH_MS, max_ms: int = 3000
-) -> int:
-    """How many ms, walking backward from the *end* of `pcm`, count as one
-    continuous stretch of speech — natural pauses shorter than
-    `silence_gap_ms` are tolerated (folded in as ordinary breathing room,
-    same spirit as UtteranceDetector's own SILENCE_TO_FLUSH_MS), but the
-    first real gap at least that long stops the count there. Capped at
-    `max_ms` regardless.
-
-    Used by app/workers/tasks.py:diarize_utterance to bound how far back a
-    short utterance's speaker-identification embedding is allowed to widen
-    into already-received same-channel audio — a wider window helps when
-    it's genuinely more of the *same* speaker's speech, but reproduced live
-    that a naive fixed-duration window can widen straight across a real
-    pause into a *different* speaker's turn, blending two voices into one
-    bad embedding. A detected silence gap is a much more direct signal for
-    "this is where the previous speaker's turn likely was" than either a
-    blind duration or the previous committed segment's own boundary (which
-    collapses to zero extra context whenever utterances are dispatched
-    back-to-back with no gap at all — the common case this whole widening
-    exists for in the first place).
-    """
-    vad = webrtcvad.Vad(aggressiveness)
-    max_frames = min(len(pcm) // FRAME_BYTES, max_ms // FRAME_MS)
-    consecutive_silence_frames = 0
-    usable_frames = 0
-    for i in range(1, max_frames + 1):
-        frame = pcm[len(pcm) - i * FRAME_BYTES : len(pcm) - (i - 1) * FRAME_BYTES]
-        if vad.is_speech(frame, SAMPLE_RATE):
-            consecutive_silence_frames = 0
-        else:
-            consecutive_silence_frames += 1
-            if consecutive_silence_frames * FRAME_MS >= silence_gap_ms:
-                break
-        usable_frames = i
-    return usable_frames * FRAME_MS
-
-
-def speech_ms(pcm: bytes, aggressiveness: int) -> int:
-    """Total real speech content in `pcm`, summed across every 30ms frame
-    that's actually voice (not required to be contiguous) — unlike raw
-    `len(pcm)`, this isn't fooled by a clip that's mostly silence padding.
-
-    Used by app/workers/tasks.py:diarize_utterance as the actual "is this
-    utterance's own audio too thin to trust a lone embedding comparison"
-    signal, in place of wall-clock duration — reproduced live that a
-    3.5-second utterance can be 92% silence (a single short trailing word
-    after a long pause), so its raw duration alone said "plenty of audio"
-    while its real speech content was under a second. Cheap — no ML model,
-    same webrtcvad frame checks as trailing_contiguous_ms.
-    """
-    vad = webrtcvad.Vad(aggressiveness)
-    n_frames = len(pcm) // FRAME_BYTES
-    total = 0
-    for i in range(n_frames):
-        frame = pcm[i * FRAME_BYTES : (i + 1) * FRAME_BYTES]
-        if vad.is_speech(frame, SAMPLE_RATE):
-            total += FRAME_MS
-    return total
+# trailing_contiguous_ms()/speech_ms() (Phase V's per-utterance corroboration
+# widening) were removed here — superseded by periodic full-window
+# reconciliation (app/workers/tasks.py:reconcile_diarization), which never
+# clusters a single utterance's own embedding in isolation in the first
+# place, so there's nothing left to corroborate.

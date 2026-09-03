@@ -32,3 +32,30 @@
     @apply mb-1.5 block text-sm font-medium text-ink-muted;
   }
 }
+
+@layer utilities {
+  /* One-shot "this speaker label just resolved" cue (LiveSession.tsx) — a
+     scale+opacity pop rather than a color flash, deliberately: it needs to
+     read clearly in both light and dark surfaces without per-theme tuning,
+     and a label chip is small/text-only, so a color flash would have
+     nothing to flash against anyway. */
+  @keyframes speaker-pop {
+    0% {
+      opacity: 0;
+      transform: scale(0.85);
+    }
+    55% {
+      opacity: 1;
+      transform: scale(1.1);
+    }
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  .animate-speaker-pop {
+    animation: speaker-pop 0.5s ease-out;
+    transform-origin: left center;
+  }
+}

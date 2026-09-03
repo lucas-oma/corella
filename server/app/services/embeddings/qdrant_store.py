@@ -294,7 +294,7 @@ def search_speaker_embeddings(
     pass, and cosine similarity to the *true* speaker naturally dominates
     over any other candidate, so top-1 already behaves like the intended
     "check my own identity first, then the group" priority without a
-    second round-trip (see app/workers/tasks.py:diarize_utterance).
+    second round-trip (see app/workers/tasks.py:reconcile_diarization).
     Empty if the collection doesn't exist yet (nobody's ever enrolled or
     been recognized) — normal, not an error.
     """
