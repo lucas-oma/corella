@@ -603,14 +603,16 @@ async def _consume_utterances(websocket: WebSocket, session: LiveSession) -> Non
     """Runs for the life of the connection, transcribing queued utterances
     one at a time (CTranslate2 models aren't guaranteed safe for concurrent
     calls from one instance) without blocking the receive loop above.
+
+    Copilot-trigger bookkeeping (Phase W4) now lives in _commit_segment
+    itself, not here — that function is shared by every path (local
+    whisper, Deepgram with or without diarization splitting), so every
+    real committed segment counts, not just this one queue's.
     """
     while True:
         utterance = await session.queue.get()
         try:
-            created = await _transcribe_and_send(websocket, session, utterance)
-            if created:
-                session.segments_since_cycle += 1
-                await _maybe_trigger_copilot(websocket, session)
+            await _transcribe_and_send(websocket, session, utterance)
         except Exception:
             logger.exception("Live transcription failed for meeting %s", session.meeting_id)
         finally:
@@ -943,6 +945,16 @@ async def _commit_segment(
         )
     except Exception:
         pass  # client may already be gone; the segment is still persisted
+
+    # Phase W4: moved here (from _consume_utterances) so EVERY committed
+    # segment counts toward the copilot trigger, regardless of which path
+    # produced it. Before this, only the local-whisper queue-consumer path
+    # incremented segments_since_cycle — a Deepgram-streamed session (this
+    # project's increasingly common path) never counted a single segment
+    # toward it, so it only ever got copilot cycles off the 20s elapsed-
+    # time fallback, never off real conversational volume.
+    session.segments_since_cycle += 1
+    await _maybe_trigger_copilot(websocket, session)
 
     return True
 

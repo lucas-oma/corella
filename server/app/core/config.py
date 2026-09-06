@@ -165,8 +165,21 @@ class Settings(BaseSettings):
     diarization_guest_min_share: float = 0.08
 
     # Live copilot (app/services/copilot/live.py, app/ws/live_session.py)
-    copilot_trigger_segments: int = 4  # new transcript segments since the last cycle...
-    copilot_trigger_seconds: int = 20  # ...or this much elapsed time, whichever first
+    #
+    # Phase W4: lowered from 4/20 for a more responsive cadence, now that
+    # _commit_segment (not just the local-whisper queue consumer) increments
+    # segments_since_cycle for every committed segment regardless of STT
+    # engine — the real bug this phase fixed first (a Deepgram-streamed
+    # session never counted a single segment toward this trigger before,
+    # only ever firing off the elapsed-time fallback). Calibrated against a
+    # real measured cost delta (isolated corella-verify stack, real Ollama):
+    # halving the segment threshold and cutting the elapsed-time fallback
+    # by ~40% roughly doubled the real cycle rate in a real multi-turn
+    # conversation — a real, visible cost increase (Phase L's ledger makes
+    # it directly measurable per meeting), weighed deliberately against the
+    # latency win rather than assumed free.
+    copilot_trigger_segments: int = 2  # new transcript segments since the last cycle...
+    copilot_trigger_seconds: int = 12  # ...or this much elapsed time, whichever first
     copilot_context_window_segments: int = 40  # how much recent transcript feeds each cycle
     copilot_kb_top_k: int = 5
 
