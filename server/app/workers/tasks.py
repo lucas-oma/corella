@@ -39,7 +39,6 @@ from app.services.diarization.cluster import (
     best_match,
     locked_state,
     meets_guest_floor,
-    peek_clusters,
     update_centroid,
 )
 from app.services.diarization.embedding import embed_utterance
@@ -631,89 +630,14 @@ def reconcile_diarization(meeting_id: str, channel_value: str, window_pcm_b64: s
             )
 
 
-@celery_app.task(name="corella.quick_label_hint")
-def quick_label_hint(meeting_id: str, segment_id: str, channel_value: str, utterance_pcm_b64: str) -> None:
-    """Fast, read-only live-labeling shortcut, dispatched the instant a
-    segment commits (app/ws/live_session.py:_commit_segment) — a real user
-    report that live labeling "isn't live at all" traced to the periodic
-    reconcile_diarization pass itself: even once it runs, it's a real
-    diarize() pipeline call, measured at 6-33s of real worker CPU time in
-    production, on top of however much of its own ~20-25s interval had
-    already elapsed. This never replaces that pass — reconcile_diarization
-    remains the *only* thing that ever creates a new speaker, promotes a
-    provisional one, or writes anything to Postgres. This only ever
-    recognizes a voice *already confirmed* by an earlier pass, and does so
-    almost immediately: one cheap embedding (not a full diarize() call) on
-    just this utterance's own audio, checked against the current registry
-    with no lock (peek_clusters — a stale-by-one-pass read costs nothing
-    worse than a slightly-delayed hint, never a wrong permanent write,
-    since nothing here is permanent). If it doesn't confidently match an
-    already-*promoted* cluster, or the "2+ confirmed speakers" gate
-    (has_reported_anything) hasn't opened for this channel yet, it does
-    nothing — silently defers to the real pass, exactly like every other
-    case this codebase refuses to guess on. Also means it works best on
-    longer utterances: a very short one's own single embedding can be too
-    noisy to confidently match on its own (the same short-utterance
-    unreliability Phase U/V/W already found and worked around for the
-    authoritative pass, which has the luxury of real acoustic context this
-    fast path deliberately doesn't try to replicate) — abstaining and
-    falling back to the real pass in that case is correct, not a bug.
-
-    The pushed event deliberately reuses the diarization_update wire shape
-    (rather than a new one) so the frontend's existing handling needs no
-    new state — see live.ts's speaker_hint branch.
-    """
-    utterance_pcm = base64.b64decode(utterance_pcm_b64)
-    channel = Channel(channel_value)
-
-    try:
-        embedding = embed_utterance(utterance_pcm)
-    except Exception:
-        logger.exception("quick_label_hint: embedding failed for segment %s", segment_id)
-        return
-
-    # The "2+ confirmed speakers" gate (reconcile_diarization's own
-    # has_reported_anything check) exists specifically so a genuinely
-    # solo channel never flashes a needless "Speaker 1" — the very first
-    # cluster on a channel auto-promotes immediately (real Speaker row,
-    # speaker_id set) long before that's known to be true, so checking
-    # speaker_id alone here isn't enough; verified live that skipping this
-    # check let a hint reveal a label before the authoritative mechanism
-    # ever had. Only ever hint once the real mechanism has already opened
-    # the gate at least once for this channel — from then on every
-    # subsequent utterance from either confirmed speaker is fair game.
-    if not diar_events.has_reported_anything(UUID(meeting_id), channel):
-        return
-
-    clusters = peek_clusters(UUID(meeting_id), channel)
-    idx, sim = best_match(clusters, embedding)
-    if idx is None or sim < SIMILARITY_THRESHOLD:
-        return
-    cluster = clusters[idx]
-    if cluster.speaker_id is None:
-        return  # provisional, not yet a real confirmed speaker -- nothing to hint at
-
-    with get_sync_db() as db:
-        speaker = db.get(Speaker, UUID(cluster.speaker_id))
-        segment = db.get(TranscriptSegment, UUID(segment_id))
-        if speaker is None or segment is None:
-            return
-        payload = {
-            "id": str(segment.id),
-            "channel": channel.value,
-            "start_ms": segment.start_ms,
-            "end_ms": segment.end_ms,
-            "text": segment.text,
-            "speaker_label": speaker.display_label,
-            "linked_user_id": str(speaker.linked_user_id) if speaker.linked_user_id else None,
-        }
-
-    diar_events.push_event(
-        UUID(meeting_id),
-        {"type": "speaker_hint", "is_snapshot": False, "removed_segment_ids": [], "segments": [payload]},
-        [],
-        channel,
-    )
+# The old corella.quick_label_hint Celery task used to live here — Phase W1
+# moved its logic in-process into app/ws/live_session.py:_run_quick_label_hint
+# (same checks: has_reported_anything gate, peek_clusters + best_match,
+# requires an already-promoted cluster) so the api process's own hot,
+# read-only instant-recognition check no longer pays a Celery/Redis/base64
+# round-trip to reach a separate worker process for it. reconcile_diarization
+# above is unaffected — it remains the only thing that ever creates/promotes
+# a speaker or writes to Postgres.
 
 
 @celery_app.task(name="corella.index_meeting_search")

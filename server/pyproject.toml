@@ -57,10 +57,16 @@ dependencies = [
     # class as greenlet above — now genuinely imported and used directly, so
     # it needs to be declared here too.
     "websockets==17.1",
-]
-
-[project.optional-dependencies]
-worker = [
+    # Phase W: the live instant-recognition check (app/ws/live_session.py's
+    # in-process quick-label check) needs the speaker-embedding model
+    # (app/services/diarization/embedding.py) directly in the api process,
+    # not just the worker — the whole point is skipping the Celery/Redis/
+    # base64 round-trip for this specific cheap, hot-path check. This is a
+    # deliberate tradeoff: the api image gets meaningfully heavier (torch)
+    # in exchange for lower recognition latency. The full diarize() pipeline
+    # (app/services/diarization/pyannote.py) stays worker-only — it's
+    # correctly heavy/batched work, not what this moves.
+    #
     # 3.3.2 is broken as installed: it declares torchaudio>=2.2.0 with no
     # upper bound, pip resolves the latest torch (2.14.0) but torchaudio's
     # release cadence lags behind, landing on torchaudio 2.11.0 — which
@@ -70,7 +76,18 @@ worker = [
     # backend entirely in favor of torchcodec/ffmpeg. Verified empirically
     # against this project's actual diarize() usage before pinning.
     "pyannote.audio==4.0.7",
+    # 4.x's audio-IO backend — needed by pyannote.audio for loading any wav
+    # (including the embedding model's own Inference() calls), not just the
+    # full diarization pipeline, so it moves to base alongside pyannote.audio.
     "torchcodec",
+]
+
+[project.optional-dependencies]
+worker = [
+    # Full diarize() pipeline (app/services/diarization/pyannote.py) and
+    # KB-document ingestion — genuinely worker-only, unlike pyannote.audio/
+    # torchcodec above which now live in base for the api process's own
+    # in-process embedding check.
     "sentence-transformers==3.3.1",
     "pypdf==5.1.0",
 ]

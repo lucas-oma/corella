@@ -15,7 +15,7 @@ from app.core import storage
 from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.core.security import decode_access_token
-from app.models.meeting import Channel, Meeting, MeetingStatus, TranscriptSegment
+from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.models.user import User, UserRole
 from app.services.asr import deepgram
 from app.services.asr.deepgram_stream import DeepgramLiveStream, DeepgramStreamError, StreamResult
@@ -25,6 +25,8 @@ from app.services.asr.whisper import warm_up
 from app.services.audio.mixing import extract_channel_window, mix_channel_recordings, write_wav
 from app.services.copilot.live import run_cycle as run_copilot_cycle
 from app.services.diarization import events as diar_events
+from app.services.diarization.cluster import SIMILARITY_THRESHOLD, best_match, peek_clusters
+from app.services.diarization.embedding import embed_utterance
 from app.services.llm.resolve import ResolvedProvider, resolve_provider
 from app.services.vad.vad import UtteranceDetector
 from app.workers.celery_app import celery_app
@@ -753,11 +755,12 @@ async def _commit_segment(
     window of each channel's audio against the persistent voice registry
     and is the only thing that ever creates/promotes a speaker or writes a
     label to Postgres. A fast, read-only *hint* dispatch is, though (see
-    corella.quick_label_hint) — a real user report that live labeling felt
-    "not live at all" traced to that periodic pass's own real compute time
-    (6-33s measured in production) stacking on top of its own interval; the
-    hint recognizes an *already-confirmed* voice almost instantly, without
-    waiting for the next pass, while never itself deciding anything new.
+    _run_quick_label_hint below) — a real user report that live labeling
+    felt "not live at all" traced to that periodic pass's own real compute
+    time (6-33s measured in production) stacking on top of its own
+    interval; the hint recognizes an *already-confirmed* voice almost
+    instantly, without waiting for the next pass, while never itself
+    deciding anything new.
     """
     async with SessionLocal() as db:
         row = TranscriptSegment(
@@ -778,10 +781,7 @@ async def _commit_segment(
         utterance_pcm = extract_channel_window(session.recordings[channel_key], start_ms, end_ms)
         if utterance_pcm:
             session.debug("quick_label_hint_dispatched", segment_id=str(row.id), channel=channel.value)
-            celery_app.send_task(
-                "corella.quick_label_hint",
-                args=[str(session.meeting_id), str(row.id), channel.value, base64.b64encode(utterance_pcm).decode()],
-            )
+            _spawn_background(_run_quick_label_hint(session, channel, row.id, utterance_pcm))
 
     try:
         await websocket.send_json(
@@ -800,6 +800,83 @@ async def _commit_segment(
         pass  # client may already be gone; the segment is still persisted
 
     return True
+
+
+async def _run_quick_label_hint(
+    session: LiveSession, channel: Channel, segment_id: UUID, utterance_pcm: bytes
+) -> None:
+    """In-process replacement (Phase W1) for the old `corella.quick_label_hint`
+    Celery task — identical logic, just run directly in this api process
+    instead of round-tripping through Celery/Redis/base64 to reach a
+    separate worker process for what was already a cheap, read-only check.
+    Fire-and-forget, spawned via _spawn_background from _commit_segment;
+    never blocks segment commit or the transcript WS reply.
+
+    This never creates/promotes a speaker or writes anything to Postgres —
+    only reconcile_diarization (still a worker task; the real, heavy
+    diarize() pass genuinely belongs off this process) does that. It only
+    recognizes a voice *already confirmed* by an earlier reconciliation
+    pass: one cheap embedding on just this utterance's own audio
+    (app/services/diarization/embedding.py, now loaded in this process too
+    — see main.py's startup pre-warm), checked lock-free against the
+    current registry (peek_clusters — a stale-by-one-pass read costs
+    nothing worse than a slightly-delayed hint, never a wrong permanent
+    write). Requires the "2+ confirmed speakers" gate
+    (has_reported_anything) to have already opened for this channel and
+    the matched cluster to already be promoted — see the removed Celery
+    task's own docstring history for why (a genuinely solo channel must
+    never flash a needless "Speaker 1", and the very first cluster on a
+    channel auto-promotes before that's known to be true, so speaker_id
+    alone isn't a sufficient check).
+
+    The embedding extraction and the (sync) Redis calls in cluster.py/
+    events.py all run via run_in_executor — CPU-bound/blocking work must
+    never run inline on the event loop, same discipline as local whisper.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        embedding = await loop.run_in_executor(None, embed_utterance, utterance_pcm)
+    except Exception:
+        logger.exception("quick_label_hint: embedding failed for segment %s", segment_id)
+        return
+
+    has_reported = await loop.run_in_executor(
+        None, diar_events.has_reported_anything, session.meeting_id, channel
+    )
+    if not has_reported:
+        return
+
+    clusters = await loop.run_in_executor(None, peek_clusters, session.meeting_id, channel)
+    idx, sim = best_match(clusters, embedding)
+    if idx is None or sim < SIMILARITY_THRESHOLD:
+        return
+    cluster = clusters[idx]
+    if cluster.speaker_id is None:
+        return  # provisional, not yet a real confirmed speaker -- nothing to hint at
+
+    async with SessionLocal() as db:
+        speaker = await db.get(Speaker, UUID(cluster.speaker_id))
+        segment = await db.get(TranscriptSegment, segment_id)
+        if speaker is None or segment is None:
+            return
+        payload = {
+            "id": str(segment.id),
+            "channel": channel.value,
+            "start_ms": segment.start_ms,
+            "end_ms": segment.end_ms,
+            "text": segment.text,
+            "speaker_label": speaker.display_label,
+            "linked_user_id": str(speaker.linked_user_id) if speaker.linked_user_id else None,
+        }
+
+    await loop.run_in_executor(
+        None,
+        diar_events.push_event,
+        session.meeting_id,
+        {"type": "speaker_hint", "is_snapshot": False, "removed_segment_ids": [], "segments": [payload]},
+        [],
+        channel,
+    )
 
 
 def _noop_debug(stage: str, **detail) -> None:

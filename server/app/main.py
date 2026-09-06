@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -19,11 +20,35 @@ logging.basicConfig(
     level=get_settings().log_level,
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
+logger = logging.getLogger(__name__)
+
+
+async def _warm_up_embedding_model() -> None:
+    """Phase W1: the live in-process instant-recognition check
+    (app/ws/live_session.py's quick-label-hint replacement) needs the
+    speaker-embedding model loaded in *this* process now too, not just the
+    worker's — pre-warm it at startup, same spirit as celery_app.py's own
+    worker_process_init hook, so the first real live utterance in a
+    freshly-started api process doesn't pay the multi-second cold-load
+    penalty. Runs off the event loop (model loading is blocking, CPU-bound
+    work) and is best-effort: a failure here just means the cost is paid
+    lazily on the first real call instead, not a startup crash — this
+    model isn't HF-gated, so failure here would be a real, unexpected
+    problem worth logging loudly, not a "HF_TOKEN not configured" case
+    (that's `_pipeline`/the full diarize() pipeline, still worker-only).
+    """
+    try:
+        from app.services.diarization.embedding import _inference as warm_up_embedding
+
+        await asyncio.get_running_loop().run_in_executor(None, warm_up_embedding)
+    except Exception:
+        logger.exception("Embedding model pre-warm failed at api startup")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await seed_admin_user()
+    await _warm_up_embedding_model()
     yield
 
 
