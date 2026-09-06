@@ -577,9 +577,28 @@ def reconcile_diarization(meeting_id: str, channel_value: str, window_pcm_b64: s
 
                 db.flush()  # assign ids/relationships before building the WS payload
 
+                # Phase W2: gate opens once 2+ distinct VOICES have been
+                # detected on this channel, not once both have independently
+                # promoted (cleared the guest floor). Before this, even a
+                # channel's first, obviously-dominant speaker sat completely
+                # unreported until a second speaker's OWN cluster also
+                # cleared the floor on its own — even though the first
+                # speaker's label had been decided since their very first
+                # pass. A still-provisional second speaker's own segments
+                # are unaffected by this change: they stay held
+                # (PendingSegment) until their own cluster promotes, and
+                # already render as the existing default "Identifying…"
+                # state client-side in the meantime (MeetingDetail.tsx/
+                # LiveSession.tsx's existing fallback for an unresolved
+                # segment) — so no new tentative-label event/payload shape
+                # is needed for that half; this is purely a gate-timing fix.
+                # A genuinely solo channel is unaffected either way: it
+                # never registers a second cluster at all, so cluster_count
+                # never reaches 2 and nothing is ever pushed — the same
+                # guarantee the old promoted_count-based gate provided.
                 has_resolved_identity = any(s.speaker.voice_identity_id is not None for s, _ in resulting)
-                promoted_count = sum(1 for c in clusters if c.speaker_id is not None)
-                if resulting and (promoted_count >= 2 or has_resolved_identity):
+                cluster_count = len(clusters)
+                if resulting and (cluster_count >= 2 or has_resolved_identity):
                     if not diar_events.has_reported_anything(meeting.id, channel):
                         # First time the gate has ever opened for this
                         # meeting *on this channel* — a full authoritative
