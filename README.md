@@ -104,7 +104,7 @@ docker compose up --build
 ```
 
 - Web UI: http://localhost:8080
-- API: http://localhost:8000 (docs at `/docs`)
+- API: http://localhost:8090 (docs at `/docs`)
 
 If you have an NVIDIA GPU + the NVIDIA Container Toolkit installed, layer on the GPU override for faster/larger transcription and diarization models:
 
