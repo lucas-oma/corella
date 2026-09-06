@@ -111,6 +111,17 @@ class DeepgramLiveStream:
             "smart_format": "true",
             "vad_events": "true",
             "utterance_end_ms": UTTERANCE_END_MS,
+            # Phase W3: Deepgram's own native diarization, always requested
+            # on this streaming path — a per-word `speaker` index comes back
+            # on every final result's words (see _handle_results), letting
+            # app/ws/live_session.py split one Deepgram utterance into
+            # per-speaker segments and label them instantly, with zero
+            # pyannote/Celery/worker involvement for a Deepgram-diarized
+            # channel. Real, stated scope limit: this speaker index is
+            # per-connection-local (0, 1, 2, ...), not a durable identity —
+            # a Deepgram-diarized channel doesn't get Phase O's cross-
+            # meeting/group voice-identity name-recognition this round.
+            "diarize": "true",
         }
         query = "&".join(f"{k}={v}" for k, v in params.items())
         try:
@@ -232,6 +243,12 @@ class DeepgramLiveStream:
                         start=float(w.get("start") or 0.0) - base,
                         end=float(w.get("end") or 0.0) - base,
                         word=w.get("word") or "",
+                        # Present whenever diarize=true was honored — absent
+                        # (None) falls back to today's single-segment
+                        # behavior in live_session.py, so a Deepgram account/
+                        # model that doesn't support diarization degrades
+                        # gracefully rather than breaking.
+                        speaker=w.get("speaker"),
                     )
                     for w in (alt.get("words") or [])
                 )

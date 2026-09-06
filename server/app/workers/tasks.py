@@ -42,6 +42,7 @@ from app.services.diarization.cluster import (
     update_centroid,
 )
 from app.services.diarization.embedding import embed_utterance
+from app.services.diarization.labels import SPEAKER_LABEL_FORMAT
 from app.services.diarization.pyannote import DiarizationUnavailable, diarize
 from app.services.embeddings.chunking import chunk_text, chunk_transcript
 from app.services.embeddings.embed import embed_texts
@@ -261,17 +262,6 @@ def _merge_adjacent_same_speaker(turns: list) -> list[tuple[float, float, str]]:
     return merged
 
 
-_SPEAKER_LABEL_FORMAT = {
-    # "Speaker N" is the original, already-shipped Me-side format —
-    # unchanged, so nothing that already depends on it (frontend dot-color
-    # parsing, existing meetings' persisted labels) breaks. Them gets its
-    # own distinct prefix, not the same "Speaker N": MeetingDetail.tsx lists
-    # every segment's speaker_label in one flat list with no channel
-    # column, so two unrelated people (one from each pool) both reading as
-    # "Speaker 1" would be a real, avoidable ambiguity.
-    Channel.ME: "Speaker {n}",
-    Channel.THEM: "Them {n}",
-}
 
 
 def _recognize_voice_identity(
@@ -317,7 +307,7 @@ def _promote_new_speaker(
     speaker = Speaker(
         owner_id=meeting.owner_id,
         meeting_id=meeting.id,
-        label=_SPEAKER_LABEL_FORMAT[channel].format(n=existing_count + 1),
+        label=SPEAKER_LABEL_FORMAT[channel].format(n=existing_count + 1),
         channel=channel,
         voice_identity_id=identity.id if identity else None,
     )

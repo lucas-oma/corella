@@ -12,6 +12,15 @@ class WhisperWord:
     start: float  # seconds, relative to the transcribed audio
     end: float  # seconds
     word: str
+    # Deepgram's own per-word diarization index (app/services/asr/
+    # deepgram_stream.py, Phase W3) — None for every other producer of this
+    # dataclass (local whisper, Deepgram's one-shot REST transcribe()),
+    # which never carry per-word speaker info. Deliberately an int, not a
+    # Corella Speaker id: it's a per-connection-local index Deepgram assigns
+    # (0, 1, 2, ...), not comparable across meetings — see deepgram_stream's
+    # own module docstring for the "no cross-meeting identity" limitation
+    # this implies.
+    speaker: int | None = None
 
 
 @dataclass
