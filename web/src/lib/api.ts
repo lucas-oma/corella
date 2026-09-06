@@ -267,6 +267,12 @@ export interface UserCostBreakdown {
   call_count: number;
 }
 
+export interface ProviderCostBreakdown {
+  provider: string;
+  total_usd: number;
+  call_count: number;
+}
+
 export interface DailyCost {
   day: string;
   total_usd: number;
@@ -282,6 +288,7 @@ export interface CostSummary {
   total_input_tokens: number;
   total_output_tokens: number;
   by_user: UserCostBreakdown[];
+  by_provider: ProviderCostBreakdown[];
   daily: DailyCost[];
   projected_next_7_days_usd: number | null;
   period: CostPeriod;

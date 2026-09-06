@@ -24,6 +24,7 @@ from app.models.voice_identity import VoiceIdentity
 from app.services.admin.webhooks import dispatch_call_type_webhook
 from app.services.alignment.align import align
 from app.services.asr import deepgram
+from app.services.asr.pricing import estimate_stt_cost_usd
 from app.services.asr.resolve import resolve_stt_provider
 from app.services.asr.whisper import transcribe as whisper_transcribe
 from app.services.audio.mixing import read_wav_pcm, slice_pcm, write_wav
@@ -84,7 +85,7 @@ def _wav_duration_seconds(path: str) -> int:
         return round(wf.getnframes() / wf.getframerate())
 
 
-async def _resolve_and_maybe_transcribe_deepgram(owner_id: str, wav_path: str, word_timestamps: bool):
+async def _resolve_and_maybe_transcribe_deepgram(meeting_id: str, owner_id: str, wav_path: str, word_timestamps: bool):
     """Resolves which STT engine this owner should use, and — if it's
     Deepgram — runs the actual transcription too, in the same short-lived
     async session/call. Returns (ResolvedStt, segments-or-None); None
@@ -92,6 +93,11 @@ async def _resolve_and_maybe_transcribe_deepgram(owner_id: str, wav_path: str, w
     to local whisper.transcribe() either way, so a Deepgram outage never
     breaks the meeting, same graceful-degradation spirit as the
     diarization skip right next to this call site.
+
+    Phase W5: on a successful Deepgram call, also logs its real cost
+    (duration-billed, app/services/asr/pricing.py) into the same ledger
+    the live path uses — this project's own cost estimate was otherwise
+    silently LLM-only, missing a real metered API's usage entirely.
     """
     async with SessionLocal() as db:
         stt = await resolve_stt_provider(db, UUID(owner_id))
@@ -104,6 +110,22 @@ async def _resolve_and_maybe_transcribe_deepgram(owner_id: str, wav_path: str, w
         segments = await deepgram.transcribe(
             wav_bytes, stt.model, stt.api_key, word_timestamps, language=stt.language
         )
+        seconds = _wav_duration_seconds(wav_path)
+        cost = estimate_stt_cost_usd("deepgram", stt.model, stt.language, is_streaming=False, audio_seconds=seconds)
+        async with SessionLocal() as db:
+            await add_meeting_cost(
+                db,
+                UUID(meeting_id),
+                UUID(owner_id),
+                "deepgram",
+                stt.model,
+                None,
+                None,
+                cost,
+                UsageKind.STT_UPLOAD,
+                audio_seconds=seconds,
+            )
+            await db.commit()
         return stt, segments
     except deepgram.SttError:
         logger.exception("Deepgram transcription failed for owner %s; falling back to local whisper", owner_id)
@@ -135,7 +157,7 @@ def process_meeting_audio(meeting_id: str) -> None:
                 _stt, asr_segments = asyncio.run(
                     _with_engine_cleanup(
                         _resolve_and_maybe_transcribe_deepgram(
-                            str(meeting.owner_id), normalized_path, word_timestamps=False
+                            str(meeting.id), str(meeting.owner_id), normalized_path, word_timestamps=False
                         )
                     )
                 )

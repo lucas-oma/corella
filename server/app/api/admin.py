@@ -12,7 +12,7 @@ from app.models.call_type import CallType
 from app.models.group import Group
 from app.models.user import User
 from app.schemas.call_type import CallTypeCreate, CallTypeRead, CallTypeUpdate
-from app.schemas.cost import CostSummaryRead, DailyCostRead, UserCostBreakdownRead
+from app.schemas.cost import CostSummaryRead, DailyCostRead, ProviderCostBreakdownRead, UserCostBreakdownRead
 from app.schemas.group import GroupCreate, GroupRead
 from app.schemas.user import AdminUserCreate, AdminUserUpdate, UserRead
 from app.services.admin.costs import get_cost_summary
@@ -237,6 +237,10 @@ async def get_costs(
                 call_count=u.call_count,
             )
             for u in summary.by_user
+        ],
+        by_provider=[
+            ProviderCostBreakdownRead(provider=p.provider, total_usd=p.total_usd, call_count=p.call_count)
+            for p in summary.by_provider
         ],
         daily=[DailyCostRead(day=d.day, total_usd=d.total_usd) for d in summary.daily],
         projected_next_7_days_usd=summary.projected_next_7_days_usd,

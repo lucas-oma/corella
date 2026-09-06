@@ -16,14 +16,17 @@ from app.core import storage
 from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.core.security import decode_access_token
+from app.models.cost import UsageKind
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.models.user import User, UserRole
 from app.services.asr import deepgram
 from app.services.asr.deepgram_stream import DeepgramLiveStream, DeepgramStreamError, StreamResult
+from app.services.asr.pricing import estimate_stt_cost_usd
 from app.services.asr.resolve import ResolvedStt, resolve_stt_provider
 from app.services.asr.whisper import WhisperWord, warm_up
 from app.services.asr.whisper import transcribe as whisper_transcribe
 from app.services.audio.mixing import extract_channel_window, mix_channel_recordings, write_wav
+from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.live import run_cycle as run_copilot_cycle
 from app.services.diarization import events as diar_events
 from app.services.diarization.cluster import SIMILARITY_THRESHOLD, best_match, peek_clusters
@@ -377,6 +380,7 @@ async def _open_deepgram_stream(websocket: WebSocket, session: LiveSession, chan
         )
         session.deepgram_streams[channel] = None
         session.debug("stt_fallback", provider="deepgram", channel=channel_key, reason="stream closed")
+        await _log_deepgram_stt_cost(session, stream)
 
     stream = DeepgramLiveStream(session.stt.api_key, session.stt.model, session.stt.language, on_result, on_closed)
     try:
@@ -508,6 +512,42 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         _spawn_background(_drain_and_finalize(session, consumer_task))
 
 
+async def _log_deepgram_stt_cost(session: LiveSession, stream: DeepgramLiveStream) -> None:
+    """Phase W5: Deepgram STT usage shares the same ledger/atomic-total
+    machinery as LLM usage (app/services/copilot/cost.py:add_meeting_cost)
+    — priced by real audio duration (app/services/asr/pricing.py), not
+    tokens. Called from both of a stream's two mutually-exclusive close
+    paths (a graceful stop, here in _close_deepgram_streams, and an
+    unexpected drop, on_closed above) — take_usage_seconds() resets its
+    own counter, so neither path can double-count even in the impossible
+    case both somehow ran for the same stream. Best-effort: a failure here
+    is logged, never allowed to break session teardown.
+    """
+    seconds = stream.take_usage_seconds()
+    if seconds <= 0:
+        return
+    try:
+        cost = estimate_stt_cost_usd(
+            "deepgram", session.stt.model, session.stt.language, is_streaming=True, audio_seconds=seconds
+        )
+        async with SessionLocal() as db:
+            await add_meeting_cost(
+                db,
+                session.meeting_id,
+                session.owner_id,
+                "deepgram",
+                session.stt.model,
+                None,
+                None,
+                cost,
+                UsageKind.STT_LIVE,
+                audio_seconds=seconds,
+            )
+            await db.commit()
+    except Exception:
+        logger.exception("Live session %s: failed to log Deepgram STT usage", session.meeting_id)
+
+
 async def _close_deepgram_streams(session: LiveSession) -> None:
     """Closes whichever channels still have a healthy Deepgram stream open
     — awaited, not fire-and-forget, so a still-in-flight final utterance
@@ -529,6 +569,8 @@ async def _close_deepgram_streams(session: LiveSession) -> None:
                 session.meeting_id,
                 exc_info=result,
             )
+    for stream in streams:
+        await _log_deepgram_stt_cost(session, stream)
 
 
 async def _authenticate(websocket: WebSocket) -> User | None:

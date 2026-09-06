@@ -12,6 +12,12 @@ class UserCostBreakdownRead(BaseModel):
     call_count: int
 
 
+class ProviderCostBreakdownRead(BaseModel):
+    provider: str
+    total_usd: float
+    call_count: int
+
+
 class DailyCostRead(BaseModel):
     day: date
     total_usd: float
@@ -25,7 +31,7 @@ class CostSummaryRead(BaseModel):
     total_input_tokens: int
     total_output_tokens: int
     by_user: list[UserCostBreakdownRead]
+    by_provider: list[ProviderCostBreakdownRead]
     daily: list[DailyCostRead]
     projected_next_7_days_usd: float | None
-    period: Literal["7d", "30d", "month", "year"]
     period: Literal["7d", "30d", "month", "year"]
