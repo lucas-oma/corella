@@ -182,6 +182,12 @@ class Settings(BaseSettings):
     copilot_trigger_seconds: int = 12  # ...or this much elapsed time, whichever first
     copilot_context_window_segments: int = 40  # how much recent transcript feeds each cycle
     copilot_kb_top_k: int = 5
+    # Cap on how many distinct KB-extracted keywords get handed to Deepgram
+    # (`keywords` param) / faster-whisper (`initial_prompt`) per session —
+    # see app/services/access.py:searchable_kb_keywords. Deepgram doesn't
+    # document a hard limit, but a very long query string is its own risk;
+    # 100 is a generous cap for what a KB glossary realistically produces.
+    stt_keyword_limit: int = 100
 
     # Default model per provider, used unless the user picks otherwise (no
     # CallProfile UI yet). The Anthropic default is a verified-current model

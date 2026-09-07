@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import ARRAY, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -38,6 +38,16 @@ class KBDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     chunk_count: Mapped[int | None] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text)
+    # LLM-extracted proper nouns/product names/acronyms/jargon from this
+    # document's own text (app/services/embeddings/kb_keywords.py), fed to
+    # Deepgram's `keywords` param / faster-whisper's `initial_prompt` at
+    # transcription time (app/services/access.py:searchable_kb_keywords) to
+    # bias STT toward whatever this group's knowledge base actually talks
+    # about. None means extraction was never attempted or failed — never
+    # blocks the document from reaching READY (best-effort, same
+    # graceful-degradation spirit as the Deepgram-STT-falls-back-to-whisper
+    # path in app/workers/tasks.py).
+    keywords: Mapped[list[str] | None] = mapped_column(ARRAY(String))
 
     owner: Mapped[User] = relationship(lazy="joined")
 

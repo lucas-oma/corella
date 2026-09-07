@@ -21,9 +21,11 @@ from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.models.user import User
 from app.models.voice_identity import VoiceIdentity
+from app.services.access import searchable_kb_keywords
 from app.services.admin.webhooks import dispatch_call_type_webhook
 from app.services.alignment.align import align
 from app.services.asr import deepgram
+from app.services.asr.keyword_prompt import keywords_to_initial_prompt
 from app.services.asr.pricing import estimate_stt_cost_usd
 from app.services.asr.resolve import resolve_stt_provider
 from app.services.asr.whisper import transcribe as whisper_transcribe
@@ -48,6 +50,7 @@ from app.services.diarization.pyannote import DiarizationUnavailable, diarize
 from app.services.embeddings.chunking import chunk_text, chunk_transcript
 from app.services.embeddings.embed import embed_texts
 from app.services.embeddings.extract import extract_text
+from app.services.embeddings.kb_keywords import extract_keywords_via_llm
 from app.services.embeddings.qdrant_store import (
     search_speaker_embeddings,
     upsert_chunks,
@@ -88,11 +91,13 @@ def _wav_duration_seconds(path: str) -> int:
 async def _resolve_and_maybe_transcribe_deepgram(meeting_id: str, owner_id: str, wav_path: str, word_timestamps: bool):
     """Resolves which STT engine this owner should use, and — if it's
     Deepgram — runs the actual transcription too, in the same short-lived
-    async session/call. Returns (ResolvedStt, segments-or-None); None
-    means "not Deepgram, or Deepgram failed" — the sync caller falls back
-    to local whisper.transcribe() either way, so a Deepgram outage never
-    breaks the meeting, same graceful-degradation spirit as the
-    diarization skip right next to this call site.
+    async session/call. Returns (ResolvedStt, segments-or-None, keywords);
+    None segments means "not Deepgram, or Deepgram failed" — the sync
+    caller falls back to local whisper.transcribe() either way, so a
+    Deepgram outage never breaks the meeting, same graceful-degradation
+    spirit as the diarization skip right next to this call site. keywords
+    is always resolved (app/services/access.py:searchable_kb_keywords) so
+    the caller can feed it to the whisper fallback too, not just Deepgram.
 
     Phase W5: on a successful Deepgram call, also logs its real cost
     (duration-billed, app/services/asr/pricing.py) into the same ledger
@@ -101,14 +106,15 @@ async def _resolve_and_maybe_transcribe_deepgram(meeting_id: str, owner_id: str,
     """
     async with SessionLocal() as db:
         stt = await resolve_stt_provider(db, UUID(owner_id))
+        keywords = await searchable_kb_keywords(db, UUID(owner_id))
     if stt.provider != "deepgram":
-        return stt, None
+        return stt, None, keywords
 
     with open(wav_path, "rb") as f:
         wav_bytes = f.read()
     try:
         segments = await deepgram.transcribe(
-            wav_bytes, stt.model, stt.api_key, word_timestamps, language=stt.language
+            wav_bytes, stt.model, stt.api_key, word_timestamps, language=stt.language, keywords=keywords
         )
         seconds = _wav_duration_seconds(wav_path)
         cost = estimate_stt_cost_usd("deepgram", stt.model, stt.language, is_streaming=False, audio_seconds=seconds)
@@ -126,10 +132,10 @@ async def _resolve_and_maybe_transcribe_deepgram(meeting_id: str, owner_id: str,
                 audio_seconds=seconds,
             )
             await db.commit()
-        return stt, segments
+        return stt, segments, keywords
     except deepgram.SttError:
         logger.exception("Deepgram transcription failed for owner %s; falling back to local whisper", owner_id)
-        return stt, None
+        return stt, None, keywords
 
 
 @celery_app.task(name="corella.process_meeting_audio")
@@ -154,7 +160,7 @@ def process_meeting_audio(meeting_id: str) -> None:
                 # back to local Whisper rather than failing the meeting,
                 # same graceful-degradation spirit as the diarization skip
                 # right below.
-                _stt, asr_segments = asyncio.run(
+                _stt, asr_segments, kb_keywords = asyncio.run(
                     _with_engine_cleanup(
                         _resolve_and_maybe_transcribe_deepgram(
                             str(meeting.id), str(meeting.owner_id), normalized_path, word_timestamps=False
@@ -162,7 +168,9 @@ def process_meeting_audio(meeting_id: str) -> None:
                     )
                 )
                 if asr_segments is None:
-                    asr_segments = whisper_transcribe(normalized_path)
+                    asr_segments = whisper_transcribe(
+                        normalized_path, initial_prompt=keywords_to_initial_prompt(kb_keywords)
+                    )
 
                 diarization_turns = []
                 try:
@@ -238,6 +246,11 @@ def process_meeting_audio(meeting_id: str) -> None:
         logger.exception("Failed to dispatch generate_report for meeting %s", meeting_id)
 
 
+async def _extract_kb_keywords_async(owner_id: UUID, text: str) -> list[str] | None:
+    async with SessionLocal() as db:
+        return await extract_keywords_via_llm(db, owner_id, text)
+
+
 @celery_app.task(name="corella.process_kb_document")
 def process_kb_document(document_id: str) -> None:
     with get_sync_db() as db:
@@ -268,6 +281,22 @@ def process_kb_document(document_id: str) -> None:
             document.status = KBDocumentStatus.FAILED
             document.error = str(e)[:2000]
             db.commit()
+            return
+
+        # Best-effort, in its own try/except and its own commit — a failure
+        # here must never retroactively turn the READY document just
+        # committed above into a FAILED one (app/services/embeddings/
+        # kb_keywords.py already returns None rather than raising on any
+        # ordinary failure, e.g. no LLM provider configured; this is extra
+        # defense against anything unexpected, same belt-and-suspenders
+        # spirit as the diarization skip in process_meeting_audio).
+        try:
+            document.keywords = asyncio.run(
+                _with_engine_cleanup(_extract_kb_keywords_async(document.owner_id, text))
+            )
+            db.commit()
+        except Exception:
+            logger.exception("KB keyword extraction failed for document %s", document_id)
 
 
 def _merge_adjacent_same_speaker(turns: list) -> list[tuple[float, float, str]]:

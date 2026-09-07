@@ -304,6 +304,7 @@ export interface KBDocument {
   created_at: string;
   owner_id: string;
   owner_name: string;
+  keywords: string[] | null;
 }
 
 export const api = {
