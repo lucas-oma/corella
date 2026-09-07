@@ -3,7 +3,7 @@ from app.models.call_type import CallType
 from app.models.cost import LLMUsageEvent
 from app.models.group import Group
 from app.models.kb_document import KBDocument
-from app.models.meeting import ActionItem, Meeting, Note, Speaker, TranscriptSegment
+from app.models.meeting import ActionItem, CopilotInsight, Meeting, Note, Speaker, TranscriptSegment
 from app.models.provider_credential import ProviderCredential
 from app.models.stt_credential import SttCredential
 from app.models.user import User
@@ -17,6 +17,7 @@ __all__ = [
     "Speaker",
     "Note",
     "ActionItem",
+    "CopilotInsight",
     "CallProfile",
     "CallType",
     "KBDocument",

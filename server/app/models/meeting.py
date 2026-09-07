@@ -163,6 +163,40 @@ class TranscriptSegment(UUIDPrimaryKeyMixin, Base):
         return self.speaker.linked_user_id if self.speaker else None
 
 
+class CopilotInsight(UUIDPrimaryKeyMixin, Base):
+    """One live-copilot cycle's suggestion/blockers/coach_score
+    (app/services/copilot/live.py:run_cycle), persisted so MeetingDetail
+    can show them next to the transcript after the call — action items
+    from the same cycle already survive (ActionItem below); this was the
+    one piece of that result that used to only ever reach the frontend
+    over the WebSocket and vanish once the connection closed.
+
+    No TimestampMixin — same reasoning as TranscriptSegment right above:
+    an immutable snapshot of one cycle's result, never updated in place.
+    """
+
+    __tablename__ = "copilot_insights"
+
+    meeting_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("meetings.id", ondelete="CASCADE"), index=True
+    )
+    # The end_ms of the most recent transcript segment this cycle actually
+    # saw (all_segments[-1].end_ms in run_cycle) — anchors this insight to
+    # the transcript's own clock, not session-elapsed wall time, so it
+    # lines up with TranscriptSegment.start_ms/end_ms for display.
+    at_ms: Mapped[int] = mapped_column(Integer)
+    suggestion: Mapped[str | None] = mapped_column(Text)
+    blockers: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
+    # Persisted on every row, even one with no suggestion/blockers — the
+    # system prompt requires this on every response (unlike suggestion),
+    # so gating it on suggestion/blockers being non-empty would leave a
+    # score-over-time view sparse for no reason.
+    coach_score: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class Note(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "notes"
 
