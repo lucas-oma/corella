@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import AppShell from "@/components/AppShell";
 import { ApiError, api, type KBDocument } from "@/lib/api";
+import { useConfirm } from "@/lib/confirm";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -20,6 +21,7 @@ const STATUS_CLASS: Record<KBDocument["status"], string> = {
 };
 
 export default function KnowledgeBase() {
+  const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [documents, setDocuments] = useState<KBDocument[] | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -58,6 +60,13 @@ export default function KnowledgeBase() {
   }
 
   async function onDelete(id: string) {
+    const ok = await confirm({
+      title: "Delete this document?",
+      description: "The file and its indexed chunks will be removed. This can't be undone.",
+      confirmLabel: "Delete document",
+      variant: "danger",
+    });
+    if (!ok) return;
     setDeletingId(id);
     try {
       await api.deleteKBDocument(id);

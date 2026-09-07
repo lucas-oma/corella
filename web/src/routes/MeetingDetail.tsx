@@ -11,6 +11,7 @@ import {
   type TranscriptSegment,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useConfirm } from "@/lib/confirm";
 
 const POLL_INTERVAL_MS = 3000;
 // Same-room diarization (server/app/workers/tasks.py:reconcile_diarization)
@@ -233,6 +234,7 @@ export default function MeetingDetail() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const confirm = useConfirm();
   const [searchParams] = useSearchParams();
   const audioRef = useRef<HTMLAudioElement>(null);
   const seekedFromSearchRef = useRef(false);
@@ -268,6 +270,13 @@ export default function MeetingDetail() {
 
   async function onDelete() {
     if (!meetingId) return;
+    const ok = await confirm({
+      title: "Delete this meeting?",
+      description: "The recording, transcript, and report will be removed. This can't be undone.",
+      confirmLabel: "Delete meeting",
+      variant: "danger",
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       await api.deleteMeeting(meetingId);
@@ -402,6 +411,15 @@ export default function MeetingDetail() {
 
   async function onGenerateReport() {
     if (!meetingId) return;
+    const hasReport = Boolean(meeting?.summary) || actionItems.length > 0;
+    if (hasReport) {
+      const ok = await confirm({
+        title: "Regenerate this report?",
+        description: "The current summary, topics, and action items will be replaced.",
+        confirmLabel: "Regenerate",
+      });
+      if (!ok) return;
+    }
     setReportError(null);
     setGeneratingReport(true);
     try {

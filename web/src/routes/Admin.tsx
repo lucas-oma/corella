@@ -10,6 +10,7 @@ import {
   type Group,
   type User,
 } from "@/lib/api";
+import { useConfirm } from "@/lib/confirm";
 
 const NO_GROUP = "__none__";
 
@@ -110,6 +111,7 @@ function periodCaption(period: CostPeriod, dayCount: number): string {
 }
 
 export default function Admin() {
+  const confirm = useConfirm();
   const [groups, setGroups] = useState<Group[] | null>(null);
   const [users, setUsers] = useState<User[] | null>(null);
   const [costs, setCosts] = useState<CostSummary | null>(null);
@@ -169,6 +171,13 @@ export default function Admin() {
   }
 
   async function onDeleteGroup(group: Group) {
+    const ok = await confirm({
+      title: "Delete this group?",
+      description: "Members will be unassigned. Their accounts aren't affected.",
+      confirmLabel: "Delete group",
+      variant: "danger",
+    });
+    if (!ok) return;
     setError(null);
     setBusy(group.id);
     try {
@@ -213,6 +222,25 @@ export default function Admin() {
   }
 
   async function onUpdateUser(user: User, patch: { role?: User["role"]; group_id?: string | null }) {
+    if (patch.role && patch.role !== user.role) {
+      const ok = await confirm({
+        title: "Change this person's role?",
+        description:
+          patch.role === "admin"
+            ? `${user.full_name} will become an admin.`
+            : `${user.full_name} will no longer be an admin.`,
+        confirmLabel: "Change role",
+      });
+      if (!ok) return;
+    }
+    if ("group_id" in patch && patch.group_id === null && user.group_id) {
+      const ok = await confirm({
+        title: "Remove from this group?",
+        description: `${user.full_name} will lose group knowledge-base and report access.`,
+        confirmLabel: "Remove",
+      });
+      if (!ok) return;
+    }
     setError(null);
     setBusy(user.id);
     const previousGroupId = user.group_id;
@@ -304,6 +332,13 @@ export default function Admin() {
   }
 
   async function onDeleteCallType(ct: CallTypeConfig) {
+    const ok = await confirm({
+      title: "Delete this call type?",
+      description: `${ct.name} will be removed. Existing meetings keep the type they were recorded with.`,
+      confirmLabel: "Delete call type",
+      variant: "danger",
+    });
+    if (!ok) return;
     setError(null);
     setBusy(ct.id);
     try {

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import { ApiError, api, type AiOverview, type Preferences, type ProviderStatus, type SttStatus } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useConfirm } from "@/lib/confirm";
 import { type CaptureHandle, pcmToWavBlob, startCapture } from "@/lib/live";
 
 // Verified empirically against real voice enrollment (see the plan's Phase
@@ -101,6 +102,7 @@ const DEEPGRAM_LANGUAGES: { code: string; label: string }[] = [
 
 export default function Settings() {
   const { user, refreshUser } = useAuth();
+  const confirm = useConfirm();
   const [providers, setProviders] = useState<ProviderStatus[] | null>(null);
   const [sttStatus, setSttStatus] = useState<SttStatus | null>(null);
   const [aiOverview, setAiOverview] = useState<AiOverview | null>(null);
@@ -175,6 +177,15 @@ export default function Settings() {
   }
 
   async function onStartRecording() {
+    if (user?.voice_enrolled) {
+      const ok = await confirm({
+        title: "Replace your voice sample?",
+        description: "The existing enrollment will be overwritten once you finish recording.",
+        confirmLabel: "Re-record",
+        variant: "danger",
+      });
+      if (!ok) return;
+    }
     setError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -228,6 +239,13 @@ export default function Settings() {
   }
 
   async function onRemoveVoice() {
+    const ok = await confirm({
+      title: "Remove your voice sample?",
+      description: "Speaker matching will stop using this enrollment until you record a new one.",
+      confirmLabel: "Remove sample",
+      variant: "danger",
+    });
+    if (!ok) return;
     setError(null);
     setEnrolling(true);
     try {
@@ -263,6 +281,13 @@ export default function Settings() {
   }
 
   async function onRemove(provider: ProviderStatus["provider"]) {
+    const ok = await confirm({
+      title: "Remove this API key?",
+      description: "This provider will fall back to an instance-wide key if one is set, or disconnect.",
+      confirmLabel: "Remove key",
+      variant: "danger",
+    });
+    if (!ok) return;
     setError(null);
     setBusy(provider);
     try {
@@ -292,6 +317,13 @@ export default function Settings() {
   }
 
   async function onRemoveStt() {
+    const ok = await confirm({
+      title: "Remove this API key?",
+      description: "Transcription will fall back to local whisper, or an instance-wide Deepgram key if one is set.",
+      confirmLabel: "Remove key",
+      variant: "danger",
+    });
+    if (!ok) return;
     setError(null);
     setBusy("stt");
     try {

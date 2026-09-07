@@ -5,6 +5,7 @@ import logoDark from "@/assets/logo-dark.svg";
 import logoLight from "@/assets/logo-light.svg";
 import Footer from "@/components/Footer";
 import { useAuth } from "@/lib/auth";
+import { useConfirm } from "@/lib/confirm";
 
 const NAV = [
   { to: "/dashboard", label: "Meetings" },
@@ -14,8 +15,19 @@ const NAV = [
 
 export default function AppShell({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
+  const confirm = useConfirm();
   const location = useLocation();
   const nav = user?.role === "admin" ? [...NAV, { to: "/admin", label: "Admin" }] : NAV;
+
+  async function onSignOut() {
+    const ok = await confirm({
+      title: "Sign out?",
+      description: "You'll need to sign in again to get back to your meetings.",
+      confirmLabel: "Sign out",
+    });
+    if (!ok) return;
+    logout();
+  }
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -50,7 +62,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
           </div>
           <div className="flex items-center gap-4">
             <span className="text-sm text-ink-muted">{user?.full_name}</span>
-            <button onClick={logout} className="text-sm text-ink-muted hover:text-ink dark:hover:text-ink-inverted">
+            <button onClick={onSignOut} className="text-sm text-ink-muted hover:text-ink dark:hover:text-ink-inverted">
               Sign out
             </button>
           </div>
