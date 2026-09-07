@@ -16,7 +16,7 @@ from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.services.access import searchable_kb_keywords
 from app.services.embeddings import kb_keywords as kb_keywords_module
 from app.services.embeddings.kb_keywords import extract_keywords_via_llm
-from app.services.llm.base import LLMError, LLMMessage, LLMResponse
+from app.services.llm.base import LLMError, LLMResponse
 from app.services.llm.resolve import resolve_provider
 
 
