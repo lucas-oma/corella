@@ -262,7 +262,17 @@ class DeepgramLiveStream:
                     WhisperWord(
                         start=float(w.get("start") or 0.0) - base,
                         end=float(w.get("end") or 0.0) - base,
-                        word=w.get("word") or "",
+                        # Deepgram returns both a raw `word` (lowercase, no
+                        # punctuation) and a `punctuated_word` (capitalized,
+                        # punctuated) per word whenever punctuate/
+                        # smart_format are on (both are, see connect()) —
+                        # prefer the punctuated form so per-speaker split
+                        # text (live_session.py's _group_words_by_speaker
+                        # path, which has no polished whole-utterance
+                        # `transcript` string to fall back on) reads the
+                        # same as Deepgram's own smart-formatted text,
+                        # not raw lowercase tokens glued together.
+                        word=w.get("punctuated_word") or w.get("word") or "",
                         # Present whenever diarize=true was honored — absent
                         # (None) falls back to today's single-segment
                         # behavior in live_session.py, so a Deepgram account/

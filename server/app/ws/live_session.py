@@ -343,10 +343,19 @@ async def _open_deepgram_stream(websocket: WebSocket, session: LiveSession, chan
 
         try:
             runs = _group_words_by_speaker(result.words) if result.words else []
-            if len(runs) <= 1:
-                # No word-level diarization info at all (empty words, or
-                # every word shares the same/no speaker) — today's
-                # unchanged single-segment behavior, no speaker attached.
+            if not runs:
+                # No word-level info returned at all (Deepgram config
+                # without word timings, or an empty words list) — the only
+                # genuine "nothing to work with" case. Bug fixed here,
+                # found by real-world testing: this used to also trigger
+                # whenever there was exactly one run, which conflates "no
+                # diarization info" with "one confident, unambiguous
+                # speaker for the whole utterance" — the *common* real
+                # case (most utterances don't span a mid-sentence speaker
+                # change) — silently dropping the speaker on it every
+                # time. The loop below already handles a single run
+                # correctly (it just runs once); nothing special-cased
+                # needed for that case anymore.
                 start_ms = offset_ms + round(result.start_s * 1000)
                 end_ms = offset_ms + round((result.start_s + result.duration_s) * 1000)
                 await _commit_segment(websocket, session, channel, start_ms, end_ms, result.text, result.words)
