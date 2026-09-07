@@ -19,7 +19,7 @@ What to avoid: stock photography, icon packs used decoratively, marketing-style 
 ## Logo
 
 - Files: `web/src/assets/logo-light.svg` (for light backgrounds) and `logo-dark.svg` (for dark backgrounds) — always pair them behind a `dark:` media/class swap, never pick one statically. See `web/src/components/AppShell.tsx` for the reference implementation.
-- Favicons: `web/public/favicon-light.svg` / `favicon-dark.svg`, wired via two `<link rel="icon">` tags with `media="(prefers-color-scheme: dark)"` on the dark one (see `web/index.html`).
+- Favicon: `web/public/favicon.png` (see `web/index.html`). One file is enough while the mark has a white background. If it later becomes a transparent mark, split into light/dark again so it stays visible on both Chrome themes.
 - Don't recolor, rotate, stretch, or add effects (drop shadow, outline) to the mark. Don't place it on a busy or low-contrast background — it's designed to sit on the surface tokens below.
 - Minimum display size: 20px tall. Below that, drop the wordmark and use the mark alone if you need something smaller (e.g. a browser tab).
 
@@ -96,6 +96,7 @@ These are the actual reusable classes defined in `web/src/index.css` (`@layer co
 - **`.card`** — the base container for every section: bordered, raised surface, `shadow-card`, dark-mode pair included.
 - **`.btn-primary`** — solid `accent` background, for the one primary action in a given context (e.g. "Save", "Stop" on a live call).
 - **`.btn-secondary`** — bordered, transparent background, for every other action (secondary confirmations, "Cancel", per-row actions).
+- **`.btn-danger`** — solid `status-danger` background. Exists only as the confirm button inside `ConfirmDialog` for destroy/revoke actions. Never use it as a page-level primary; list-row Delete/Remove links stay muted text (`text-ink-subtle hover:text-status-danger`) and open the dialog.
 - **`.field`** — the standard text input/select styling, with an `accent`-colored focus border.
 - **`.label`** — small muted label text above a field (`text-sm font-medium text-ink-muted`).
 
@@ -121,6 +122,27 @@ Active vs. inactive nav items follow one rule: active gets a filled `accent` pil
 
 No icon library is installed. If a screen genuinely needs icons, keep them stroke-based and single-color (`currentColor`, inheriting `ink`/`accent` — never a multi-color icon set), and raise it as a real decision (which library, why) rather than adding one ad hoc for a single use.
 
+## Critical actions
+
+Any action that **destroys data, revokes access, overwrites irreplaceable state, or ends a session** must go through `useConfirm()` / `ConfirmDialog` (`web/src/lib/confirm.tsx`) before it runs. Never fire on the first click. Never use `window.confirm`.
+
+Covered today: deletes, remove/revoke (voice sample, API keys), sign out, stop recording, regenerate/overwrite an existing report, privilege changes (role, remove from group). The same rule applies to password change and account delete if those UIs are added later.
+
+Not covered: reversible saves the user just typed (name, prefs, a new API key), first-time create/generate, toggles, moving a user between groups.
+
+```tsx
+const confirm = useConfirm();
+const ok = await confirm({
+  title: "Delete this meeting?",
+  description: "The recording, transcript, and report will be removed. This can't be undone.",
+  confirmLabel: "Delete meeting",
+  variant: "danger", // destroy/revoke; omit or "default" for session/overwrite
+});
+if (!ok) return;
+```
+
+Copy stays plain and specific — name what will happen, no exclamation points. Escape and backdrop click cancel.
+
 ## Voice & copy
 
 - Plain and specific over clever. "Couldn't save — check your connection" beats "Oops! Something went wrong ✨".
@@ -136,6 +158,7 @@ Before opening a PR that touches `web/`:
 - [ ] Every color/surface class has a `dark:` pairing.
 - [ ] Headlines use `font-serif`; everything else uses the default `font-sans`.
 - [ ] New containers use `.card`, not a hand-rolled border/shadow.
-- [ ] New buttons use `.btn-primary`/`.btn-secondary`, not one-off styling.
+- [ ] New buttons use `.btn-primary`/`.btn-secondary`, not one-off styling. `.btn-danger` only inside `ConfirmDialog`.
 - [ ] Copy is plain, specific, and exclamation-point-free.
+- [ ] If you added a delete, revoke, sign-out, overwrite, or other irreversible action, it goes through `useConfirm()` first.
 - [ ] If you added a new token or component class, this file is updated in the same change.

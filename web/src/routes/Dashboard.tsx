@@ -5,6 +5,7 @@ import AppShell from "@/components/AppShell";
 import CallTypeModal from "@/components/CallTypeModal";
 import { ApiError, api, type GroupMeeting, type Meeting, type MeetingSearchResult } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useConfirm } from "@/lib/confirm";
 
 const STATUS_LABEL: Record<Meeting["status"], string> = {
   recording: "Recording",
@@ -22,6 +23,7 @@ function titleFromFilename(name: string): string {
 export default function Dashboard() {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [meetings, setMeetings] = useState<Meeting[] | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -165,6 +167,13 @@ export default function Dashboard() {
   async function onDelete(e: React.MouseEvent, meetingId: string) {
     e.preventDefault();
     e.stopPropagation();
+    const ok = await confirm({
+      title: "Delete this meeting?",
+      description: "The recording, transcript, and report will be removed. This can't be undone.",
+      confirmLabel: "Delete meeting",
+      variant: "danger",
+    });
+    if (!ok) return;
     setDeletingId(meetingId);
     try {
       await api.deleteMeeting(meetingId);

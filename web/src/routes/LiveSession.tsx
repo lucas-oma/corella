@@ -14,6 +14,7 @@ import {
   startCapture,
 } from "@/lib/live";
 import { useAuth } from "@/lib/auth";
+import { useConfirm } from "@/lib/confirm";
 
 type ConnectionState = "connecting" | "connected" | "error";
 
@@ -54,6 +55,7 @@ export default function LiveSession() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const confirm = useConfirm();
 
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -255,7 +257,13 @@ export default function LiveSession() {
     }
   }
 
-  function onStop() {
+  async function onStop() {
+    const ok = await confirm({
+      title: "Stop recording?",
+      description: "The session will end and the meeting will start processing.",
+      confirmLabel: "Stop recording",
+    });
+    if (!ok) return;
     setStopping(true);
     clientRef.current?.stop();
   }

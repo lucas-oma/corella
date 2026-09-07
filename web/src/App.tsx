@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { ConfirmProvider } from "@/lib/confirm";
 import Admin from "@/routes/Admin";
 import Dashboard from "@/routes/Dashboard";
 import KnowledgeBase from "@/routes/KnowledgeBase";
@@ -27,61 +28,63 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
 export default function App() {
   return (
     <AuthProvider>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route
-          path="/dashboard"
-          element={
-            <RequireAuth>
-              <Dashboard />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/meetings/:meetingId"
-          element={
-            <RequireAuth>
-              <MeetingDetail />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/meetings/:meetingId/live"
-          element={
-            <RequireAuth>
-              <LiveSession />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/knowledge-base"
-          element={
-            <RequireAuth>
-              <KnowledgeBase />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <RequireAuth>
-              <Settings />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/admin"
-          element={
-            <RequireAuth>
-              <RequireAdmin>
-                <Admin />
-              </RequireAdmin>
-            </RequireAuth>
-          }
-        />
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
-      </Routes>
+      <ConfirmProvider>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route
+            path="/dashboard"
+            element={
+              <RequireAuth>
+                <Dashboard />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/meetings/:meetingId"
+            element={
+              <RequireAuth>
+                <MeetingDetail />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/meetings/:meetingId/live"
+            element={
+              <RequireAuth>
+                <LiveSession />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/knowledge-base"
+            element={
+              <RequireAuth>
+                <KnowledgeBase />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <RequireAuth>
+                <Settings />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <RequireAuth>
+                <RequireAdmin>
+                  <Admin />
+                </RequireAdmin>
+              </RequireAuth>
+            }
+          />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
+      </ConfirmProvider>
     </AuthProvider>
   );
 }
