@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="web/src/assets/logo-dark.svg" />
-    <img alt="Corella" src="web/src/assets/logo-light.svg" height="72" />
-  </picture>
+  <img alt="Corella" src="web/src/assets/logo-light.png" width="96" height="96" style="border-radius: 16px; object-fit: contain;" />
 </p>
 
 # Corella
