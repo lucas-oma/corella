@@ -52,7 +52,9 @@ def warm_up() -> None:
     _model()
 
 
-def transcribe(audio_path: str, word_timestamps: bool = False) -> list[WhisperSegment]:
+def transcribe(
+    audio_path: str, word_timestamps: bool = False, initial_prompt: str | None = None
+) -> list[WhisperSegment]:
     """Transcribe a mono 16kHz WAV file. Loads the model once per worker
     process (module-level lazy singleton) — reloading it per task would
     dominate processing time.
@@ -62,8 +64,15 @@ def transcribe(audio_path: str, word_timestamps: bool = False) -> list[WhisperSe
     speaker-turn spans — see reconcile_diarization's own docstring) but
     kept as real API surface for a future caller that needs per-word
     timing; off by default since nothing today needs the extra decode cost.
+
+    initial_prompt is faster-whisper/Whisper's own vocabulary-biasing
+    mechanism — the local-model equivalent of Deepgram's `keywords` param
+    (app/services/asr/deepgram.py). See app/services/asr/keyword_prompt.py
+    for how a KB keyword list becomes this string.
     """
-    segments, _info = _model().transcribe(audio_path, vad_filter=True, word_timestamps=word_timestamps)
+    segments, _info = _model().transcribe(
+        audio_path, vad_filter=True, word_timestamps=word_timestamps, initial_prompt=initial_prompt
+    )
     result = []
     for s in segments:
         text = s.text.strip()

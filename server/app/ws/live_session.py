@@ -19,8 +19,10 @@ from app.core.security import decode_access_token
 from app.models.cost import UsageKind
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.models.user import User, UserRole
+from app.services.access import searchable_kb_keywords
 from app.services.asr import deepgram
 from app.services.asr.deepgram_stream import DeepgramLiveStream, DeepgramStreamError, StreamResult
+from app.services.asr.keyword_prompt import keywords_to_initial_prompt
 from app.services.asr.pricing import estimate_stt_cost_usd
 from app.services.asr.resolve import ResolvedStt, resolve_stt_provider
 from app.services.asr.whisper import WhisperWord, warm_up
@@ -96,11 +98,18 @@ class LiveSession:
         provider: ResolvedProvider | None,
         stt: ResolvedStt,
         is_admin: bool = False,
+        kb_keywords: list[str] | None = None,
     ):
         self.meeting_id = meeting_id
         self.owner_id = owner_id
         self.provider = provider
         self.stt = stt
+        # Resolved once at session start (app/services/access.py:
+        # searchable_kb_keywords), not re-fetched per utterance — fed to
+        # every transcription call this session makes, Deepgram or local
+        # whisper alike (see _open_deepgram_stream, _transcribe_pcm,
+        # _transcribe_pcm_whisper, and the preview decode path).
+        self.kb_keywords = kb_keywords or []
         self._start = time.monotonic()
         # Admin-only live debug panel (own session only — see the plan's
         # Phase R). Off by default and toggled by an explicit control frame;
@@ -391,7 +400,14 @@ async def _open_deepgram_stream(websocket: WebSocket, session: LiveSession, chan
         session.debug("stt_fallback", provider="deepgram", channel=channel_key, reason="stream closed")
         await _log_deepgram_stt_cost(session, stream)
 
-    stream = DeepgramLiveStream(session.stt.api_key, session.stt.model, session.stt.language, on_result, on_closed)
+    stream = DeepgramLiveStream(
+        session.stt.api_key,
+        session.stt.model,
+        session.stt.language,
+        on_result,
+        on_closed,
+        keywords=session.kb_keywords,
+    )
     try:
         # Captured right before connecting, not after — the offset only
         # needs to be close, and this keeps it simple; connect() itself is
@@ -429,6 +445,7 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         await db.commit()
         provider = await resolve_provider(db, user.id)
         stt = await resolve_stt_provider(db, user.id)
+        kb_keywords = await searchable_kb_keywords(db, user.id)
 
     # Load the local model *before* saying "ready" regardless of which STT
     # engine is preferred — better a few extra seconds of "Connecting…" on
@@ -439,7 +456,9 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
     # already be ready, not cold-loading mid-call.
     await asyncio.get_running_loop().run_in_executor(None, warm_up)
 
-    session = LiveSession(meeting_id, user.id, provider, stt, is_admin=user.role == UserRole.ADMIN)
+    session = LiveSession(
+        meeting_id, user.id, provider, stt, is_admin=user.role == UserRole.ADMIN, kb_keywords=kb_keywords
+    )
 
     if stt.provider == "deepgram":
         # One persistent connection per channel, opened right alongside the
@@ -868,7 +887,9 @@ async def _run_preview_decode(
     started = time.monotonic()
     text = ""
     try:
-        text, _words = await _transcribe_pcm_whisper(pcm, word_timestamps=False, debug=session.debug)
+        text, _words = await _transcribe_pcm_whisper(
+            pcm, word_timestamps=False, debug=session.debug, kb_keywords=session.kb_keywords
+        )
     except Exception:
         logger.exception("Live session %s: preview decode failed for %s", session.meeting_id, channel.value)
     finally:
@@ -891,7 +912,9 @@ async def _transcribe_and_send(websocket: WebSocket, session: LiveSession, utter
     # W's periodic reconciliation relabels already-committed segments by
     # turn overlap, never splits one — see reconcile_diarization's own
     # docstring), so it's always False on the committed-segment path now.
-    text, words = await _transcribe_pcm(utterance.pcm, session.stt, word_timestamps=False, debug=session.debug)
+    text, words = await _transcribe_pcm(
+        utterance.pcm, session.stt, word_timestamps=False, debug=session.debug, kb_keywords=session.kb_keywords
+    )
     if not text:
         session.debug(
             "transcript_empty", channel=utterance.channel.value, duration_ms=_duration_ms(utterance.pcm)
@@ -1092,7 +1115,11 @@ def _noop_debug(stage: str, **detail) -> None:
 
 
 async def _transcribe_pcm(
-    pcm: bytes, stt: ResolvedStt, word_timestamps: bool = False, debug=_noop_debug
+    pcm: bytes,
+    stt: ResolvedStt,
+    word_timestamps: bool = False,
+    debug=_noop_debug,
+    kb_keywords: list[str] | None = None,
 ) -> tuple[str, list]:
     """Deepgram (if resolved for this session) or local faster-whisper —
     see app/services/asr/resolve.py. A Deepgram failure mid-session falls
@@ -1102,7 +1129,10 @@ async def _transcribe_pcm(
 
     `debug` is session.debug (or a no-op default for callers that don't
     care, e.g. the upload path never reaches this function at all) — see
-    the plan's Phase R admin debug panel.
+    the plan's Phase R admin debug panel. `kb_keywords` is session.
+    kb_keywords, resolved once at session start (app/services/access.py:
+    searchable_kb_keywords) — passed through to whichever engine actually
+    runs.
     """
     if stt.provider == "deepgram":
         pcm_duration_ms = _duration_ms(pcm)
@@ -1110,7 +1140,12 @@ async def _transcribe_pcm(
         started = time.monotonic()
         try:
             segments = await deepgram.transcribe(
-                _wav_bytes(pcm), stt.model, stt.api_key, word_timestamps, language=stt.language
+                _wav_bytes(pcm),
+                stt.model,
+                stt.api_key,
+                word_timestamps,
+                language=stt.language,
+                keywords=kb_keywords,
             )
             text, words = _segments_to_text_words(segments)
             debug(
@@ -1126,16 +1161,22 @@ async def _transcribe_pcm(
                 "Deepgram live transcription failed; falling back to local whisper for this utterance"
             )
             debug("stt_fallback", provider="deepgram", reason=str(e))
-    return await _transcribe_pcm_whisper(pcm, word_timestamps, debug)
+    return await _transcribe_pcm_whisper(pcm, word_timestamps, debug, kb_keywords)
 
 
-async def _transcribe_pcm_whisper(pcm: bytes, word_timestamps: bool, debug=_noop_debug) -> tuple[str, list]:
+async def _transcribe_pcm_whisper(
+    pcm: bytes, word_timestamps: bool, debug=_noop_debug, kb_keywords: list[str] | None = None
+) -> tuple[str, list]:
+    initial_prompt = keywords_to_initial_prompt(kb_keywords or [])
+
     def _run() -> tuple[str, list]:
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         try:
             write_wav(path, pcm)
-            segments = whisper_transcribe(path, word_timestamps=word_timestamps)
+            segments = whisper_transcribe(
+                path, word_timestamps=word_timestamps, initial_prompt=initial_prompt
+            )
             return _segments_to_text_words(segments)
         finally:
             os.unlink(path)

@@ -21,6 +21,10 @@ class UsageKind(str, enum.Enum):
     REPORT = "report"
     STT_UPLOAD = "stt_upload"
     STT_LIVE = "stt_live"
+    # A one-shot LLM call at KB document upload time, not tied to any
+    # meeting (app/services/embeddings/kb_keywords.py) — the one UsageKind
+    # whose LLMUsageEvent row always has meeting_id=None.
+    KB_EXTRACTION = "kb_extraction"
 
 
 class LLMUsageEvent(UUIDPrimaryKeyMixin, Base):

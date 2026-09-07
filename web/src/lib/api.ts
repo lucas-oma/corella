@@ -193,6 +193,16 @@ export interface TranscriptSegment {
   text: string;
 }
 
+/** One persisted live-copilot cycle (app/services/copilot/live.py:run_cycle)
+ * — timestamp-anchored to the transcript, shown next to it on MeetingDetail. */
+export interface CopilotInsight {
+  id: string;
+  at_ms: number;
+  suggestion: string | null;
+  blockers: string[];
+  coach_score: number | null;
+}
+
 export interface ProviderStatus {
   provider: "anthropic" | "openai" | "gemini" | "ollama";
   connected: boolean;
@@ -304,6 +314,7 @@ export interface KBDocument {
   created_at: string;
   owner_id: string;
   owner_name: string;
+  keywords: string[] | null;
 }
 
 export const api = {
@@ -346,6 +357,7 @@ export const api = {
     return request<Meeting>(`/api/meetings/${id}/audio`, { method: "POST", body: form });
   },
   getTranscript: (id: string) => request<TranscriptSegment[]>(`/api/meetings/${id}/transcript`),
+  getCopilotInsights: (id: string) => request<CopilotInsight[]>(`/api/meetings/${id}/insights`),
   getAudioObjectUrl: (id: string) => requestObjectUrl(`/api/meetings/${id}/audio`),
   deleteMeeting: (id: string) => request<void>(`/api/meetings/${id}`, { method: "DELETE" }),
   getProviderStatus: () => request<ProviderStatus[]>("/api/settings/providers"),

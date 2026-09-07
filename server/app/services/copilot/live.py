@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.models.cost import UsageKind
 from app.models.kb_document import KBDocument, KBDocumentStatus
-from app.models.meeting import ActionItem, ActionItemStatus, Channel, TranscriptSegment
+from app.models.meeting import ActionItem, ActionItemStatus, Channel, CopilotInsight, TranscriptSegment
 from app.services.access import searchable_owner_ids
 from app.services.copilot.action_items import persist_new_action_items
 from app.services.copilot.cost import add_meeting_cost
@@ -119,10 +119,33 @@ async def run_cycle(
         logger.info("Copilot cycle skipped for meeting %s: %s", meeting_id, e)
         return None
 
+    suggestion = parsed.get("suggestion") or None
+    blockers = as_str_list(parsed.get("blockers"))
+    raw_coach_score = parsed.get("coach_score")
+    coach_score = int(raw_coach_score) if isinstance(raw_coach_score, int | float) else None
+
     new_action_items = as_str_list(parsed.get("action_items"))
     if new_action_items:
         await persist_new_action_items(db, meeting_id, new_action_items)
-        await db.commit()
+
+    # Every successfully-parsed cycle gets a row, even one with no
+    # suggestion/blockers — coach_score is required by _SYSTEM_PROMPT on
+    # every response (unlike suggestion), so gating this on
+    # suggestion/blockers being non-empty would leave a score-over-time
+    # view sparse for no reason. Anchored to the transcript's own clock
+    # (the most recent segment this cycle actually saw), not session-
+    # elapsed wall time, so it lines up with TranscriptSegment.start_ms/
+    # end_ms for display (MeetingDetail's insights column).
+    db.add(
+        CopilotInsight(
+            meeting_id=meeting_id,
+            at_ms=all_segments[-1].end_ms,
+            suggestion=suggestion,
+            blockers=blockers,
+            coach_score=coach_score,
+        )
+    )
+    await db.commit()
 
     open_items = list(
         await db.scalars(
@@ -132,12 +155,11 @@ async def run_cycle(
         )
     )
 
-    coach_score = parsed.get("coach_score")
     return CopilotResult(
-        suggestion=(parsed.get("suggestion") or None),
-        blockers=as_str_list(parsed.get("blockers")),
+        suggestion=suggestion,
+        blockers=blockers,
         action_items=open_items,
-        coach_score=int(coach_score) if isinstance(coach_score, int | float) else None,
+        coach_score=coach_score,
     )
 
 

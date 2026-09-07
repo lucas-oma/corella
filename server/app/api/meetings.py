@@ -11,8 +11,9 @@ from app.api.deps import get_current_user, require_admin
 from app.core import storage
 from app.core.db import get_db
 from app.models.call_type import CallType
-from app.models.meeting import ActionItem, Meeting, MeetingStatus, TranscriptSegment
+from app.models.meeting import ActionItem, CopilotInsight, Meeting, MeetingStatus, TranscriptSegment
 from app.models.user import User, UserRole
+from app.schemas.copilot_insight import CopilotInsightRead
 from app.schemas.meeting import GroupMeetingRead, MeetingCreate, MeetingRead, MeetingSearchResult
 from app.schemas.report import ActionItemRead, ActionItemUpdate, ReportResponse
 from app.schemas.transcript import TranscriptSegmentRead
@@ -336,6 +337,29 @@ async def get_meeting_transcript(
         select(TranscriptSegment)
         .where(TranscriptSegment.meeting_id == meeting_id)
         .order_by(TranscriptSegment.start_ms)
+    )
+    return list(result)
+
+
+@router.get("/{meeting_id}/insights", response_model=list[CopilotInsightRead])
+async def get_meeting_insights(
+    meeting_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[CopilotInsight]:
+    """Every live-copilot cycle's persisted suggestion/blockers/coach_score
+    (app/services/copilot/live.py:run_cycle), timestamp-ordered — shown next
+    to the transcript on MeetingDetail. Same access boundary as the
+    transcript itself (_get_full_readable_meeting, owner + admin only, no
+    group): these are meaningless without the transcript context they're
+    anchored to (at_ms), which already stops at that same boundary.
+    """
+    await _get_full_readable_meeting(meeting_id, current_user, db)
+
+    result = await db.scalars(
+        select(CopilotInsight)
+        .where(CopilotInsight.meeting_id == meeting_id)
+        .order_by(CopilotInsight.at_ms)
     )
     return list(result)
 

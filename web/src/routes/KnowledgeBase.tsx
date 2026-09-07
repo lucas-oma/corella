@@ -126,6 +126,19 @@ export default function KnowledgeBase() {
                 {doc.status === "failed" && doc.error && (
                   <p className="mt-1 text-xs text-status-danger">{doc.error}</p>
                 )}
+                {doc.status === "ready" && doc.keywords && doc.keywords.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {doc.keywords.map((keyword) => (
+                      <span
+                        key={keyword}
+                        className="rounded-full bg-black/[0.03] px-2.5 py-0.5 text-xs text-ink-muted dark:bg-white/[0.06]"
+                        title="Boosts transcription accuracy for this term"
+                      >
+                        {keyword}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="ml-4 flex shrink-0 items-center gap-3">
                 <span

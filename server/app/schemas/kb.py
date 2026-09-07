@@ -22,3 +22,9 @@ class KBDocumentRead(BaseModel):
     # Matters once a document can show up in someone else's list via a
     # shared group knowledge base, not just the uploader's own.
     owner_name: str
+    # LLM-extracted proper nouns/product names/acronyms/jargon (app/
+    # services/embeddings/kb_keywords.py) — None if extraction hasn't run
+    # yet, failed, or found nothing distinctive. Fed to Deepgram/Whisper at
+    # transcription time (app/services/access.py:searchable_kb_keywords);
+    # surfaced here too so it's visible, not just a backend-only effect.
+    keywords: list[str] | None

@@ -2,7 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type ActionItem, type Meeting, type TranscriptSegment } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  type ActionItem,
+  type CopilotInsight,
+  type Meeting,
+  type TranscriptSegment,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
 const POLL_INTERVAL_MS = 3000;
@@ -100,6 +107,128 @@ function hasUnresolvedLiveSpeaker(segments: TranscriptSegment[]): boolean {
   );
 }
 
+const CHART_W = 264;
+const CHART_H = 64;
+
+/** A small inline-SVG line chart of coach_score over the call's own timeline
+ * (at_ms) — one series, one hue (the app's own `accent`, same token the talk-
+ * ratio bar already uses), no legend needed per the dataviz skill's single-
+ * series rule. Hover shows a crosshair + tooltip (score, timestamp); clicking
+ * anywhere seeks the audio to that moment, same interaction the transcript
+ * rows and the insight list below it both already have. */
+function CoachScoreTimeline({
+  insights,
+  onSeek,
+}: {
+  insights: CopilotInsight[];
+  onSeek: (ms: number) => void;
+}) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const scored = insights.filter((i): i is CopilotInsight & { coach_score: number } => i.coach_score !== null);
+  if (scored.length === 0) return null;
+
+  const maxMs = Math.max(1, scored[scored.length - 1].at_ms);
+  const x = (ms: number) => (ms / maxMs) * CHART_W;
+  const y = (score: number) => CHART_H - (score / 100) * CHART_H;
+  const points = scored.map((i) => ({ x: x(i.at_ms), y: y(i.coach_score), insight: i }));
+  const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  const hovered = hoverIndex !== null ? points[hoverIndex] : null;
+
+  function onMove(e: React.MouseEvent<SVGSVGElement>) {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const relX = ((e.clientX - rect.left) / rect.width) * CHART_W;
+    let nearest = 0;
+    for (let i = 1; i < points.length; i++) {
+      if (Math.abs(points[i].x - relX) < Math.abs(points[nearest].x - relX)) nearest = i;
+    }
+    setHoverIndex(nearest);
+  }
+
+  return (
+    <div className="relative">
+      <p className="label mb-1">Score over time</p>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+        className="w-full cursor-pointer overflow-visible"
+        style={{ height: CHART_H }}
+        onMouseMove={onMove}
+        onMouseLeave={() => setHoverIndex(null)}
+        onClick={() => hovered && onSeek(hovered.insight.at_ms)}
+      >
+        {/* Recessive gridlines at 0/50/100 */}
+        {[0, 50, 100].map((score) => (
+          <line
+            key={score}
+            x1={0}
+            x2={CHART_W}
+            y1={y(score)}
+            y2={y(score)}
+            className="stroke-border dark:stroke-border-dark"
+            strokeWidth={1}
+          />
+        ))}
+        <path
+          d={path}
+          fill="none"
+          className="stroke-accent dark:stroke-ink-inverted"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        {hovered && (
+          <>
+            <line
+              x1={hovered.x}
+              x2={hovered.x}
+              y1={0}
+              y2={CHART_H}
+              className="stroke-ink-subtle"
+              strokeWidth={1}
+              strokeDasharray="2,2"
+            />
+            <circle
+              cx={hovered.x}
+              cy={hovered.y}
+              r={3.5}
+              className="fill-accent stroke-surface-raised dark:fill-ink-inverted dark:stroke-surface-dark-raised"
+              strokeWidth={2}
+            />
+          </>
+        )}
+      </svg>
+      {hovered && (
+        <div
+          className="pointer-events-none absolute rounded-sm border border-border bg-surface-raised px-2 py-1 text-xs shadow-card dark:border-border-dark dark:bg-surface-dark-raised"
+          style={{
+            left: `${Math.min(85, Math.max(0, (hovered.x / CHART_W) * 100))}%`,
+            // Anchored to the hovered point's own y (not always the chart's
+            // top) so a low-score point's tooltip doesn't have to reach all
+            // the way up past the "Score over time" label above it. Flips
+            // to sit below the point for the chart's whole top half — the
+            // tooltip itself is taller than the top half's available
+            // clearance, so "above" only actually fits once the point is
+            // past the midline.
+            top: `${(hovered.y / CHART_H) * 100}%`,
+            transform:
+              hovered.y < CHART_H / 2
+                ? "translate(-50%, 8px)"
+                : "translate(-50%, calc(-100% - 8px))",
+          }}
+        >
+          <span className="font-medium text-ink dark:text-ink-inverted">
+            {hovered.insight.coach_score}/100
+          </span>
+          <span className="ml-1.5 text-ink-subtle">{formatTimestamp(hovered.insight.at_ms)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function MeetingDetail() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
@@ -121,6 +250,7 @@ export default function MeetingDetail() {
   // 404 for anyone else, admin included, on write routes).
   const canViewFull = isOwner || user?.role === "admin";
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
+  const [insights, setInsights] = useState<CopilotInsight[] | null>(null);
   // True while the transcript-loading effect below is still re-polling for
   // same-room diarization to catch up on any segment it loaded without a
   // resolved speaker yet — see speakerLabel's docstring.
@@ -192,6 +322,13 @@ export default function MeetingDetail() {
       // transcript either way (previously the !endedRecently branch only
       // cleared the spinner flag and never called getTranscript, leaving
       // the page stuck on "Loading transcript…" forever after refresh).
+      // Insights (persisted live-copilot cycles) never change after the
+      // call ends — unlike the transcript, no re-poll loop needed, one
+      // fetch is enough.
+      api.getCopilotInsights(meetingId).then((fresh) => {
+        if (!cancelled) setInsights(fresh);
+      });
+
       const endedRecently =
         !!meeting.ended_at && Date.now() - new Date(meeting.ended_at).getTime() < DIARIZATION_GRACE_MS;
       (async () => {
@@ -543,46 +680,112 @@ export default function MeetingDetail() {
                 )}
               </div>
 
-              {canViewFull && transcript === null && (
-                <p className="text-sm text-ink-muted">Loading transcript…</p>
-              )}
+              {canViewFull && (
+                <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
+                  <div>
+                    {transcript === null && (
+                      <p className="text-sm text-ink-muted">Loading transcript…</p>
+                    )}
 
-              {canViewFull && transcript?.length === 0 && (
-                <div className="card p-10 text-center">
-                  <p className="text-sm text-ink-muted">No speech was detected in this recording.</p>
-                </div>
-              )}
+                    {transcript?.length === 0 && (
+                      <div className="card p-10 text-center">
+                        <p className="text-sm text-ink-muted">
+                          No speech was detected in this recording.
+                        </p>
+                      </div>
+                    )}
 
-              {canViewFull && transcript && transcript.length > 0 && (
-                <ol className="card divide-y divide-border dark:divide-border-dark">
-                  {transcript.map((segment) => {
-                    const label = speakerLabel(segment, user?.id, diarizationCatchingUp);
-                    return (
-                      <li key={segment.id}>
-                        <button
-                          onClick={() => seekTo(segment.start_ms)}
-                          className="flex w-full gap-4 px-5 py-3 text-left transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
-                        >
-                          <span className="w-12 shrink-0 pt-0.5 font-mono text-xs text-ink-subtle">
-                            {formatTimestamp(segment.start_ms)}
-                          </span>
-                          <span>
-                            {label && (
-                              <span
-                                className={`mr-2 text-xs font-medium text-ink-muted ${
-                                  label === "Identifying…" || label === "Unknown" ? "italic opacity-70" : ""
-                                }`}
+                    {transcript && transcript.length > 0 && (
+                      <ol className="card divide-y divide-border dark:divide-border-dark">
+                        {transcript.map((segment) => {
+                          const label = speakerLabel(segment, user?.id, diarizationCatchingUp);
+                          return (
+                            <li key={segment.id}>
+                              <button
+                                onClick={() => seekTo(segment.start_ms)}
+                                className="flex w-full gap-4 px-5 py-3 text-left transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
                               >
-                                {label}
-                              </span>
-                            )}
-                            <span className="text-sm text-ink dark:text-ink-inverted">{segment.text}</span>
-                          </span>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ol>
+                                <span className="w-12 shrink-0 pt-0.5 font-mono text-xs text-ink-subtle">
+                                  {formatTimestamp(segment.start_ms)}
+                                </span>
+                                <span>
+                                  {label && (
+                                    <span
+                                      className={`mr-2 text-xs font-medium text-ink-muted ${
+                                        label === "Identifying…" || label === "Unknown"
+                                          ? "italic opacity-70"
+                                          : ""
+                                      }`}
+                                    >
+                                      {label}
+                                    </span>
+                                  )}
+                                  <span className="text-sm text-ink dark:text-ink-inverted">
+                                    {segment.text}
+                                  </span>
+                                </span>
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    )}
+                  </div>
+
+                  <div className="card h-fit space-y-4 p-5">
+                    <h2 className="font-serif text-base text-ink dark:text-ink-inverted">
+                      Copilot insights
+                    </h2>
+
+                    {insights === null && (
+                      <p className="text-xs text-ink-subtle">Loading…</p>
+                    )}
+
+                    {insights?.length === 0 && (
+                      <p className="text-xs text-ink-subtle">No suggestions or blockers yet.</p>
+                    )}
+
+                    {insights && insights.length > 0 && (
+                      <>
+                        <CoachScoreTimeline insights={insights} onSeek={seekTo} />
+                        {insights.every((i) => !i.suggestion && i.blockers.length === 0) ? (
+                          <p className="border-t border-border pt-3 text-xs text-ink-subtle dark:border-border-dark">
+                            Nothing flagged — just the score above.
+                          </p>
+                        ) : (
+                        <ul className="space-y-3 border-t border-border pt-3 dark:border-border-dark">
+                          {insights
+                            .filter((i) => i.suggestion || i.blockers.length > 0)
+                            .map((insight) => (
+                              <li key={insight.id}>
+                                <button
+                                  onClick={() => seekTo(insight.at_ms)}
+                                  className="flex w-full items-start gap-2 text-left transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                                >
+                                  <span className="w-10 shrink-0 pt-0.5 font-mono text-xs text-ink-subtle">
+                                    {formatTimestamp(insight.at_ms)}
+                                  </span>
+                                  <span className="min-w-0 space-y-1">
+                                    {insight.suggestion && (
+                                      <p className="text-sm text-ink dark:text-ink-inverted">
+                                        {insight.suggestion}
+                                      </p>
+                                    )}
+                                    {insight.blockers.map((b, i) => (
+                                      <p key={i} className="text-xs text-status-danger">
+                                        {b}
+                                      </p>
+                                    ))}
+                                  </span>
+                                </button>
+                              </li>
+                            ))}
+                        </ul>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
               )}
             </div>
           )}

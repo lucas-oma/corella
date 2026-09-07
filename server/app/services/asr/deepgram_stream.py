@@ -3,6 +3,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 import websockets
 
@@ -68,12 +69,19 @@ class DeepgramLiveStream:
         language: str,
         on_result: Callable[[StreamResult], Awaitable[None]],
         on_closed: Callable[[], Awaitable[None]],
+        keywords: list[str] | None = None,
     ):
         self._api_key = api_key
         self._model = model
         self._language = language
         self._on_result = on_result
         self._on_closed = on_closed
+        # Same keyword-boosting purpose as deepgram.py's transcribe()
+        # `keywords` param, just built into the query string by hand below
+        # (connect()) instead of handed to httpx — see
+        # app/services/access.py:searchable_kb_keywords for where these
+        # come from.
+        self._keywords = keywords or []
 
         self._ws: websockets.ClientConnection | None = None
         # bytes = an audio chunk, "__close__" = send the documented
@@ -131,6 +139,11 @@ class DeepgramLiveStream:
             "diarize": "true",
         }
         query = "&".join(f"{k}={v}" for k, v in params.items())
+        # keywords is repeatable and may contain spaces/punctuation (a
+        # multi-word KB term) — unlike every other param above, it needs
+        # its own encoded, repeated entries rather than one plain k=v pair.
+        for keyword in self._keywords:
+            query += f"&keywords={quote(keyword)}"
         try:
             self._ws = await websockets.connect(
                 f"{WS_URL}?{query}", additional_headers={"Authorization": f"Token {self._api_key}"}

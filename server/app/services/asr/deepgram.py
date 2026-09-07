@@ -19,6 +19,7 @@ async def transcribe(
     api_key: str | None,
     word_timestamps: bool = False,
     language: str = "multi",
+    keywords: list[str] | None = None,
 ) -> list[WhisperSegment]:
     """Deepgram's prerecorded /v1/listen REST endpoint — used for both
     upload processing and live per-utterance transcription (never their
@@ -46,13 +47,20 @@ async def transcribe(
     if not api_key:
         raise SttError("No Deepgram API key configured")
 
-    params = {
+    params: dict[str, str | list[str]] = {
         "model": model,
         "language": language,
         "smart_format": "true",
         "punctuate": "true",
         "utterances": "true",
     }
+    if keywords:
+        # A list value here becomes a repeated `keywords=` query param
+        # (httpx's own encoding) — Deepgram's documented shape for keyword
+        # boosting, one entry per term, biasing recognition toward
+        # whatever the caller's group KB actually talks about (app/
+        # services/access.py:searchable_kb_keywords).
+        params["keywords"] = keywords
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:

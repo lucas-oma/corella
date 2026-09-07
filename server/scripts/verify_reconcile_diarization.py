@@ -26,7 +26,6 @@ Run inside the fv2-worker throwaway container:
 import argparse
 import base64
 import wave
-from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -101,7 +100,7 @@ def main() -> None:
         # speaker turns.
         boundaries = sorted({0, a_start, a_end, b_start, b_end, args.end_ms})
         chops = []
-        for lo, hi in zip(boundaries, boundaries[1:]):
+        for lo, hi in zip(boundaries, boundaries[1:], strict=False):
             cur = lo
             while cur < hi:
                 nxt = min(cur + CHOP_MS, hi)
