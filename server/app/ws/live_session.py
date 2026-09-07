@@ -10,21 +10,28 @@ from uuid import UUID
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy import func, select
 
 from app.core import storage
 from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.core.security import decode_access_token
-from app.models.meeting import Channel, Meeting, MeetingStatus, TranscriptSegment
+from app.models.cost import UsageKind
+from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.models.user import User, UserRole
 from app.services.asr import deepgram
 from app.services.asr.deepgram_stream import DeepgramLiveStream, DeepgramStreamError, StreamResult
+from app.services.asr.pricing import estimate_stt_cost_usd
 from app.services.asr.resolve import ResolvedStt, resolve_stt_provider
+from app.services.asr.whisper import WhisperWord, warm_up
 from app.services.asr.whisper import transcribe as whisper_transcribe
-from app.services.asr.whisper import warm_up
 from app.services.audio.mixing import extract_channel_window, mix_channel_recordings, write_wav
+from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.live import run_cycle as run_copilot_cycle
 from app.services.diarization import events as diar_events
+from app.services.diarization.cluster import SIMILARITY_THRESHOLD, best_match, peek_clusters
+from app.services.diarization.embedding import embed_utterance
+from app.services.diarization.labels import SPEAKER_LABEL_FORMAT
 from app.services.llm.resolve import ResolvedProvider, resolve_provider
 from app.services.vad.vad import UtteranceDetector
 from app.workers.celery_app import celery_app
@@ -147,6 +154,18 @@ class LiveSession:
         self.last_cycle_at = self._start
         self.copilot_running = False
 
+        # Phase W3: Deepgram-native diarization — maps that channel's own
+        # per-connection-local speaker index (0, 1, 2, ...) to the real
+        # Corella Speaker row created for it, the first time each index is
+        # seen. Purely in-memory/per-connection, unlike the pyannote path's
+        # Redis-backed registry (app/services/diarization/cluster.py) — no
+        # cross-process coordination is needed here at all, since a single
+        # Deepgram socket is only ever read by this one connection.
+        self.deepgram_speakers: dict[Channel, dict[int, Speaker]] = {
+            Channel.ME: {},
+            Channel.THEM: {},
+        }
+
     def elapsed_ms(self) -> int:
         return int((time.monotonic() - self._start) * 1000)
 
@@ -230,6 +249,62 @@ class LiveSession:
                 )
 
 
+def _group_words_by_speaker(words: list[WhisperWord]) -> list[tuple[int | None, list[WhisperWord]]]:
+    """Consecutive same-speaker runs, order preserved — the Deepgram-
+    diarization equivalent of app/workers/tasks.py's
+    _merge_adjacent_same_speaker, but grouping words Deepgram already
+    transcribed (known-good boundaries) rather than merging pyannote's own
+    acoustic turns. A `speaker` of None (diarize wasn't honored, or this
+    word simply lacks it) groups with adjacent None-speaker words the same
+    way — the whole utterance ends up as one ungrouped run, degrading
+    exactly to today's pre-Phase-W3 single-segment behavior.
+    """
+    runs: list[tuple[int | None, list[WhisperWord]]] = []
+    for w in words:
+        if runs and runs[-1][0] == w.speaker:
+            runs[-1][1].append(w)
+        else:
+            runs.append((w.speaker, [w]))
+    return runs
+
+
+async def _get_or_create_deepgram_speaker(session: LiveSession, channel: Channel, dg_index: int) -> Speaker:
+    """The real Corella Speaker row for one Deepgram-diarized channel's own
+    speaker index — created the first time that index is seen, numbered the
+    same way _promote_new_speaker (app/workers/tasks.py) numbers a pyannote-
+    path speaker: by how many real Speaker rows already exist on this
+    channel/meeting, not by the Deepgram index itself (which could start
+    its numbering from whichever voice happens to speak first, not
+    necessarily matching Corella's own "Speaker 1 is whoever we heard
+    first" convention if a later utterance introduces a lower Deepgram
+    index — using our own count keeps numbering consistent with the
+    pyannote path's).
+    """
+    existing = session.deepgram_speakers[channel].get(dg_index)
+    if existing is not None:
+        return existing
+    async with SessionLocal() as db:
+        existing_count = (
+            await db.scalar(
+                select(func.count())
+                .select_from(Speaker)
+                .where(Speaker.meeting_id == session.meeting_id, Speaker.channel == channel)
+            )
+            or 0
+        )
+        speaker = Speaker(
+            owner_id=session.owner_id,
+            meeting_id=session.meeting_id,
+            label=SPEAKER_LABEL_FORMAT[channel].format(n=existing_count + 1),
+            channel=channel,
+        )
+        db.add(speaker)
+        await db.commit()
+        await db.refresh(speaker)
+    session.deepgram_speakers[channel][dg_index] = speaker
+    return speaker
+
+
 async def _open_deepgram_stream(websocket: WebSocket, session: LiveSession, channel: Channel) -> None:
     """Opens one channel's persistent Deepgram connection and wires its
     callbacks in. A final result goes through the exact same _commit_segment
@@ -240,6 +315,17 @@ async def _open_deepgram_stream(websocket: WebSocket, session: LiveSession, chan
     LiveSession.on_audio/maybe_schedule_preview fall this one channel back
     to local VAD/whisper for the rest of the session — the other channel is
     never touched.
+
+    Phase W3: Deepgram's own native diarization (deepgram_stream.py always
+    requests it) means one finalized utterance can span a real speaker
+    change — `on_result`'s final branch splits it into one committed
+    segment per consecutive same-speaker word run, each pre-labeled with
+    its own Corella Speaker row, entirely locally to this connection — no
+    pyannote/Celery/worker involvement at all for a Deepgram-diarized
+    channel. Known, stated scope limit: Deepgram's speaker index has no
+    cross-meeting/group identity behind it (Phase O), so a Deepgram-
+    diarized channel doesn't get durable name-recognition this round —
+    only the pyannote-embedding path does.
     """
     channel_key = _CHANNEL_KEY[channel]
 
@@ -254,10 +340,41 @@ async def _open_deepgram_stream(websocket: WebSocket, session: LiveSession, chan
             return
 
         offset_ms = session.deepgram_offset_ms.get(channel, 0)
-        start_ms = offset_ms + round(result.start_s * 1000)
-        end_ms = offset_ms + round((result.start_s + result.duration_s) * 1000)
+
         try:
-            await _commit_segment(websocket, session, channel, start_ms, end_ms, result.text, result.words)
+            runs = _group_words_by_speaker(result.words) if result.words else []
+            if not runs:
+                # No word-level info returned at all (Deepgram config
+                # without word timings, or an empty words list) — the only
+                # genuine "nothing to work with" case. Bug fixed here,
+                # found by real-world testing: this used to also trigger
+                # whenever there was exactly one run, which conflates "no
+                # diarization info" with "one confident, unambiguous
+                # speaker for the whole utterance" — the *common* real
+                # case (most utterances don't span a mid-sentence speaker
+                # change) — silently dropping the speaker on it every
+                # time. The loop below already handles a single run
+                # correctly (it just runs once); nothing special-cased
+                # needed for that case anymore.
+                start_ms = offset_ms + round(result.start_s * 1000)
+                end_ms = offset_ms + round((result.start_s + result.duration_s) * 1000)
+                await _commit_segment(websocket, session, channel, start_ms, end_ms, result.text, result.words)
+                return
+
+            for dg_index, run_words in runs:
+                run_text = " ".join(w.word for w in run_words).strip()
+                if not run_text:
+                    continue
+                run_start_ms = offset_ms + round((result.start_s + run_words[0].start) * 1000)
+                run_end_ms = offset_ms + round((result.start_s + run_words[-1].end) * 1000)
+                speaker = (
+                    await _get_or_create_deepgram_speaker(session, channel, dg_index)
+                    if dg_index is not None
+                    else None
+                )
+                await _commit_segment(
+                    websocket, session, channel, run_start_ms, run_end_ms, run_text, run_words, speaker=speaker
+                )
         except Exception:
             logger.exception(
                 "Live session %s: committing a Deepgram-streamed segment failed", session.meeting_id
@@ -272,6 +389,7 @@ async def _open_deepgram_stream(websocket: WebSocket, session: LiveSession, chan
         )
         session.deepgram_streams[channel] = None
         session.debug("stt_fallback", provider="deepgram", channel=channel_key, reason="stream closed")
+        await _log_deepgram_stt_cost(session, stream)
 
     stream = DeepgramLiveStream(session.stt.api_key, session.stt.model, session.stt.language, on_result, on_closed)
     try:
@@ -403,6 +521,42 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         _spawn_background(_drain_and_finalize(session, consumer_task))
 
 
+async def _log_deepgram_stt_cost(session: LiveSession, stream: DeepgramLiveStream) -> None:
+    """Phase W5: Deepgram STT usage shares the same ledger/atomic-total
+    machinery as LLM usage (app/services/copilot/cost.py:add_meeting_cost)
+    — priced by real audio duration (app/services/asr/pricing.py), not
+    tokens. Called from both of a stream's two mutually-exclusive close
+    paths (a graceful stop, here in _close_deepgram_streams, and an
+    unexpected drop, on_closed above) — take_usage_seconds() resets its
+    own counter, so neither path can double-count even in the impossible
+    case both somehow ran for the same stream. Best-effort: a failure here
+    is logged, never allowed to break session teardown.
+    """
+    seconds = stream.take_usage_seconds()
+    if seconds <= 0:
+        return
+    try:
+        cost = estimate_stt_cost_usd(
+            "deepgram", session.stt.model, session.stt.language, is_streaming=True, audio_seconds=seconds
+        )
+        async with SessionLocal() as db:
+            await add_meeting_cost(
+                db,
+                session.meeting_id,
+                session.owner_id,
+                "deepgram",
+                session.stt.model,
+                None,
+                None,
+                cost,
+                UsageKind.STT_LIVE,
+                audio_seconds=seconds,
+            )
+            await db.commit()
+    except Exception:
+        logger.exception("Live session %s: failed to log Deepgram STT usage", session.meeting_id)
+
+
 async def _close_deepgram_streams(session: LiveSession) -> None:
     """Closes whichever channels still have a healthy Deepgram stream open
     — awaited, not fire-and-forget, so a still-in-flight final utterance
@@ -424,6 +578,8 @@ async def _close_deepgram_streams(session: LiveSession) -> None:
                 session.meeting_id,
                 exc_info=result,
             )
+    for stream in streams:
+        await _log_deepgram_stt_cost(session, stream)
 
 
 async def _authenticate(websocket: WebSocket) -> User | None:
@@ -498,14 +654,16 @@ async def _consume_utterances(websocket: WebSocket, session: LiveSession) -> Non
     """Runs for the life of the connection, transcribing queued utterances
     one at a time (CTranslate2 models aren't guaranteed safe for concurrent
     calls from one instance) without blocking the receive loop above.
+
+    Copilot-trigger bookkeeping (Phase W4) now lives in _commit_segment
+    itself, not here — that function is shared by every path (local
+    whisper, Deepgram with or without diarization splitting), so every
+    real committed segment counts, not just this one queue's.
     """
     while True:
         utterance = await session.queue.get()
         try:
-            created = await _transcribe_and_send(websocket, session, utterance)
-            if created:
-                session.segments_since_cycle += 1
-                await _maybe_trigger_copilot(websocket, session)
+            await _transcribe_and_send(websocket, session, utterance)
         except Exception:
             logger.exception("Live transcription failed for meeting %s", session.meeting_id)
         finally:
@@ -610,6 +768,14 @@ async def _reconcile_diarization_loop(session: LiveSession) -> None:
     trailing audio this loop hasn't gotten around to yet is dispatched
     separately in _drain_and_finalize, after the connection itself has
     already ended.
+
+    Phase W3: skipped entirely for a channel currently on a healthy
+    Deepgram stream — Deepgram's own native diarization is authoritative
+    for that channel already (instant, in-connection, zero worker
+    involvement), so there's no registry for this pass to reconcile against
+    and nothing it would add. A channel that falls back to local VAD/
+    whisper mid-session (Deepgram dropped) picks this back up automatically
+    on the very next tick, same as it already picks whisper back up.
     """
     settings = get_settings()
     next_at: dict[Channel, float] = {Channel.ME: 0.0, Channel.THEM: 0.0}
@@ -618,6 +784,8 @@ async def _reconcile_diarization_loop(session: LiveSession) -> None:
         now = time.monotonic()
         for channel in (Channel.ME, Channel.THEM):
             if now < next_at[channel]:
+                continue
+            if session.deepgram_streams.get(channel) is not None:
                 continue
             if _dispatch_reconciliation(session, channel, settings):
                 next_at[channel] = now + settings.diarization_reconcile_interval_ms / 1000
@@ -743,26 +911,38 @@ async def _commit_segment(
     end_ms: int,
     text: str,
     words: list,
+    speaker: Speaker | None = None,
 ) -> bool:
     """Persists one committed transcript segment and pushes the `transcript`
-    WS event — shared by both STT paths: the local VAD/whisper queue
-    consumer (_transcribe_and_send above) and a Deepgram stream's own final
-    results (_open_deepgram_stream's on_result). The authoritative same-room
+    WS event — shared by every STT/diarization path: the local VAD/whisper
+    queue consumer (_transcribe_and_send above), a Deepgram stream's own
+    final results with no diarization info, and Deepgram-diarized per-
+    speaker runs (_open_deepgram_stream's on_result, Phase W3) alike.
+
+    `speaker`, when provided (Deepgram-diarization path only), means the
+    caller has *already* decided who this is — set directly on the segment,
+    and a `diarization_update` event is pushed immediately so the frontend
+    labels it without waiting on anything else. This is the one case where
+    a label is decided outside reconcile_diarization/the in-process hint;
+    everything else about diarization stays exactly as documented below.
+
+    For every other case (`speaker=None`): the authoritative same-room
     diarization decision is not made per-segment here — see
     _reconcile_diarization_loop, which periodically reconciles a rolling
     window of each channel's audio against the persistent voice registry
     and is the only thing that ever creates/promotes a speaker or writes a
     label to Postgres. A fast, read-only *hint* dispatch is, though (see
-    corella.quick_label_hint) — a real user report that live labeling felt
-    "not live at all" traced to that periodic pass's own real compute time
-    (6-33s measured in production) stacking on top of its own interval; the
-    hint recognizes an *already-confirmed* voice almost instantly, without
-    waiting for the next pass, while never itself deciding anything new.
+    _run_quick_label_hint below) — a real user report that live labeling
+    felt "not live at all" traced to that periodic pass's own real compute
+    time (6-33s measured in production) stacking on top of its own
+    interval; the hint recognizes an *already-confirmed* voice almost
+    instantly, without waiting for the next pass, while never itself
+    deciding anything new.
     """
     async with SessionLocal() as db:
         row = TranscriptSegment(
             meeting_id=session.meeting_id,
-            speaker_id=None,
+            speaker_id=speaker.id if speaker is not None else None,
             channel=channel,
             start_ms=start_ms,
             end_ms=end_ms,
@@ -773,15 +953,33 @@ async def _commit_segment(
         await db.commit()
         await db.refresh(row)
 
-    if channel in (Channel.ME, Channel.THEM):
+    if speaker is not None:
+        # Already labeled by the caller (Deepgram-diarization split) — no
+        # recognition dispatch needed, and no reason to wait for
+        # reconcile_diarization's own gate; push the label now.
+        payload = {
+            "id": str(row.id),
+            "channel": channel.value,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "text": text,
+            "speaker_label": speaker.display_label,
+            "linked_user_id": str(speaker.linked_user_id) if speaker.linked_user_id else None,
+        }
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            diar_events.push_event,
+            session.meeting_id,
+            {"type": "diarization_update", "is_snapshot": False, "removed_segment_ids": [], "segments": [payload]},
+            [str(row.id)],
+            channel,
+        )
+    elif channel in (Channel.ME, Channel.THEM):
         channel_key = _CHANNEL_KEY[channel]
         utterance_pcm = extract_channel_window(session.recordings[channel_key], start_ms, end_ms)
         if utterance_pcm:
             session.debug("quick_label_hint_dispatched", segment_id=str(row.id), channel=channel.value)
-            celery_app.send_task(
-                "corella.quick_label_hint",
-                args=[str(session.meeting_id), str(row.id), channel.value, base64.b64encode(utterance_pcm).decode()],
-            )
+            _spawn_background(_run_quick_label_hint(session, channel, row.id, utterance_pcm))
 
     try:
         await websocket.send_json(
@@ -799,7 +997,94 @@ async def _commit_segment(
     except Exception:
         pass  # client may already be gone; the segment is still persisted
 
+    # Phase W4: moved here (from _consume_utterances) so EVERY committed
+    # segment counts toward the copilot trigger, regardless of which path
+    # produced it. Before this, only the local-whisper queue-consumer path
+    # incremented segments_since_cycle — a Deepgram-streamed session (this
+    # project's increasingly common path) never counted a single segment
+    # toward it, so it only ever got copilot cycles off the 20s elapsed-
+    # time fallback, never off real conversational volume.
+    session.segments_since_cycle += 1
+    await _maybe_trigger_copilot(websocket, session)
+
     return True
+
+
+async def _run_quick_label_hint(
+    session: LiveSession, channel: Channel, segment_id: UUID, utterance_pcm: bytes
+) -> None:
+    """In-process replacement (Phase W1) for the old `corella.quick_label_hint`
+    Celery task — identical logic, just run directly in this api process
+    instead of round-tripping through Celery/Redis/base64 to reach a
+    separate worker process for what was already a cheap, read-only check.
+    Fire-and-forget, spawned via _spawn_background from _commit_segment;
+    never blocks segment commit or the transcript WS reply.
+
+    This never creates/promotes a speaker or writes anything to Postgres —
+    only reconcile_diarization (still a worker task; the real, heavy
+    diarize() pass genuinely belongs off this process) does that. It only
+    recognizes a voice *already confirmed* by an earlier reconciliation
+    pass: one cheap embedding on just this utterance's own audio
+    (app/services/diarization/embedding.py, now loaded in this process too
+    — see main.py's startup pre-warm), checked lock-free against the
+    current registry (peek_clusters — a stale-by-one-pass read costs
+    nothing worse than a slightly-delayed hint, never a wrong permanent
+    write). Requires the "2+ confirmed speakers" gate
+    (has_reported_anything) to have already opened for this channel and
+    the matched cluster to already be promoted — see the removed Celery
+    task's own docstring history for why (a genuinely solo channel must
+    never flash a needless "Speaker 1", and the very first cluster on a
+    channel auto-promotes before that's known to be true, so speaker_id
+    alone isn't a sufficient check).
+
+    The embedding extraction and the (sync) Redis calls in cluster.py/
+    events.py all run via run_in_executor — CPU-bound/blocking work must
+    never run inline on the event loop, same discipline as local whisper.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        embedding = await loop.run_in_executor(None, embed_utterance, utterance_pcm)
+    except Exception:
+        logger.exception("quick_label_hint: embedding failed for segment %s", segment_id)
+        return
+
+    has_reported = await loop.run_in_executor(
+        None, diar_events.has_reported_anything, session.meeting_id, channel
+    )
+    if not has_reported:
+        return
+
+    clusters = await loop.run_in_executor(None, peek_clusters, session.meeting_id, channel)
+    idx, sim = best_match(clusters, embedding)
+    if idx is None or sim < SIMILARITY_THRESHOLD:
+        return
+    cluster = clusters[idx]
+    if cluster.speaker_id is None:
+        return  # provisional, not yet a real confirmed speaker -- nothing to hint at
+
+    async with SessionLocal() as db:
+        speaker = await db.get(Speaker, UUID(cluster.speaker_id))
+        segment = await db.get(TranscriptSegment, segment_id)
+        if speaker is None or segment is None:
+            return
+        payload = {
+            "id": str(segment.id),
+            "channel": channel.value,
+            "start_ms": segment.start_ms,
+            "end_ms": segment.end_ms,
+            "text": segment.text,
+            "speaker_label": speaker.display_label,
+            "linked_user_id": str(speaker.linked_user_id) if speaker.linked_user_id else None,
+        }
+
+    await loop.run_in_executor(
+        None,
+        diar_events.push_event,
+        session.meeting_id,
+        {"type": "speaker_hint", "is_snapshot": False, "removed_segment_ids": [], "segments": [payload]},
+        [],
+        channel,
+    )
 
 
 def _noop_debug(stage: str, **detail) -> None:
@@ -926,6 +1211,8 @@ async def _drain_and_finalize(session: LiveSession, consumer_task: asyncio.Task)
     # gracefully either way.
     settings = get_settings()
     for channel in (Channel.ME, Channel.THEM):
+        if session.deepgram_streams.get(channel) is not None:
+            continue  # Deepgram's own diarization already labeled this channel live — see Phase W3
         try:
             _dispatch_reconciliation(session, channel, settings)
         except Exception:

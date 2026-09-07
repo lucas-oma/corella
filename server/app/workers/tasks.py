@@ -24,6 +24,7 @@ from app.models.voice_identity import VoiceIdentity
 from app.services.admin.webhooks import dispatch_call_type_webhook
 from app.services.alignment.align import align
 from app.services.asr import deepgram
+from app.services.asr.pricing import estimate_stt_cost_usd
 from app.services.asr.resolve import resolve_stt_provider
 from app.services.asr.whisper import transcribe as whisper_transcribe
 from app.services.audio.mixing import read_wav_pcm, slice_pcm, write_wav
@@ -39,10 +40,10 @@ from app.services.diarization.cluster import (
     best_match,
     locked_state,
     meets_guest_floor,
-    peek_clusters,
     update_centroid,
 )
 from app.services.diarization.embedding import embed_utterance
+from app.services.diarization.labels import SPEAKER_LABEL_FORMAT
 from app.services.diarization.pyannote import DiarizationUnavailable, diarize
 from app.services.embeddings.chunking import chunk_text, chunk_transcript
 from app.services.embeddings.embed import embed_texts
@@ -84,7 +85,7 @@ def _wav_duration_seconds(path: str) -> int:
         return round(wf.getnframes() / wf.getframerate())
 
 
-async def _resolve_and_maybe_transcribe_deepgram(owner_id: str, wav_path: str, word_timestamps: bool):
+async def _resolve_and_maybe_transcribe_deepgram(meeting_id: str, owner_id: str, wav_path: str, word_timestamps: bool):
     """Resolves which STT engine this owner should use, and — if it's
     Deepgram — runs the actual transcription too, in the same short-lived
     async session/call. Returns (ResolvedStt, segments-or-None); None
@@ -92,6 +93,11 @@ async def _resolve_and_maybe_transcribe_deepgram(owner_id: str, wav_path: str, w
     to local whisper.transcribe() either way, so a Deepgram outage never
     breaks the meeting, same graceful-degradation spirit as the
     diarization skip right next to this call site.
+
+    Phase W5: on a successful Deepgram call, also logs its real cost
+    (duration-billed, app/services/asr/pricing.py) into the same ledger
+    the live path uses — this project's own cost estimate was otherwise
+    silently LLM-only, missing a real metered API's usage entirely.
     """
     async with SessionLocal() as db:
         stt = await resolve_stt_provider(db, UUID(owner_id))
@@ -104,6 +110,22 @@ async def _resolve_and_maybe_transcribe_deepgram(owner_id: str, wav_path: str, w
         segments = await deepgram.transcribe(
             wav_bytes, stt.model, stt.api_key, word_timestamps, language=stt.language
         )
+        seconds = _wav_duration_seconds(wav_path)
+        cost = estimate_stt_cost_usd("deepgram", stt.model, stt.language, is_streaming=False, audio_seconds=seconds)
+        async with SessionLocal() as db:
+            await add_meeting_cost(
+                db,
+                UUID(meeting_id),
+                UUID(owner_id),
+                "deepgram",
+                stt.model,
+                None,
+                None,
+                cost,
+                UsageKind.STT_UPLOAD,
+                audio_seconds=seconds,
+            )
+            await db.commit()
         return stt, segments
     except deepgram.SttError:
         logger.exception("Deepgram transcription failed for owner %s; falling back to local whisper", owner_id)
@@ -135,7 +157,7 @@ def process_meeting_audio(meeting_id: str) -> None:
                 _stt, asr_segments = asyncio.run(
                     _with_engine_cleanup(
                         _resolve_and_maybe_transcribe_deepgram(
-                            str(meeting.owner_id), normalized_path, word_timestamps=False
+                            str(meeting.id), str(meeting.owner_id), normalized_path, word_timestamps=False
                         )
                     )
                 )
@@ -262,17 +284,6 @@ def _merge_adjacent_same_speaker(turns: list) -> list[tuple[float, float, str]]:
     return merged
 
 
-_SPEAKER_LABEL_FORMAT = {
-    # "Speaker N" is the original, already-shipped Me-side format —
-    # unchanged, so nothing that already depends on it (frontend dot-color
-    # parsing, existing meetings' persisted labels) breaks. Them gets its
-    # own distinct prefix, not the same "Speaker N": MeetingDetail.tsx lists
-    # every segment's speaker_label in one flat list with no channel
-    # column, so two unrelated people (one from each pool) both reading as
-    # "Speaker 1" would be a real, avoidable ambiguity.
-    Channel.ME: "Speaker {n}",
-    Channel.THEM: "Them {n}",
-}
 
 
 def _recognize_voice_identity(
@@ -318,7 +329,7 @@ def _promote_new_speaker(
     speaker = Speaker(
         owner_id=meeting.owner_id,
         meeting_id=meeting.id,
-        label=_SPEAKER_LABEL_FORMAT[channel].format(n=existing_count + 1),
+        label=SPEAKER_LABEL_FORMAT[channel].format(n=existing_count + 1),
         channel=channel,
         voice_identity_id=identity.id if identity else None,
     )
@@ -578,9 +589,28 @@ def reconcile_diarization(meeting_id: str, channel_value: str, window_pcm_b64: s
 
                 db.flush()  # assign ids/relationships before building the WS payload
 
+                # Phase W2: gate opens once 2+ distinct VOICES have been
+                # detected on this channel, not once both have independently
+                # promoted (cleared the guest floor). Before this, even a
+                # channel's first, obviously-dominant speaker sat completely
+                # unreported until a second speaker's OWN cluster also
+                # cleared the floor on its own — even though the first
+                # speaker's label had been decided since their very first
+                # pass. A still-provisional second speaker's own segments
+                # are unaffected by this change: they stay held
+                # (PendingSegment) until their own cluster promotes, and
+                # already render as the existing default "Identifying…"
+                # state client-side in the meantime (MeetingDetail.tsx/
+                # LiveSession.tsx's existing fallback for an unresolved
+                # segment) — so no new tentative-label event/payload shape
+                # is needed for that half; this is purely a gate-timing fix.
+                # A genuinely solo channel is unaffected either way: it
+                # never registers a second cluster at all, so cluster_count
+                # never reaches 2 and nothing is ever pushed — the same
+                # guarantee the old promoted_count-based gate provided.
                 has_resolved_identity = any(s.speaker.voice_identity_id is not None for s, _ in resulting)
-                promoted_count = sum(1 for c in clusters if c.speaker_id is not None)
-                if resulting and (promoted_count >= 2 or has_resolved_identity):
+                cluster_count = len(clusters)
+                if resulting and (cluster_count >= 2 or has_resolved_identity):
                     if not diar_events.has_reported_anything(meeting.id, channel):
                         # First time the gate has ever opened for this
                         # meeting *on this channel* — a full authoritative
@@ -631,89 +661,14 @@ def reconcile_diarization(meeting_id: str, channel_value: str, window_pcm_b64: s
             )
 
 
-@celery_app.task(name="corella.quick_label_hint")
-def quick_label_hint(meeting_id: str, segment_id: str, channel_value: str, utterance_pcm_b64: str) -> None:
-    """Fast, read-only live-labeling shortcut, dispatched the instant a
-    segment commits (app/ws/live_session.py:_commit_segment) — a real user
-    report that live labeling "isn't live at all" traced to the periodic
-    reconcile_diarization pass itself: even once it runs, it's a real
-    diarize() pipeline call, measured at 6-33s of real worker CPU time in
-    production, on top of however much of its own ~20-25s interval had
-    already elapsed. This never replaces that pass — reconcile_diarization
-    remains the *only* thing that ever creates a new speaker, promotes a
-    provisional one, or writes anything to Postgres. This only ever
-    recognizes a voice *already confirmed* by an earlier pass, and does so
-    almost immediately: one cheap embedding (not a full diarize() call) on
-    just this utterance's own audio, checked against the current registry
-    with no lock (peek_clusters — a stale-by-one-pass read costs nothing
-    worse than a slightly-delayed hint, never a wrong permanent write,
-    since nothing here is permanent). If it doesn't confidently match an
-    already-*promoted* cluster, or the "2+ confirmed speakers" gate
-    (has_reported_anything) hasn't opened for this channel yet, it does
-    nothing — silently defers to the real pass, exactly like every other
-    case this codebase refuses to guess on. Also means it works best on
-    longer utterances: a very short one's own single embedding can be too
-    noisy to confidently match on its own (the same short-utterance
-    unreliability Phase U/V/W already found and worked around for the
-    authoritative pass, which has the luxury of real acoustic context this
-    fast path deliberately doesn't try to replicate) — abstaining and
-    falling back to the real pass in that case is correct, not a bug.
-
-    The pushed event deliberately reuses the diarization_update wire shape
-    (rather than a new one) so the frontend's existing handling needs no
-    new state — see live.ts's speaker_hint branch.
-    """
-    utterance_pcm = base64.b64decode(utterance_pcm_b64)
-    channel = Channel(channel_value)
-
-    try:
-        embedding = embed_utterance(utterance_pcm)
-    except Exception:
-        logger.exception("quick_label_hint: embedding failed for segment %s", segment_id)
-        return
-
-    # The "2+ confirmed speakers" gate (reconcile_diarization's own
-    # has_reported_anything check) exists specifically so a genuinely
-    # solo channel never flashes a needless "Speaker 1" — the very first
-    # cluster on a channel auto-promotes immediately (real Speaker row,
-    # speaker_id set) long before that's known to be true, so checking
-    # speaker_id alone here isn't enough; verified live that skipping this
-    # check let a hint reveal a label before the authoritative mechanism
-    # ever had. Only ever hint once the real mechanism has already opened
-    # the gate at least once for this channel — from then on every
-    # subsequent utterance from either confirmed speaker is fair game.
-    if not diar_events.has_reported_anything(UUID(meeting_id), channel):
-        return
-
-    clusters = peek_clusters(UUID(meeting_id), channel)
-    idx, sim = best_match(clusters, embedding)
-    if idx is None or sim < SIMILARITY_THRESHOLD:
-        return
-    cluster = clusters[idx]
-    if cluster.speaker_id is None:
-        return  # provisional, not yet a real confirmed speaker -- nothing to hint at
-
-    with get_sync_db() as db:
-        speaker = db.get(Speaker, UUID(cluster.speaker_id))
-        segment = db.get(TranscriptSegment, UUID(segment_id))
-        if speaker is None or segment is None:
-            return
-        payload = {
-            "id": str(segment.id),
-            "channel": channel.value,
-            "start_ms": segment.start_ms,
-            "end_ms": segment.end_ms,
-            "text": segment.text,
-            "speaker_label": speaker.display_label,
-            "linked_user_id": str(speaker.linked_user_id) if speaker.linked_user_id else None,
-        }
-
-    diar_events.push_event(
-        UUID(meeting_id),
-        {"type": "speaker_hint", "is_snapshot": False, "removed_segment_ids": [], "segments": [payload]},
-        [],
-        channel,
-    )
+# The old corella.quick_label_hint Celery task used to live here — Phase W1
+# moved its logic in-process into app/ws/live_session.py:_run_quick_label_hint
+# (same checks: has_reported_anything gate, peek_clusters + best_match,
+# requires an already-promoted cluster) so the api process's own hot,
+# read-only instant-recognition check no longer pays a Celery/Redis/base64
+# round-trip to reach a separate worker process for it. reconcile_diarization
+# above is unaffected — it remains the only thing that ever creates/promotes
+# a speaker or writes to Postgres.
 
 
 @celery_app.task(name="corella.index_meeting_search")

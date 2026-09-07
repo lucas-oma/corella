@@ -26,6 +26,18 @@ class UserCostBreakdown:
 
 
 @dataclass
+class ProviderCostBreakdown:
+    """Phase W5: since LLMUsageEvent now covers Deepgram STT usage
+    alongside LLM usage (both token- and duration-billed rows share one
+    ledger), a per-provider split is what actually makes that visible in
+    the dashboard rather than silently folded into one aggregate total."""
+
+    provider: str
+    total_usd: float
+    call_count: int
+
+
+@dataclass
 class DailyCost:
     day: date
     total_usd: float
@@ -40,6 +52,7 @@ class CostSummary:
     total_input_tokens: int
     total_output_tokens: int
     by_user: list[UserCostBreakdown]
+    by_provider: list[ProviderCostBreakdown]
     daily: list[DailyCost]  # oldest first; every calendar day in the period, zeros filled
     projected_next_7_days_usd: float | None  # trailing-average(last 7 calendar days) * 7
     period: CostPeriod
@@ -114,6 +127,19 @@ async def get_cost_summary(
         for owner_id, full_name, total, count in by_user_rows
     ]
 
+    by_provider_totals = func.coalesce(func.sum(LLMUsageEvent.cost_usd), 0.0)
+    by_provider_rows = (
+        await db.execute(
+            select(LLMUsageEvent.provider, by_provider_totals, func.count(LLMUsageEvent.id))
+            .group_by(LLMUsageEvent.provider)
+            .order_by(by_provider_totals.desc())
+        )
+    ).all()
+    by_provider = [
+        ProviderCostBreakdown(provider=provider, total_usd=total, call_count=count)
+        for provider, total, count in by_provider_rows
+    ]
+
     start, end = period_window(period)
     since = datetime(start.year, start.month, start.day, tzinfo=UTC)
     day_col = func.date(LLMUsageEvent.created_at)
@@ -169,6 +195,7 @@ async def get_cost_summary(
         total_input_tokens=total_input_tokens,
         total_output_tokens=total_output_tokens,
         by_user=by_user,
+        by_provider=by_provider,
         daily=daily,
         projected_next_7_days_usd=projected_next_7_days_usd,
         period=period,

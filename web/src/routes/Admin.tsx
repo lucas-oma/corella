@@ -804,7 +804,7 @@ export default function Admin() {
             <div className="mt-6">
               <p className="label mb-2">By user</p>
               {costs.by_user.length === 0 ? (
-                <p className="text-sm text-ink-muted">No LLM calls logged yet.</p>
+                <p className="text-sm text-ink-muted">No calls logged yet.</p>
               ) : (
                 <ul className="divide-y divide-border dark:divide-border-dark">
                   {costs.by_user.map((u) => (
@@ -817,6 +817,32 @@ export default function Admin() {
                         {formatUsd(u.total_usd)}{" "}
                         <span className="text-xs text-ink-subtle">
                           ({u.call_count} call{u.call_count === 1 ? "" : "s"})
+                        </span>
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="mt-6">
+              {/* Copilot (LLM) calls and Deepgram STT usage share this same
+                  ledger (Phase W5) — this split is what keeps that visible
+                  instead of one opaque total. */}
+              <p className="label mb-2">By provider</p>
+              {costs.by_provider.length === 0 ? (
+                <p className="text-sm text-ink-muted">No calls logged yet.</p>
+              ) : (
+                <ul className="divide-y divide-border dark:divide-border-dark">
+                  {costs.by_provider.map((p) => (
+                    <li key={p.provider} className="flex items-center justify-between py-2">
+                      <p className="text-sm capitalize text-ink dark:text-ink-inverted">
+                        {p.provider}
+                      </p>
+                      <p className="text-sm text-ink-muted">
+                        {formatUsd(p.total_usd)}{" "}
+                        <span className="text-xs text-ink-subtle">
+                          ({p.call_count} call{p.call_count === 1 ? "" : "s"})
                         </span>
                       </p>
                     </li>

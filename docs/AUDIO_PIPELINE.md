@@ -13,9 +13,10 @@ real, hard-won iterations before it worked reliably. If you're touching
 - [Component map](#component-map)
 - [Live ingestion: VAD, rolling preview, STT](#live-ingestion-vad-rolling-preview-stt)
 - [Speaker diarization](#speaker-diarization)
-  - [Two mechanisms: authoritative reconciliation + a fast recognition hint](#two-mechanisms-authoritative-reconciliation--a-fast-recognition-hint)
+  - [Three mechanisms: authoritative reconciliation, a fast recognition hint, and Deepgram-native diarization](#three-mechanisms-authoritative-reconciliation-a-fast-recognition-hint-and-deepgram-native-diarization)
   - [The persistent voice registry](#the-persistent-voice-registry)
   - [The fast recognition hint](#the-fast-recognition-hint)
+  - [Deepgram-native diarization](#deepgram-native-diarization)
 - [The debugging history](#the-debugging-history)
 - [Debugging tools](#debugging-tools)
   - [Content-addressed caching for `--chunker deepgram`](#content-addressed-caching-for---chunker-deepgram)
@@ -37,14 +38,16 @@ flowchart TB
     subgraph LiveIngestion["api — app/ws/live_session.py (per WS connection)"]
         WS["WebSocket handler"]
         VAD["Local VAD\nUtteranceDetector\n(app/services/vad/vad.py)"]
-        DG["Deepgram live stream\n(app/services/asr/deepgram_stream.py)\nper channel, if configured"]
+        DG["Deepgram live stream\n(app/services/asr/deepgram_stream.py)\nper channel, if configured\n(diarize=true always requested)"]
         Whisper["faster-whisper\n(run_in_executor)"]
+        DGSplit["Deepgram word-level\nspeaker split\n(in-process, instant,\nzero worker involvement)"]
         Commit["_commit_segment\npersist TranscriptSegment\ndispatch diarization"]
+        QLH["_run_quick_label_hint\n(in-process, instant,\nread-only — no longer\na Celery task)"]
+        Embed["pyannote embedding model\n(in-process, NOT gated —\nunlike the full pipeline below)"]
     end
 
     subgraph Worker["worker — Celery (app/workers/tasks.py)"]
-        DU["reconcile_diarization\n(periodic, per channel,\nthe sole authority)"]
-        QLH["quick_label_hint\n(instant, per segment,\nread-only)"]
+        DU["reconcile_diarization\n(periodic, per channel — authoritative\nfor non-Deepgram / dropped-Deepgram\nchannels; skipped while a channel's\nDeepgram stream is healthy)"]
         Redis[("Redis\nvoice registry + pending\nper meeting+channel")]
     end
 
@@ -64,13 +67,17 @@ flowchart TB
     WS -->|"raw PCM16"| VAD
     WS -->|"raw PCM16, if Deepgram configured"| DG
     VAD --> Whisper --> Commit
-    DG -->|"final result"| Commit
+    DG -->|"final result,\nno per-word speaker info"| Commit
+    DG -->|"final result,\nper-word speaker index"| DGSplit
+    DGSplit -->|"one commit per\nspeaker run, speaker\nalready attached"| Commit
     DG -.->|"interim result"| FE
     Commit -->|"partial_transcript / transcript WS events"| FE
     Commit --> Postgres
-    Commit -->|"send_task, per segment"| QLH
+    Commit -.->|"only when no speaker\nattached yet"| QLH
+    QLH --> Embed
     QLH -.->|"peek only,\nno lock"| Redis
     QLH -->|"push_event, if a match"| PubSub
+    DGSplit -->|"push_event, immediately\n(no gate needed)"| PubSub
     WS -.->|"_reconcile_diarization_loop\nevery ~20s per channel"| DU
     DU <--> Redis
     DU --> Postgres
@@ -87,6 +94,18 @@ Both paths land in the same `TranscriptSegment`/`Speaker` tables, so
 `MeetingDetail.tsx`'s post-call view needs zero special-casing for how a
 meeting was captured.
 
+**Live diarization is now up to three mechanisms, not two** (Phase W —
+this document's own earlier revision — added the in-process hint and
+Deepgram-native path on top of the periodic reconciliation pass; see
+[Speaker diarization](#speaker-diarization) below for all three in
+detail): the periodic reconciliation pass (worker, authoritative, the
+only thing that can create/promote a speaker or write to Postgres for a
+non-Deepgram channel), the instant recognition hint (api, in-process,
+read-only, recognizes an already-confirmed voice sooner), and Deepgram's
+own native diarization (api, in-process, fully replaces the other two for
+a channel whose STT resolves to Deepgram, while that stream stays
+healthy).
+
 ## Component map
 
 | Concern | File(s) |
@@ -100,10 +119,12 @@ meeting was captured.
 | Speaker-embedding extraction | `app/services/diarization/embedding.py` |
 | Full pyannote pipeline (periodic reconciliation, offline diarization) | `app/services/diarization/pyannote.py` |
 | Persistent voice registry (per meeting+channel) | `app/services/diarization/cluster.py` |
-| Periodic reconciliation dispatch (live) | `app/ws/live_session.py` — `_reconcile_diarization_loop`, `_dispatch_reconciliation` |
-| Worker task orchestration (the decision logic) | `app/workers/tasks.py` — see `reconcile_diarization` (authoritative) and `quick_label_hint` (fast, read-only) |
-| Worker → live WS event bridge | `app/services/diarization/events.py`, `live_session.py:_poll_diarization_updates` |
-| Cross-meeting/group voice identity | `app/models/voice_identity.py`, `app/services/embeddings/qdrant_store.py` (`speaker_embeddings` collection) |
+| Periodic reconciliation dispatch (live) | `app/ws/live_session.py` — `_reconcile_diarization_loop`, `_dispatch_reconciliation` (skips a channel while its Deepgram stream is healthy) |
+| Worker task orchestration (the decision logic) | `app/workers/tasks.py` — see `reconcile_diarization` (the only worker-side diarization task now; authoritative for non-Deepgram/dropped-Deepgram channels) |
+| Instant recognition hint (in-process, api-side — **not** a Celery task since Phase W1) | `app/ws/live_session.py` — `_run_quick_label_hint`, called directly from `_commit_segment` |
+| Deepgram-native diarization (in-process, api-side, Phase W3) | `app/ws/live_session.py` — `_open_deepgram_stream`'s `on_result`, `_group_words_by_speaker`, `_get_or_create_deepgram_speaker` |
+| Worker/hint → live WS event bridge | `app/services/diarization/events.py`, `live_session.py:_poll_diarization_updates` — same bridge for all three mechanisms; each pushes the identical `diarization_update` wire shape |
+| Cross-meeting/group voice identity | `app/models/voice_identity.py`, `app/services/embeddings/qdrant_store.py` (`speaker_embeddings` collection) — **not** reachable from the Deepgram-native path (see [Known open issues](#known-open-issues)) |
 | Audio mixing/windowing/WAV I/O | `app/services/audio/mixing.py` |
 | Debugging tools | `server/scripts/verify_reconcile_diarization.py` (current); `server/scripts/diarize_debug.py`/`verify_production_diarize.py` (Phase V-era, per-utterance design — see [Debugging tools](#debugging-tools)) |
 
@@ -124,20 +145,28 @@ of two paths:
 - **Deepgram live streaming** (`deepgram_stream.py`), when the resolved STT
   provider for the session is Deepgram: raw PCM streams directly to
   Deepgram's own WS endpoint, no local VAD gating at all — Deepgram does its
-  own endpointing. Interim results become `partial_transcript` events, final
-  results (`speech_final`) become committed segments through the exact same
-  `_commit_segment` function the local path uses. Per-channel: if a
-  channel's socket fails or drops mid-session, only that channel falls back
-  to local VAD/whisper for the rest of the session — the healthy channel is
-  untouched.
+  own endpointing. `diarize=true` is always requested too (Phase W3) — a
+  final result (`speech_final`) carries a per-word speaker index, which
+  `on_result` groups into consecutive same-speaker runs and commits as one
+  or more segments (still through the same `_commit_segment` function the
+  local path uses), each pre-labeled with its own Corella `Speaker` row —
+  see [Speaker diarization](#speaker-diarization) below for the full
+  mechanism. Per-channel: if a channel's socket fails or drops mid-session,
+  only that channel falls back to local VAD/whisper for the rest of the
+  session — the healthy channel is untouched, and that channel's own live
+  diarization falls back to the periodic reconciliation pass automatically.
 
-Same-room diarization is no longer triggered per committed segment — see
-[Speaker diarization](#speaker-diarization) below for the periodic
-reconciliation loop that replaced that dispatch.
+Same-room diarization for a **local-whisper** channel is not triggered per
+committed segment — see [Speaker diarization](#speaker-diarization) below
+for the periodic reconciliation loop (plus a fast recognition hint) that
+handles it instead. A **Deepgram-diarized** channel is the one case where a
+committed segment already carries its speaker the moment it's created — see
+the same section for why that mechanism is kept separate rather than
+routed through the other two.
 
 ## Speaker diarization
 
-### Two mechanisms: authoritative reconciliation + a fast recognition hint
+### Three mechanisms: authoritative reconciliation, a fast recognition hint, and Deepgram-native diarization
 
 Corella never runs pyannote's full `SpeakerDiarization` pipeline on a single
 short utterance in real time — it's unreliable on anything under ~10
@@ -153,8 +182,18 @@ of already-received per-channel audio, reconciled against a persistent
 per-channel voice registry, rather than ever clustering one utterance's own
 embedding in isolation — adopted from a reference macOS app's own proven
 live-diarization design (workflow inspiration only — this codebase, never
-named). This pass is the sole authority: the only thing that ever creates a
-new speaker, promotes a provisional one, or writes a label to Postgres.
+named). For a channel whose STT isn't Deepgram (or whose Deepgram stream
+has dropped), this pass is the sole authority: the only thing that ever
+creates a new speaker, promotes a provisional one, or writes a label to
+Postgres. A second, purely advisory mechanism — a fast, read-only
+**recognition hint** — recognizes an already-confirmed voice sooner,
+without deciding anything new itself. A third, entirely separate
+mechanism — **Deepgram's own native diarization** — replaces both of the
+above outright for a channel whose STT resolves to Deepgram, for as long
+as that stream stays healthy: no periodic pass, no hint, no pyannote or
+worker involvement at all for that channel. All three push through the
+same `diarization_update` event bridge, so the frontend never needs to
+know which one produced a given label.
 
 - **Live dispatch** (`app/ws/live_session.py:_reconcile_diarization_loop`):
   every ~2s, checks each active channel (`me`/`them`); once a channel has
@@ -263,31 +302,42 @@ time in production — on top of however much of its own
 to this: on a short call, the *first* label often simply hadn't computed
 yet by the time the call ended.
 
-`corella.quick_label_hint` (`app/workers/tasks.py`), dispatched from
-`app/ws/live_session.py:_commit_segment` the instant a segment commits, is
-a fast, read-only shortcut for the common case — "the same person is still
-talking":
+**`_run_quick_label_hint`** (`app/ws/live_session.py`) — **not** a Celery
+task since it was moved in-process to the api process itself; it used to
+be `corella.quick_label_hint`, a `send_task`-dispatched worker task, until
+that round-trip (queue + base64 + Redis + a separate process) turned out to
+be real, avoidable latency for a check this cheap. Called directly from
+`_commit_segment` the instant a segment commits (`_spawn_background`,
+fire-and-forget, never blocks the commit itself), it's a fast, read-only
+shortcut for the common case — "the same person is still talking":
 
-1. Checks that the "2+ confirmed speakers" gate
+1. Checks that the diarization gate
    (`diar_events.has_reported_anything`) has already opened for this
    channel — the same gate `reconcile_diarization`'s own WS push respects,
    so a genuinely solo channel never gets a premature "Speaker 1" from
    this path either (verified live that skipping this check lets exactly
-   that happen — see [The debugging history](#the-debugging-history)'s
-   Phase W3 entry).
+   that happen — see [The debugging history](#the-debugging-history)).
+   **The gate's own trigger condition changed** (see the debugging
+   history's later entry): it now opens the moment a **second distinct
+   voice is merely detected** on the channel, not once both have
+   independently cleared the guest floor — a still-provisional second
+   voice's own segments are unaffected either way, they just stay held
+   until their own cluster promotes.
 2. Extracts one cheap embedding (`embed_utterance`, not a full `diarize()`
-   call) from just that segment's own audio.
+   call, and now run via `run_in_executor` directly in this process — no
+   worker dispatch) from just that segment's own audio.
 3. Checks it against the channel's current registry with **no lock**
    (`peek_clusters` — a stale-by-one-pass read costs nothing worse than a
    slightly-delayed hint, never a wrong permanent write, since this path
    writes nothing).
 4. If it confidently matches (`SIMILARITY_THRESHOLD`) a cluster that's
    already **promoted** (a real, confirmed `Speaker` row from an earlier
-   reconciliation pass), pushes an advisory `speaker_hint` event — same
-   wire shape as `diarization_update`, reusing the exact same Redis
-   list/pub-sub bridge and the exact same frontend handling (`live.ts`
-   dispatches both to `onDiarizationUpdate`). If it doesn't confidently
-   match an already-promoted cluster — a genuinely new voice, or one still
+   reconciliation pass), pushes an advisory `speaker_hint` event directly
+   (`diar_events.push_event`, called in-process — same wire shape as
+   `diarization_update`, reusing the exact same Redis list/pub-sub bridge
+   and the exact same frontend handling, `live.ts` dispatches both to
+   `onDiarizationUpdate`). If it doesn't confidently match an
+   already-promoted cluster — a genuinely new voice, or one still
    provisional — it does nothing at all, silently deferring to the real
    pass. It can never create a speaker, promote one, or touch Postgres.
 
@@ -295,8 +345,66 @@ This doesn't help the very first moments of a brand-new call (nothing's
 been confirmed yet for a hint to recognize), but for every later utterance
 by a voice the periodic pass has already confirmed, labeling goes from
 "wait up to `diarization_reconcile_interval_ms` plus real compute time" to
-"near-instant" — the majority of any real conversation once it's a few
-turns in.
+"near-instant" (521ms measured commit-to-recognition, entirely in-process)
+— the majority of any real conversation once it's a few turns in. Only
+applies to a local-whisper (or dropped-Deepgram) channel — a
+Deepgram-diarized channel never needs this hint at all, since Deepgram
+already tells `_commit_segment` the speaker directly; see
+[Deepgram-native diarization](#deepgram-native-diarization) below.
+
+### Deepgram-native diarization
+
+A channel whose resolved STT is Deepgram gets its live diarization from
+Deepgram itself, not from any of the above — a structurally different,
+simpler mechanism, entirely local to that one WebSocket connection:
+
+- `app/services/asr/deepgram_stream.py`'s `connect()` always requests
+  `diarize=true`. Every word in a final result then carries Deepgram's own
+  per-word speaker index (0, 1, 2, …) — a value local to that one socket,
+  not a durable identity.
+- `app/ws/live_session.py`'s `_open_deepgram_stream`'s `on_result` groups
+  consecutive same-speaker words into runs (`_group_words_by_speaker`) and
+  commits one `TranscriptSegment` per run, each with its own Corella
+  `Speaker` row already attached (`_get_or_create_deepgram_speaker` —
+  creates one the first time a given Deepgram speaker index is seen on
+  that channel, numbered the same way `reconcile_diarization`'s
+  `_promote_new_speaker` numbers a pyannote-path speaker: by how many real
+  `Speaker` rows already exist on that channel/meeting, not by the
+  Deepgram index itself). Because `_commit_segment` already has the
+  speaker in hand, it pushes a `diarization_update` event **immediately**
+  — no gate, no waiting: unlike the pyannote path, there's no "is this
+  channel genuinely solo" ambiguity to protect against, since Deepgram's
+  diarization already answers that.
+- The periodic reconciliation loop and the recognition hint are both
+  **skipped entirely** for a channel on this path (checked via
+  `session.deepgram_streams.get(channel) is not None`) — no registry to
+  reconcile against, nothing for a hint to check. If the Deepgram stream
+  drops mid-session (a real idle-timeout, or a connection failure), the
+  channel falls back to local VAD/whisper for the rest of the session and
+  the other two mechanisms pick back up automatically on the very next
+  tick — verified live: this is exactly how Corella's own testing first
+  observed the fallback path re-engage, not a hypothetical.
+- **Known, stated limitation**: because Deepgram's speaker index isn't a
+  durable identity, this path never reaches the cross-meeting/group voice
+  registry (Phase O) — an enrolled user's own voice, or a name spotted
+  live from what someone says, is only ever recognized on the
+  pyannote-embedding path. A session on Deepgram gets instant "Speaker
+  N"/"Them N" labels, never a recognized name, this round.
+
+**A real bug here, found post-deploy, worth knowing if you touch
+`on_result`**: the code originally treated "exactly one word run" as "no
+diarization info at all, don't attach a speaker" — but a single run is
+also what an ordinary, single-speaker utterance looks like, which is the
+*common* case (most utterances don't span a mid-sentence speaker change).
+Both cases collapsed to the same branch, silently dropping the speaker on
+the common one — with the periodic-reconciliation fallback disabled for
+this path by design, nothing else was left to catch it, so *every*
+segment on a Deepgram-diarized channel showed "Unknown." Fixed by only
+treating **zero** runs (no words returned at all) as "nothing to work
+with" — a single run now flows through the same per-run loop as multiple
+runs, just running once. See [The debugging history](#the-debugging-history)
+for the full story, including why the mechanism's own original
+verification didn't catch this.
 
 ## The debugging history
 
@@ -484,6 +592,94 @@ for a different, explicitly accepted one — see
    abstaining there and letting the real pass (with its actual acoustic
    context) handle it is correct, not a shortfall.
 
+9. **Moved the recognition hint in-process, killing its Celery round-trip.**
+   The hint itself (entry 8) already made labeling feel near-instant once a
+   voice was confirmed — but it still paid a real, avoidable cost to get
+   there: `send_task` → Celery queue → base64-encoded audio over Redis → a
+   separate worker process → the same cheap embedding check the api process
+   could just as easily run itself. `pyannote.audio`'s embedding model
+   isn't HF-gated (unlike the full diarization pipeline), so it was moved
+   into the api process's own base dependencies, pre-warmed at startup the
+   same way the worker already pre-warms its own models. Verified live on
+   the isolated stack: 521ms commit-to-recognition latency, confirmed via
+   worker logs showing **zero** `quick_label_hint` dispatches during the
+   run — the task doesn't exist anymore, not just a faster instance of the
+   same round-trip. One real bug caught by this same test: the api image
+   needed `ffmpeg` after all, despite only ever handling raw PCM/WAV — found
+   empirically that torchcodec (pyannote 4.x's own audio-IO backend)
+   dynamically loads FFmpeg's shared libraries at runtime to decode *any*
+   audio, even one built entirely in-process.
+
+10. **Fixed a real latency bug in the gate itself, found by re-reading the
+    code.** `reconcile_diarization`'s "2+ confirmed speakers" gate required
+    **both** speakers to independently clear the guest floor before showing
+    *anything* — so even a channel's first, obviously-dominant speaker's
+    already-decided label sat completely unreported while waiting on a
+    second speaker who hadn't earned a label of their own yet. Changed the
+    gate from `promoted_count >= 2` to `cluster_count >= 2` (2+ distinct
+    voices merely *detected*, not *promoted*) — one line, zero frontend/
+    wire-shape changes, since a still-provisional second speaker's segments
+    already rendered as the existing "Identifying…" fallback client-side
+    with no backend event needed for that half at all. Verified directly
+    against real Redis/Postgres state: the exact scenario that produced
+    zero events before this fix (Speaker 1 promoted, Speaker 2 still below
+    the guest floor) now correctly reports Speaker 1's segment immediately.
+    Regression-checked: a genuinely single-speaker scenario still produces
+    zero events — the core guarantee this gate exists for held throughout.
+    (A numbered "Speaker 2 (tentative)" label was considered and rejected
+    for the still-provisional half — `_promote_new_speaker`'s own numbering
+    is deliberately based on how many speakers have actually promoted, so a
+    provisional cluster that never promotes wouldn't leave a numbering gap;
+    showing a number for it risked a stale or wrong label with no
+    correction event ever firing, worse than the existing fallback state.)
+
+11. **Added Deepgram-native diarization** — see
+    [Deepgram-native diarization](#deepgram-native-diarization) above for
+    the mechanism itself. The short version: for a channel whose STT is
+    Deepgram, its own `diarize=true` per-word speaker index now drives live
+    same-room/same-tab splitting entirely in-process, replacing the other
+    two mechanisms outright for that channel while its stream stays
+    healthy — zero pyannote/Celery/worker involvement. Verified live with a
+    real Deepgram key and real 2-speaker audio: correct "Speaker 1"/
+    "Speaker 2" labels delivered via `diarization_update`, confirmed zero
+    worker dispatches while the stream was healthy by exact timestamp
+    correlation against a real (incidental, not engineered) Deepgram
+    idle-timeout that triggered the existing local-VAD/whisper fallback —
+    proving the fallback path this design depends on actually re-engages.
+
+12. **A real regression, found using the deployed build for real: every
+    speaker showed "Unknown."** Root cause was in the code entry 11 added —
+    `on_result` treated "exactly one word run" as "no diarization info at
+    all, don't attach a speaker," but a single run is *also* what an
+    ordinary single-speaker utterance looks like — the common case, since
+    most utterances don't span a mid-sentence speaker change. Both
+    situations collapsed to the same branch, silently dropping the speaker
+    on the overwhelmingly common one. Because entry 11 also disables the
+    periodic-reconciliation fallback for a healthy Deepgram channel by
+    design, nothing else was left to ever assign a label once the primary
+    path silently failed — hence *every* segment showing "Unknown," not an
+    occasional miss. **Entry 11's own verification missed this** because
+    its test spliced two different speakers' audio together, and Deepgram
+    happened to produce 2+ runs per utterance in that specific test
+    (word-level noise at the splice boundary) — accidentally exercising
+    only the working branch; a clean, non-spliced, single-speaker utterance
+    (the real common case) was never actually tested. Fixed: the "no
+    speaker" fallback now only fires when there are literally zero word
+    runs — the existing per-run loop already handles a single run
+    correctly on its own. Re-verified with two targeted tests this time,
+    not a repeat of entry 11's own (already-passing) test: a clean,
+    unspliced single-speaker utterance now gets a real "Speaker 1" label
+    immediately (the exact previously-broken case), and a real two-speaker
+    sequence still correctly splits (regression check on the already-
+    working multi-run case). Also fixed while re-reading this code for
+    correctness: `deepgram_stream.py` was capturing only Deepgram's raw,
+    unpunctuated `word` field, never the `punctuated_word` field Deepgram
+    also returns whenever `punctuate`/`smart_format` are on (both are) —
+    the per-speaker-split path has no polished whole-utterance transcript
+    string to fall back on, so it was producing lower-quality
+    (uncapitalized, unpunctuated) text than Deepgram's own formatted
+    output.
+
 ## Debugging tools
 
 - **`verify_reconcile_diarization.py`** (current) — the real end-to-end
@@ -593,12 +789,25 @@ starting points, not settled — see [Known open issues](#known-open-issues).
   (mostly-skipped) per-segment dispatch. `--concurrency=2` (Phase U) bounds
   how many passes run in parallel, but hasn't been load-tested against
   several genuinely concurrent live calls.
-- **Mid-utterance speaker-change splitting is gone** (see
-  [Speaker diarization](#speaker-diarization)'s scope-reduction note) — a
-  committed segment that genuinely spans two speakers with no pause between
-  them is labeled as whichever speaker's turn overlaps it most, not split.
-  Believed rare given Deepgram's own aggressive endpointing already keeps
-  segments short, but not specifically measured.
+- **Mid-utterance speaker-change splitting is gone from the pyannote-
+  reconciliation path** (see [Speaker diarization](#speaker-diarization)'s
+  scope-reduction note) — a committed segment that genuinely spans two
+  speakers with no pause between them is labeled as whichever speaker's
+  turn overlaps it most, not split. Believed rare given Deepgram's own
+  aggressive endpointing already keeps segments short, but not specifically
+  measured. **Not true for a Deepgram-diarized channel** — that path
+  (see [Deepgram-native diarization](#deepgram-native-diarization)) *does*
+  split a single Deepgram-finalized utterance into multiple segments when
+  its own per-word speaker index changes mid-utterance, verified live.
+- **A Deepgram-diarized channel never reaches the cross-meeting/group
+  voice-identity registry** (Phase O) — Deepgram's per-word speaker index
+  is local to that one WebSocket connection, not a durable identity, so an
+  enrolled user's own voice or a name spotted live from what someone says
+  is only ever recognized on the pyannote-embedding path. A session on
+  Deepgram gets instant "Speaker N"/"Them N" labels, never a recognized
+  name. Bridging this (also running the cheap embedding-match once per
+  newly-seen Deepgram speaker index, purely for identity lookup, not for
+  turn-splitting) is a natural, contained follow-up, not built yet.
 - **Real-world "Them" tab-audio separability is unmeasured.** The
   same-room clustering numbers above (0.67–0.75 same-speaker, 0.01–0.14
   different-speaker) come from a clean single-microphone capture. A shared

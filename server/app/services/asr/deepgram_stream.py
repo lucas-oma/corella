@@ -88,6 +88,13 @@ class DeepgramLiveStream:
         self._closing = False
         self._closed_fired = False
 
+        # Phase W5: real audio duration actually streamed to Deepgram, for
+        # cost tracking (app/services/asr/pricing.py) — Deepgram bills by
+        # duration, not tokens. Counted in send() (bytes actually handed to
+        # this stream), not by wall-clock connection lifetime, since a
+        # channel can sit idle mid-session without accruing real usage.
+        self._bytes_sent = 0
+
         # Current-utterance accumulation, reset in _finalize_utterance.
         # Deepgram doesn't hand back one message with the whole utterance's
         # text — with interim_results on, each *final* (is_final=true)
@@ -111,6 +118,17 @@ class DeepgramLiveStream:
             "smart_format": "true",
             "vad_events": "true",
             "utterance_end_ms": UTTERANCE_END_MS,
+            # Phase W3: Deepgram's own native diarization, always requested
+            # on this streaming path — a per-word `speaker` index comes back
+            # on every final result's words (see _handle_results), letting
+            # app/ws/live_session.py split one Deepgram utterance into
+            # per-speaker segments and label them instantly, with zero
+            # pyannote/Celery/worker involvement for a Deepgram-diarized
+            # channel. Real, stated scope limit: this speaker index is
+            # per-connection-local (0, 1, 2, ...), not a durable identity —
+            # a Deepgram-diarized channel doesn't get Phase O's cross-
+            # meeting/group voice-identity name-recognition this round.
+            "diarize": "true",
         }
         query = "&".join(f"{k}={v}" for k, v in params.items())
         try:
@@ -127,7 +145,20 @@ class DeepgramLiveStream:
         convention as the local VAD detector's own feed(). Queued, not sent
         inline, so the actual socket write always happens on the one
         dedicated writer task below."""
+        self._bytes_sent += len(pcm)
         self._send_queue.put_nowait(pcm)
+
+    def take_usage_seconds(self) -> float:
+        """Real audio duration sent since the last call (or since the
+        stream opened, the first time) — PCM16LE mono 16kHz, so 32000
+        bytes/second. "Take", not "peek": resets the counter, so calling
+        this from both of a stream's two mutually-exclusive close paths
+        (graceful stop and an unexpected drop — see live_session.py's
+        _close_deepgram_streams/on_closed) can never double-count even if
+        something ever called it more than once."""
+        seconds = self._bytes_sent / 2 / 16000
+        self._bytes_sent = 0
+        return seconds
 
     async def close(self) -> None:
         """Sends the documented CloseStream message and gives Deepgram a
@@ -231,7 +262,23 @@ class DeepgramLiveStream:
                     WhisperWord(
                         start=float(w.get("start") or 0.0) - base,
                         end=float(w.get("end") or 0.0) - base,
-                        word=w.get("word") or "",
+                        # Deepgram returns both a raw `word` (lowercase, no
+                        # punctuation) and a `punctuated_word` (capitalized,
+                        # punctuated) per word whenever punctuate/
+                        # smart_format are on (both are, see connect()) —
+                        # prefer the punctuated form so per-speaker split
+                        # text (live_session.py's _group_words_by_speaker
+                        # path, which has no polished whole-utterance
+                        # `transcript` string to fall back on) reads the
+                        # same as Deepgram's own smart-formatted text,
+                        # not raw lowercase tokens glued together.
+                        word=w.get("punctuated_word") or w.get("word") or "",
+                        # Present whenever diarize=true was honored — absent
+                        # (None) falls back to today's single-segment
+                        # behavior in live_session.py, so a Deepgram account/
+                        # model that doesn't support diarization degrades
+                        # gracefully rather than breaking.
+                        speaker=w.get("speaker"),
                     )
                     for w in (alt.get("words") or [])
                 )

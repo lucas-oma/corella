@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="web/src/assets/logo-dark.svg" />
-    <img alt="Corella" src="web/src/assets/logo-light.svg" height="72" />
-  </picture>
+  <img alt="Corella" src="web/src/assets/logo-light.png" width="96" height="96" style="border-radius: 16px; object-fit: contain;" />
 </p>
 
 # Corella
@@ -23,7 +20,7 @@ A self-hosted meeting assistant: it records a call from your browser (or takes a
 - **Groups** — a shared knowledge base and shared voice recognition across teammates, with report-only (not raw transcript) visibility into a group-mate's calls.
 - **Admin console** — user/group management, and a cost-analytics dashboard (per-user spend, daily trend, a trailing-average 7-day projection) built from a real per-call LLM usage ledger.
 - **Admin live debug panel** — while recording your own call as an admin, toggle a technical event stream (VAD flushes, STT/LLM request+response timing, diarization dispatch) for in-the-moment debugging.
-- **Per-call cost estimate** — a best-effort running total per meeting, from real token usage where the provider reports it.
+- **Per-call cost estimate** — a best-effort running total per meeting, from real token usage (LLM calls) and real audio duration (Deepgram STT) where the provider reports it, with a by-provider breakdown in the admin dashboard.
 
 ## Architecture
 
@@ -33,12 +30,12 @@ flowchart TB
     Web -->|"REST + WebSocket"| API["api\nFastAPI"]
     API --> Postgres[("postgres")]
     API --> Redis[("redis\nqueue + pub/sub")]
-    Redis --> Worker["worker\nCelery: faster-whisper,\npyannote.audio, embeddings"]
+    Redis --> Worker["worker\nCelery: full diarize()\npipeline, embeddings"]
     Worker --> Qdrant[("qdrant\nvector search\n(knowledge base +\nmeeting search)")]
 ```
 
-- **api** — FastAPI. Auth, meeting/KB/admin CRUD, WebSocket audio ingestion and live event push (transcript, copilot, diarization updates, admin debug events). Also runs `faster-whisper` directly for live transcription (it's torch-free, so it's light enough for this process) — everything torch-dependent (diarization, offline transcription's diarize step, voice-embedding extraction) stays worker-only.
-- **worker** — Celery. Runs the heavier/blocking jobs: offline transcription + diarization for uploads, live periodic-reconciliation diarization and voice-identity matching, knowledge-base/meeting-search embedding, report generation, and voice enrollment — so none of it blocks the API process or the live WebSocket loop.
+- **api** — FastAPI. Auth, meeting/KB/admin CRUD, WebSocket audio ingestion and live event push (transcript, copilot, diarization updates, admin debug events). Runs `faster-whisper` directly for live transcription (torch-free, light enough for this process), and also loads pyannote.audio's speaker-*embedding* model directly (not gated, unlike the full diarization pipeline below) for the instant "does this match an already-confirmed voice" check on the hot live-recognition path — no worker round-trip for that. When a session's STT is Deepgram, its own native diarization (word-level speaker index) drives live same-room/same-tab speaker splitting entirely in this process too, with zero worker involvement while that stream stays healthy. Everything else torch-dependent (the full `diarize()` pipeline, offline transcription's diarize step) stays worker-only.
+- **worker** — Celery. Runs the heavier/blocking jobs: offline transcription + diarization for uploads, the periodic full-`diarize()`-pipeline reconciliation pass live sessions use when their STT isn't Deepgram (or as a fallback if a Deepgram stream drops), voice-identity matching, knowledge-base/meeting-search embedding, report generation, and voice enrollment — so none of it blocks the API process or the live WebSocket loop.
 - **postgres** — structured data: users, groups, meetings, transcript segments, speakers, voice identities, action items, provider/STT credentials, per-call LLM usage ledger.
 - **qdrant** — vector search, three collections: knowledge-base document chunks, meeting-transcript chunks (search), and speaker voice embeddings (cross-meeting recognition).
 - **redis** — Celery broker/result backend, plus pub/sub for bridging worker-side events (diarization, live labels) back to the right live WebSocket connection.
@@ -104,7 +101,7 @@ docker compose up --build
 ```
 
 - Web UI: http://localhost:8080
-- API: http://localhost:8000 (docs at `/docs`)
+- API: http://localhost:8090 (docs at `/docs`)
 
 If you have an NVIDIA GPU + the NVIDIA Container Toolkit installed, layer on the GPU override for faster/larger transcription and diarization models:
 
@@ -142,7 +139,9 @@ Speaker diarization uses a gated `pyannote.audio` pipeline. A valid `HF_TOKEN` a
 - https://huggingface.co/pyannote/segmentation-3.0
 - https://huggingface.co/pyannote/speaker-diarization-community-1
 
-Skipping this doesn't break anything — transcription still works fine and the meeting still finishes, just without speaker labels for uploaded/offline recordings; the pipeline just fails per-file with a clear error in the worker logs instead of loading. Live diarization during a recording uses the same gated pipeline for its embedding model, so it's subject to the same requirement — a session without it just skips live labeling and keeps showing "Me"/"Them".
+Skipping this doesn't break anything — transcription still works fine and the meeting still finishes, just without speaker labels for uploaded/offline recordings; the pipeline just fails per-file with a clear error in the worker logs instead of loading. Live, same-room/same-tab speaker splitting during a *local-whisper* (or Deepgram-dropped-mid-session) recording depends on this same gated pipeline for its periodic full diarization pass, so it's subject to the same requirement — a session without `HF_TOKEN` just skips live labeling there and keeps showing "Me"/"Them". (The instant per-segment recognition check uses `pyannote/wespeaker-voxceleb-resnet34-LM`, a *separate*, non-gated model — it works with no `HF_TOKEN` at all, it just has nothing to recognize against until the gated pipeline has labeled at least one speaker.)
+
+**Deepgram STT sidesteps all of the above for live diarization.** When a session's speech-to-text is Deepgram (a connected key, per-user or instance-wide), same-room/same-tab speaker splitting uses Deepgram's own native diarization instead — no `HF_TOKEN`, no gated models, no worker involvement at all for that path. The tradeoff: Deepgram's speaker index is local to that one connection, so it doesn't feed Corella's cross-meeting/group voice-identity recognition (enrollment/name-spotting) the way the pyannote-embedding path does — a session on Deepgram gets instant "Speaker 1"/"Speaker 2" labels, but not recognized-by-name identities, this round.
 
 ## Recording a meeting
 
@@ -203,7 +202,7 @@ A backend `pytest` suite (`server/tests/`) covers the highest-value logic — pe
 
 Actively developed. Done so far: auth and admin-managed accounts with groups, upload and live in-browser recording with speaker-labeled transcripts, pluggable LLM copilot (live suggestions/blockers/action items/coach score) and pluggable STT (local or Deepgram), knowledge-base ingestion and semantic meeting search, auto-generated post-call reports (summary/topics/sentiment/quotes/coach score) tuned by call type, cross-meeting voice recognition with live LLM name-spotting, live same-room and same-tab speaker separation, an admin console (users/groups/cost analytics) plus a live debug panel, and per-call cost tracking against a real usage ledger.
 
-Not yet built: post-call "polish" re-transcription with a larger model, and an automated test suite.
+Not yet built: post-call "polish" re-transcription with a larger model.
 
 ## License
 

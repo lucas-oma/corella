@@ -13,8 +13,14 @@ celery_app = Celery(
     broker=settings.redis_url,
     backend=settings.redis_url,
     # Registered lazily (not imported here) so this module — imported by the
-    # lightweight API image too, for `send_task` — never pulls in
-    # faster-whisper/pyannote/torch. Only the actual worker process imports it.
+    # API image too, for `send_task` — never pulls in faster-whisper,
+    # sentence-transformers/pypdf (KB ingestion), or the full HF-gated
+    # diarize() pipeline, all still worker-only. (pyannote.audio/torch
+    # themselves became a base dependency in Phase W1, for the api
+    # process's own in-process speaker-embedding check — this `include=`
+    # staying lazy is no longer about keeping torch out of the api image,
+    # just about the worker-only pieces above.) Only the actual worker
+    # process imports app.workers.tasks.
     include=["app.workers.tasks"],
 )
 celery_app.conf.update(task_serializer="json", result_serializer="json", accept_content=["json"])
@@ -39,8 +45,13 @@ def _prewarm_models(**_kwargs) -> None:
     any real task.
 
     Imported lazily (not at module level) for the same reason celery_app
-    itself defers app.workers.tasks — this module is also imported by the
-    lightweight api image, which must never pull in torch/pyannote/whisper.
+    itself defers app.workers.tasks — this celery_app.py module is also
+    imported by the api image (for `send_task`), and app.workers.tasks
+    itself pulls in sentence-transformers/pypdf (KB ingestion) and the full
+    HF-gated diarize() pipeline module, both genuinely worker-only. (Local
+    whisper and the pyannote.audio embedding model are both already loaded
+    directly by the api process elsewhere — live_session.py/main.py — none
+    of that runs through this celery_app.py import path either way.)
     """
     from app.services.asr.whisper import warm_up as warm_up_whisper
     from app.services.diarization.embedding import _inference as warm_up_embedding

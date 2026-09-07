@@ -49,7 +49,11 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
     ports:
-      - "8000:8000"
+      # Moved off 8000: an unrelated local process (a Godot MCP server,
+      # godot_ai) also defaults to and keeps reclaiming that port on this
+      # host. 8090 is a plain host-side remap — the container's own
+      # internal port (right of the colon) is unchanged.
+      - "8090:8000"
     volumes:
       - audio_data:${AUDIO_STORAGE_PATH:-/data/audio}
       - kb_data:${KB_STORAGE_PATH:-/data/kb}

@@ -1,6 +1,8 @@
 # Worker image for the ASR / diarization / embedding background jobs
 # (app/workers). Heavier than the API image — pulls in faster-whisper,
-# pyannote.audio and sentence-transformers (and transitively, torch).
+# pyannote.audio (base dep as of Phase W — the api image now needs it too,
+# for the in-process live instant-recognition check) and sentence-transformers
+# (worker-only, for KB ingestion) — all transitively pulling in torch.
 FROM python:3.11-slim
 
 WORKDIR /srv
