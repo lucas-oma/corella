@@ -54,6 +54,24 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: list[str] = ["http://localhost:5173"]
 
+    # Per-call-type pre/post external API calls (app/services/admin/
+    # call_hooks.py). public_app_url identifies *this* Corella instance to
+    # whatever external system a hook calls out to — sent as the
+    # X-Corella-App-Url header on every pre/post call-type request,
+    # alongside X-Corella-Meeting-Id and X-Corella-User-Id, unconditionally
+    # (see call_hooks.py:_mandatory_headers). Distinct from the frontend's
+    # build-time PUBLIC_API_URL (which API the browser talks to) — this is
+    # a backend runtime setting with the opposite direction: what URL
+    # identifies *us* to someone else.
+    public_app_url: str = "http://localhost:8080"
+    pre_call_timeout_seconds: float = 5.0
+    post_call_timeout_seconds: float = 30.0
+    # Fetched pre-call response text is capped at this many characters
+    # before being stored on Meeting.pre_call_context and fed into the
+    # live copilot's prompt — a runaway/misconfigured pre-call endpoint
+    # must never blow up the LLM context window.
+    pre_call_context_max_chars: int = 20000
+
     # Audio storage
     audio_storage_path: str = "/data/audio"
     max_audio_upload_mb: int = 500

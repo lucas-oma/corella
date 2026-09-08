@@ -15,7 +15,8 @@ from sqlalchemy import func, select
 from app.core import storage
 from app.core.config import get_settings
 from app.core.db import SessionLocal
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token, hash_api_key
+from app.models.api_key import ApiKey
 from app.models.cost import UsageKind
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.models.user import User, UserRole
@@ -604,7 +605,11 @@ async def _close_deepgram_streams(session: LiveSession) -> None:
 async def _authenticate(websocket: WebSocket) -> User | None:
     """Browsers can't set custom WebSocket headers, and a query-string
     token would land in access logs — so auth is the first text frame
-    instead: {"type": "auth", "token": "..."}.
+    instead: {"type": "auth", "token": "..."} for a browser session, or
+    {"type": "auth", "api_key": "..."} for an external/machine caller
+    (app/models/api_key.py) — same credential, same resolution logic as
+    app/api/deps.py:get_current_user_flexible uses for REST, just carried
+    over this protocol's own auth frame instead of a bearer header.
     """
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
@@ -614,22 +619,39 @@ async def _authenticate(websocket: WebSocket) -> User | None:
 
     try:
         payload = json.loads(raw)
-        token = payload["token"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        await websocket.close(code=4401, reason='First message must be {"type":"auth","token":...}')
-        return None
-
-    user_id = decode_access_token(token)
-    if user_id is None:
-        await websocket.close(code=4401, reason="Invalid token")
+        token = payload.get("token")
+        api_key = payload.get("api_key")
+    except (json.JSONDecodeError, TypeError):
+        token = api_key = None
+    if not token and not api_key:
+        await websocket.close(
+            code=4401, reason='First message must be {"type":"auth","token":...} or {"type":"auth","api_key":...}'
+        )
         return None
 
     async with SessionLocal() as db:
+        if api_key:
+            api_key_row = await db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(api_key)))
+            if api_key_row is None:
+                await websocket.close(code=4401, reason="Invalid API key")
+                return None
+            user = await db.get(User, api_key_row.owner_id)
+            if user is None:
+                await websocket.close(code=4401, reason="Invalid API key")
+                return None
+            api_key_row.last_used_at = datetime.now(UTC)
+            await db.commit()
+            return user
+
+        user_id = decode_access_token(token)
+        if user_id is None:
+            await websocket.close(code=4401, reason="Invalid token")
+            return None
         user = await db.get(User, user_id)
-    if user is None:
-        await websocket.close(code=4401, reason="Invalid token")
-        return None
-    return user
+        if user is None:
+            await websocket.close(code=4401, reason="Invalid token")
+            return None
+        return user
 
 
 def _is_stop(raw: str) -> bool:

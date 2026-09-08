@@ -18,6 +18,6 @@ async def list_call_type_options(
     """The lightweight, public listing — every authenticated user needs
     this to create a meeting (the Dashboard's call-type picker popup), not
     just admins. See app/api/admin.py's /admin/call-types for the
-    full admin-managed CRUD (name/guidance/webhook config)."""
+    full admin-managed CRUD (name/guidance/pre-post-call hook config)."""
     result = await db.scalars(select(CallType).order_by(CallType.name))
     return list(result)

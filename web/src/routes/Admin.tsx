@@ -42,11 +42,20 @@ type CallTypeDraft = {
   slug: string;
   report_guidance: string;
   is_default: boolean;
-  webhook_enabled: boolean;
-  webhook_url: string;
-  webhook_method: string;
-  webhook_headers: string;
-  webhook_body_template: string;
+
+  pre_call_enabled: boolean;
+  pre_call_url: string;
+  pre_call_method: string;
+  pre_call_headers: string;
+  pre_call_body_template: string;
+  pre_call_use_as_context: boolean;
+
+  post_call_enabled: boolean;
+  post_call_url: string;
+  post_call_method: string;
+  post_call_headers: string;
+  post_call_body_template: string;
+  post_call_send_full_payload: boolean;
 };
 
 const EMPTY_CALL_TYPE_DRAFT: CallTypeDraft = {
@@ -54,11 +63,20 @@ const EMPTY_CALL_TYPE_DRAFT: CallTypeDraft = {
   slug: "",
   report_guidance: "",
   is_default: false,
-  webhook_enabled: false,
-  webhook_url: "",
-  webhook_method: "POST",
-  webhook_headers: "",
-  webhook_body_template: "",
+
+  pre_call_enabled: false,
+  pre_call_url: "",
+  pre_call_method: "GET",
+  pre_call_headers: "",
+  pre_call_body_template: "",
+  pre_call_use_as_context: false,
+
+  post_call_enabled: false,
+  post_call_url: "",
+  post_call_method: "POST",
+  post_call_headers: "",
+  post_call_body_template: "",
+  post_call_send_full_payload: false,
 };
 
 function draftFromCallType(ct: CallTypeConfig): CallTypeDraft {
@@ -67,11 +85,20 @@ function draftFromCallType(ct: CallTypeConfig): CallTypeDraft {
     slug: ct.slug,
     report_guidance: ct.report_guidance ?? "",
     is_default: ct.is_default,
-    webhook_enabled: ct.webhook_enabled,
-    webhook_url: ct.webhook_url ?? "",
-    webhook_method: ct.webhook_method,
-    webhook_headers: "", // write-only, never returned — blank means "leave unchanged" on save
-    webhook_body_template: ct.webhook_body_template ?? "",
+
+    pre_call_enabled: ct.pre_call_enabled,
+    pre_call_url: ct.pre_call_url ?? "",
+    pre_call_method: ct.pre_call_method,
+    pre_call_headers: "", // write-only, never returned — blank means "leave unchanged" on save
+    pre_call_body_template: ct.pre_call_body_template ?? "",
+    pre_call_use_as_context: ct.pre_call_use_as_context,
+
+    post_call_enabled: ct.post_call_enabled,
+    post_call_url: ct.post_call_url ?? "",
+    post_call_method: ct.post_call_method,
+    post_call_headers: "", // write-only, never returned — blank means "leave unchanged" on save
+    post_call_body_template: ct.post_call_body_template ?? "",
+    post_call_send_full_payload: ct.post_call_send_full_payload,
   };
 }
 
@@ -302,15 +329,25 @@ export default function Admin() {
         slug: d.slug.trim(),
         report_guidance: d.report_guidance.trim() || null,
         is_default: d.is_default,
-        webhook_enabled: d.webhook_enabled,
-        webhook_url: d.webhook_url.trim() || null,
-        webhook_method: d.webhook_method,
-        webhook_body_template: d.webhook_body_template.trim() || null,
+
+        pre_call_enabled: d.pre_call_enabled,
+        pre_call_url: d.pre_call_url.trim() || null,
+        pre_call_method: d.pre_call_method,
+        pre_call_body_template: d.pre_call_body_template.trim() || null,
+        pre_call_use_as_context: d.pre_call_use_as_context,
+
+        post_call_enabled: d.post_call_enabled,
+        post_call_url: d.post_call_url.trim() || null,
+        post_call_method: d.post_call_method,
+        post_call_body_template: d.post_call_body_template.trim() || null,
+        post_call_send_full_payload: d.post_call_send_full_payload,
+
         // Omitted entirely (not even as an empty string) unless the admin
-        // actually typed something this session — it's write-only and
-        // never comes back from the API, so an empty draft field means
+        // actually typed something this session — both are write-only and
+        // never come back from the API, so an empty draft field means
         // "leave whatever's already saved alone," not "clear it."
-        ...(d.webhook_headers.trim() ? { webhook_headers: d.webhook_headers.trim() } : {}),
+        ...(d.pre_call_headers.trim() ? { pre_call_headers: d.pre_call_headers.trim() } : {}),
+        ...(d.post_call_headers.trim() ? { post_call_headers: d.post_call_headers.trim() } : {}),
       };
 
       if (editingCallTypeId === "new") {
@@ -666,7 +703,8 @@ export default function Admin() {
                     </p>
                     <p className="text-xs text-ink-subtle">
                       {ct.slug}
-                      {ct.webhook_enabled && " · webhook configured"}
+                      {ct.pre_call_enabled && " · pre-call configured"}
+                      {ct.post_call_enabled && " · post-call configured"}
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
@@ -950,19 +988,82 @@ function CallTypeForm({
         <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
           <input
             type="checkbox"
-            checked={draft.webhook_enabled}
-            onChange={(e) => setDraft((prev) => ({ ...prev, webhook_enabled: e.target.checked }))}
+            checked={draft.pre_call_enabled}
+            onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_enabled: e.target.checked }))}
             className="accent-accent"
           />
-          Fire a webhook once a call of this type finishes processing
+          Call an API before a call of this type starts
         </label>
 
-        {draft.webhook_enabled && (
+        {draft.pre_call_enabled && (
           <div className="mt-2 space-y-2 border-l-2 border-border pl-3 dark:border-border-dark">
             <div className="flex gap-2">
               <select
-                value={draft.webhook_method}
-                onChange={(e) => setDraft((prev) => ({ ...prev, webhook_method: e.target.value }))}
+                value={draft.pre_call_method}
+                onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_method: e.target.value }))}
+                className="field w-24 text-sm"
+              >
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+              </select>
+              <input
+                type="text"
+                placeholder="https://example.com/lookup"
+                value={draft.pre_call_url}
+                onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_url: e.target.value }))}
+                className="field flex-1 text-sm"
+              />
+            </div>
+            <textarea
+              placeholder='Headers, as JSON — e.g. {"Authorization": "Bearer ..."}. Leave blank to keep whatever is already saved.'
+              value={draft.pre_call_headers}
+              onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_headers: e.target.value }))}
+              rows={2}
+              className="field text-sm"
+            />
+            <textarea
+              placeholder="Body, as JSON — only used for a method that sends one (e.g. POST)"
+              value={draft.pre_call_body_template}
+              onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_body_template: e.target.value }))}
+              rows={2}
+              className="field text-sm"
+            />
+            <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
+              <input
+                type="checkbox"
+                checked={draft.pre_call_use_as_context}
+                onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_use_as_context: e.target.checked }))}
+                className="accent-accent"
+              />
+              Use the response as conversation context, alongside the knowledge base
+            </label>
+            <p className="text-xs text-ink-subtle">
+              Every request carries these headers automatically: X-Corella-App-Url, X-Corella-Meeting-Id,
+              X-Corella-User-Id.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="border-t border-border pt-2 dark:border-border-dark">
+        <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
+          <input
+            type="checkbox"
+            checked={draft.post_call_enabled}
+            onChange={(e) => setDraft((prev) => ({ ...prev, post_call_enabled: e.target.checked }))}
+            className="accent-accent"
+          />
+          Call an API once a call of this type finishes processing
+        </label>
+
+        {draft.post_call_enabled && (
+          <div className="mt-2 space-y-2 border-l-2 border-border pl-3 dark:border-border-dark">
+            <div className="flex gap-2">
+              <select
+                value={draft.post_call_method}
+                onChange={(e) => setDraft((prev) => ({ ...prev, post_call_method: e.target.value }))}
                 className="field w-24 text-sm"
               >
                 <option value="POST">POST</option>
@@ -972,30 +1073,50 @@ function CallTypeForm({
               <input
                 type="text"
                 placeholder="https://example.com/webhook"
-                value={draft.webhook_url}
-                onChange={(e) => setDraft((prev) => ({ ...prev, webhook_url: e.target.value }))}
+                value={draft.post_call_url}
+                onChange={(e) => setDraft((prev) => ({ ...prev, post_call_url: e.target.value }))}
                 className="field flex-1 text-sm"
               />
             </div>
             <textarea
               placeholder='Headers, as JSON — e.g. {"Authorization": "Bearer ..."}. Leave blank to keep whatever is already saved.'
-              value={draft.webhook_headers}
-              onChange={(e) => setDraft((prev) => ({ ...prev, webhook_headers: e.target.value }))}
+              value={draft.post_call_headers}
+              onChange={(e) => setDraft((prev) => ({ ...prev, post_call_headers: e.target.value }))}
               rows={2}
               className="field text-sm"
             />
+            <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
+              <input
+                type="checkbox"
+                checked={draft.post_call_send_full_payload}
+                onChange={(e) =>
+                  setDraft((prev) => ({ ...prev, post_call_send_full_payload: e.target.checked }))
+                }
+                className="accent-accent"
+              />
+              Send everything (transcript, report, live-copilot suggestions/blockers/score timeline, action
+              items) instead of a custom body
+            </label>
             <textarea
               placeholder='Body template, as JSON — e.g. {"meeting": "{{meeting_id}}", "summary": "{{summary}}"}'
-              value={draft.webhook_body_template}
-              onChange={(e) => setDraft((prev) => ({ ...prev, webhook_body_template: e.target.value }))}
+              value={draft.post_call_body_template}
+              onChange={(e) => setDraft((prev) => ({ ...prev, post_call_body_template: e.target.value }))}
+              disabled={draft.post_call_send_full_payload}
               rows={3}
-              className="field text-sm"
+              className="field text-sm disabled:opacity-40"
             />
+            {!draft.post_call_send_full_payload && (
+              <p className="text-xs text-ink-subtle">
+                Placeholders (place inside quotes in the JSON): {"{{meeting_id}}"}, {"{{owner_name}}"},{" "}
+                {"{{title}}"}, {"{{call_type}}"}, {"{{status}}"}, {"{{summary}}"}, {"{{key_topics}}"},{" "}
+                {"{{sentiment}}"}, {"{{notable_quotes}}"}, {"{{coach_score}}"}, {"{{estimated_cost_usd}}"},{" "}
+                {"{{talk_ratio}}"}, {"{{action_items}}"}, {"{{copilot_insights}}"}, {"{{transcript}}"},{" "}
+                {"{{created_at}}"}, {"{{duration_seconds}}"}, or {"{{full_payload}}"} for everything at once.
+              </p>
+            )}
             <p className="text-xs text-ink-subtle">
-              Placeholders (place inside quotes in the JSON): {"{{meeting_id}}"}, {"{{owner_name}}"},{" "}
-              {"{{title}}"}, {"{{call_type}}"}, {"{{status}}"}, {"{{summary}}"}, {"{{key_topics}}"},{" "}
-              {"{{sentiment}}"}, {"{{coach_score}}"}, {"{{action_items}}"}, {"{{transcript}}"},{" "}
-              {"{{created_at}}"}, {"{{duration_seconds}}"}.
+              Every request carries these headers automatically: X-Corella-App-Url, X-Corella-Meeting-Id,
+              X-Corella-User-Id.
             </p>
           </div>
         )}

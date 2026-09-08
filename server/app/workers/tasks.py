@@ -22,7 +22,7 @@ from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, Transcr
 from app.models.user import User
 from app.models.voice_identity import VoiceIdentity
 from app.services.access import searchable_kb_keywords
-from app.services.admin.webhooks import dispatch_call_type_webhook
+from app.services.admin.call_hooks import dispatch_post_call
 from app.services.alignment.align import align
 from app.services.asr import deepgram
 from app.services.asr.keyword_prompt import keywords_to_initial_prompt
@@ -1026,8 +1026,8 @@ async def _generate_report_async(meeting_id: str) -> None:
         # Only the automatic path fires this — never the manual "Regenerate
         # report" route (api/meetings.py:create_meeting_report), and only
         # after a *successful* report, since the template's placeholders
-        # need real summary/report data. dispatch_call_type_webhook is a
-        # no-op if this meeting's call type has no webhook configured, and
-        # never raises — a broken webhook must never affect the meeting's
-        # own success.
-        await dispatch_call_type_webhook(db, meeting, result)
+        # need real summary/report data. dispatch_post_call is a no-op if
+        # this meeting's call type has no post-call configured, and never
+        # raises — a broken hook must never affect the meeting's own
+        # success.
+        await dispatch_post_call(db, meeting, result)

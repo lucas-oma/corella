@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 class CallTypeOption(BaseModel):
     """The lightweight, public shape — every authenticated user needs this
     to create a meeting (GET /api/call-types), not just admins. No
-    guidance/webhook internals."""
+    guidance/pre-post-call internals."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -18,8 +18,9 @@ class CallTypeOption(BaseModel):
 
 class CallTypeRead(BaseModel):
     """Admin-only full shape (GET/POST/PATCH /api/admin/call-types).
-    webhook_headers is deliberately absent — write-only, same
-    secret-handling convention as every other credential in this app."""
+    pre_call_headers/post_call_headers are deliberately absent —
+    write-only, same secret-handling convention as every other credential
+    in this app."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -28,10 +29,18 @@ class CallTypeRead(BaseModel):
     slug: str
     report_guidance: str | None
     is_default: bool
-    webhook_enabled: bool
-    webhook_url: str | None
-    webhook_method: str
-    webhook_body_template: str | None
+
+    pre_call_enabled: bool
+    pre_call_url: str | None
+    pre_call_method: str
+    pre_call_body_template: str | None
+    pre_call_use_as_context: bool
+
+    post_call_enabled: bool
+    post_call_url: str | None
+    post_call_method: str
+    post_call_body_template: str | None
+    post_call_send_full_payload: bool
 
 
 class CallTypeCreate(BaseModel):
@@ -39,13 +48,22 @@ class CallTypeCreate(BaseModel):
     slug: str
     report_guidance: str | None = None
     is_default: bool = False
-    webhook_enabled: bool = False
-    webhook_url: str | None = None
-    webhook_method: str = "POST"
+
+    pre_call_enabled: bool = False
+    pre_call_url: str | None = None
+    pre_call_method: str = "GET"
     # Raw JSON object text, e.g. '{"Authorization": "Bearer ..."}' —
     # encrypted at rest (app.core.security.encrypt_secret), never returned.
-    webhook_headers: str | None = None
-    webhook_body_template: str | None = None
+    pre_call_headers: str | None = None
+    pre_call_body_template: str | None = None
+    pre_call_use_as_context: bool = False
+
+    post_call_enabled: bool = False
+    post_call_url: str | None = None
+    post_call_method: str = "POST"
+    post_call_headers: str | None = None
+    post_call_body_template: str | None = None
+    post_call_send_full_payload: bool = False
 
 
 class CallTypeUpdate(BaseModel):
@@ -57,8 +75,17 @@ class CallTypeUpdate(BaseModel):
     slug: str | None = None
     report_guidance: str | None = None
     is_default: bool | None = None
-    webhook_enabled: bool | None = None
-    webhook_url: str | None = None
-    webhook_method: str | None = None
-    webhook_headers: str | None = None
-    webhook_body_template: str | None = None
+
+    pre_call_enabled: bool | None = None
+    pre_call_url: str | None = None
+    pre_call_method: str | None = None
+    pre_call_headers: str | None = None
+    pre_call_body_template: str | None = None
+    pre_call_use_as_context: bool | None = None
+
+    post_call_enabled: bool | None = None
+    post_call_url: str | None = None
+    post_call_method: str | None = None
+    post_call_headers: str | None = None
+    post_call_body_template: str | None = None
+    post_call_send_full_payload: bool | None = None

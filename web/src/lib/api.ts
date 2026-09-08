@@ -108,7 +108,7 @@ export interface AuthConfig {
 
 /** The lightweight, public shape — every authenticated user needs this to
  * create a meeting, not just admins. See CallTypeConfig below for the
- * full admin-managed shape (name/guidance/webhook config). */
+ * full admin-managed shape (name/guidance/pre-post-call config). */
 export interface CallTypeOption {
   id: string;
   name: string;
@@ -122,10 +122,18 @@ export interface CallTypeConfig {
   slug: string;
   report_guidance: string | null;
   is_default: boolean;
-  webhook_enabled: boolean;
-  webhook_url: string | null;
-  webhook_method: string;
-  webhook_body_template: string | null;
+
+  pre_call_enabled: boolean;
+  pre_call_url: string | null;
+  pre_call_method: string;
+  pre_call_body_template: string | null;
+  pre_call_use_as_context: boolean;
+
+  post_call_enabled: boolean;
+  post_call_url: string | null;
+  post_call_method: string;
+  post_call_body_template: string | null;
+  post_call_send_full_payload: boolean;
 }
 
 export interface Meeting {
@@ -212,6 +220,21 @@ export interface ProviderStatus {
 export interface SttStatus {
   connected: boolean;
   source: "user" | "env" | null;
+}
+
+/** A self-service credential for external/machine access (Settings) — the
+ * real key is only ever present on the response to createApiKey, never
+ * again after that. */
+export interface ApiKey {
+  id: string;
+  name: string;
+  key_prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface ApiKeyCreated extends ApiKey {
+  key: string;
 }
 
 export interface AiOverview {
@@ -372,6 +395,10 @@ export const api = {
   saveSttCredential: (apiKey: string) =>
     request<SttStatus>("/api/settings/stt", { method: "PUT", body: JSON.stringify({ api_key: apiKey }) }),
   removeSttCredential: () => request<SttStatus>("/api/settings/stt", { method: "DELETE" }),
+  listApiKeys: () => request<ApiKey[]>("/api/settings/api-keys"),
+  createApiKey: (name: string) =>
+    request<ApiKeyCreated>("/api/settings/api-keys", { method: "POST", body: JSON.stringify({ name }) }),
+  deleteApiKey: (id: string) => request<void>(`/api/settings/api-keys/${id}`, { method: "DELETE" }),
   getAiOverview: () => request<AiOverview>("/api/settings/ai-overview"),
   getPreferences: () => request<Preferences>("/api/settings/preferences"),
   savePreferences: (payload: Partial<Preferences>) =>
@@ -403,9 +430,17 @@ export const api = {
     request<CostSummary>(`/api/admin/costs?period=${period}`),
   getCallTypes: () => request<CallTypeOption[]>("/api/call-types"),
   adminListCallTypes: () => request<CallTypeConfig[]>("/api/admin/call-types"),
-  adminCreateCallType: (payload: Partial<CallTypeConfig> & { name: string; slug: string; webhook_headers?: string }) =>
-    request<CallTypeConfig>("/api/admin/call-types", { method: "POST", body: JSON.stringify(payload) }),
-  adminUpdateCallType: (id: string, payload: Partial<CallTypeConfig> & { webhook_headers?: string }) =>
-    request<CallTypeConfig>(`/api/admin/call-types/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  adminCreateCallType: (
+    payload: Partial<CallTypeConfig> & {
+      name: string;
+      slug: string;
+      pre_call_headers?: string;
+      post_call_headers?: string;
+    },
+  ) => request<CallTypeConfig>("/api/admin/call-types", { method: "POST", body: JSON.stringify(payload) }),
+  adminUpdateCallType: (
+    id: string,
+    payload: Partial<CallTypeConfig> & { pre_call_headers?: string; post_call_headers?: string },
+  ) => request<CallTypeConfig>(`/api/admin/call-types/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   adminDeleteCallType: (id: string) => request<void>(`/api/admin/call-types/${id}`, { method: "DELETE" }),
 };

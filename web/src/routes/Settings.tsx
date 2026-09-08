@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type AiOverview, type Preferences, type ProviderStatus, type SttStatus } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  type AiOverview,
+  type ApiKey,
+  type ApiKeyCreated,
+  type Preferences,
+  type ProviderStatus,
+  type SttStatus,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
 import { type CaptureHandle, pcmToWavBlob, startCapture } from "@/lib/live";
@@ -121,6 +130,16 @@ export default function Settings() {
   const [savedFlash, setSavedFlash] = useState<"stt" | "llm" | null>(null);
   const savedFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [apiKeys, setApiKeys] = useState<ApiKey[] | null>(null);
+  const [newKeyName, setNewKeyName] = useState("");
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
+  // The one and only time a real key is ever visible — cleared on
+  // dismiss, and never recoverable again after that (only its hash is
+  // stored server-side).
+  const [revealedKey, setRevealedKey] = useState<ApiKeyCreated | null>(null);
+  const [copied, setCopied] = useState(false);
+
   const [fullName, setFullName] = useState("");
   const [savingName, setSavingName] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -136,7 +155,57 @@ export default function Settings() {
     api.getSttStatus().then(setSttStatus);
     api.getAiOverview().then(setAiOverview);
     api.getPreferences().then(setPreferences);
+    api.listApiKeys().then(setApiKeys);
   }, []);
+
+  async function onCreateApiKey() {
+    const name = newKeyName.trim();
+    if (!name) return;
+    setError(null);
+    setCreatingKey(true);
+    try {
+      const created = await api.createApiKey(name);
+      setApiKeys((prev) => [...(prev ?? []), created]);
+      setRevealedKey(created);
+      setNewKeyName("");
+      setCopied(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't create API key");
+    } finally {
+      setCreatingKey(false);
+    }
+  }
+
+  async function onDeleteApiKey(key: ApiKey) {
+    const ok = await confirm({
+      title: `Delete "${key.name}"?`,
+      description: "Anything still using this key will stop being able to authenticate immediately.",
+      confirmLabel: "Delete key",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setError(null);
+    setDeletingKeyId(key.id);
+    try {
+      await api.deleteApiKey(key.id);
+      setApiKeys((prev) => prev?.filter((k) => k.id !== key.id) ?? null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't delete API key");
+    } finally {
+      setDeletingKeyId(null);
+    }
+  }
+
+  async function onCopyRevealedKey() {
+    if (!revealedKey) return;
+    try {
+      await navigator.clipboard.writeText(revealedKey.key);
+      setCopied(true);
+    } catch {
+      // Clipboard access can be denied by the browser — the key text is
+      // still selectable/visible either way, so this is a soft failure.
+    }
+  }
 
   // Keeps the edit-form drafts in sync whenever the committed preferences
   // change (initial load, or right after a save) — separate from the
@@ -750,6 +819,84 @@ export default function Settings() {
                 {aiOverview.diarization.available ? aiOverview.diarization.pipeline : "Not configured (needs HF_TOKEN)"}
               </p>
             </li>
+          </ul>
+        )}
+      </section>
+
+      <section className="card mt-6 p-6">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">API keys</h2>
+            <p className="mt-1 text-xs text-ink-subtle">
+              Let an external system create/read meetings and stream a live recording as your account —
+              see <code className="text-[11px]">API.md</code> for the full reference.
+            </p>
+          </div>
+        </div>
+
+        {revealedKey && (
+          <div className="mb-4 rounded-sm border border-accent/30 bg-black/[0.02] p-3 dark:bg-white/[0.04]">
+            <p className="text-xs font-medium text-ink dark:text-ink-inverted">
+              "{revealedKey.name}" created — copy it now, you won't be able to see it again.
+            </p>
+            <div className="mt-2 flex items-center gap-2">
+              <code className="flex-1 overflow-x-auto rounded-sm border border-border bg-surface-raised px-2 py-1.5 text-xs dark:border-border-dark dark:bg-surface-dark-raised">
+                {revealedKey.key}
+              </code>
+              <button onClick={onCopyRevealedKey} className="btn-secondary shrink-0 text-xs">
+                {copied ? "Copied ✓" : "Copy"}
+              </button>
+            </div>
+            <button
+              onClick={() => setRevealedKey(null)}
+              className="mt-2 text-xs text-ink-subtle hover:text-ink dark:hover:text-ink-inverted"
+            >
+              Done, I've saved it
+            </button>
+          </div>
+        )}
+
+        <div className="mb-4 flex gap-2">
+          <input
+            type="text"
+            placeholder="Key name, e.g. Zapier integration"
+            value={newKeyName}
+            onChange={(e) => setNewKeyName(e.target.value)}
+            className="field flex-1 text-sm"
+          />
+          <button
+            onClick={onCreateApiKey}
+            disabled={creatingKey || !newKeyName.trim()}
+            className="btn-secondary shrink-0"
+          >
+            {creatingKey ? "Creating…" : "Create key"}
+          </button>
+        </div>
+
+        {apiKeys === null && <p className="text-sm text-ink-muted">Loading…</p>}
+        {apiKeys?.length === 0 && <p className="text-sm text-ink-muted">No API keys yet.</p>}
+        {apiKeys && apiKeys.length > 0 && (
+          <ul className="divide-y divide-border dark:divide-border-dark">
+            {apiKeys.map((key) => (
+              <li key={key.id} className="flex items-center justify-between gap-3 py-2.5">
+                <div className="min-w-0">
+                  <p className="truncate text-sm text-ink dark:text-ink-inverted">{key.name}</p>
+                  <p className="text-xs text-ink-subtle">
+                    <code>{key.key_prefix}</code> · created {new Date(key.created_at).toLocaleDateString()}
+                    {key.last_used_at
+                      ? ` · last used ${new Date(key.last_used_at).toLocaleDateString()}`
+                      : " · never used"}
+                  </p>
+                </div>
+                <button
+                  onClick={() => onDeleteApiKey(key)}
+                  disabled={deletingKeyId === key.id}
+                  className="shrink-0 text-xs text-ink-subtle hover:text-status-danger"
+                >
+                  {deletingKeyId === key.id ? "…" : "Delete"}
+                </button>
+              </li>
+            ))}
           </ul>
         )}
       </section>

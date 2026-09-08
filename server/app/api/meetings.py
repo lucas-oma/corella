@@ -7,7 +7,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import get_current_user, get_current_user_flexible, require_admin
 from app.core import storage
 from app.core.db import get_db
 from app.models.call_type import CallType
@@ -17,6 +17,7 @@ from app.schemas.copilot_insight import CopilotInsightRead
 from app.schemas.meeting import GroupMeetingRead, MeetingCreate, MeetingRead, MeetingSearchResult
 from app.schemas.report import ActionItemRead, ActionItemUpdate, ReportResponse
 from app.schemas.transcript import TranscriptSegmentRead
+from app.services.admin.call_hooks import dispatch_pre_call
 from app.services.copilot.report import ReportError, generate_report
 from app.services.embeddings.qdrant_store import delete_meeting_chunks
 from app.services.embeddings.qdrant_store import search_meetings as qdrant_search_meetings
@@ -111,7 +112,7 @@ async def list_meetings(
 @router.post("", response_model=MeetingRead, status_code=status.HTTP_201_CREATED)
 async def create_meeting(
     payload: MeetingCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_flexible),
     db: AsyncSession = Depends(get_db),
 ) -> Meeting:
     if payload.call_type_id is not None:
@@ -135,6 +136,19 @@ async def create_meeting(
     await db.refresh(meeting)
     meeting.owner = current_user
     meeting.call_type = call_type
+
+    # "Before the call starts" — fired synchronously (bounded by
+    # settings.pre_call_timeout_seconds) so any fetched context actually
+    # exists before the conversation begins, whether this meeting was
+    # just created by a browser session or by an API key. A no-op if this
+    # call type has no pre-call configured; never raises on failure (see
+    # dispatch_pre_call's own docstring) — this response is never delayed
+    # or broken by an external system being down.
+    context = await dispatch_pre_call(db, meeting)
+    if call_type is not None and call_type.pre_call_use_as_context and context:
+        meeting.pre_call_context = context
+        await db.commit()
+
     return meeting
 
 
@@ -258,7 +272,7 @@ async def list_all_meetings(
 @router.get("/{meeting_id}", response_model=MeetingRead)
 async def get_meeting(
     meeting_id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_flexible),
     db: AsyncSession = Depends(get_db),
 ) -> Meeting:
     return await _get_group_visible_meeting(meeting_id, current_user, db)
@@ -328,7 +342,7 @@ async def get_meeting_audio(
 @router.get("/{meeting_id}/transcript", response_model=list[TranscriptSegmentRead])
 async def get_meeting_transcript(
     meeting_id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_flexible),
     db: AsyncSession = Depends(get_db),
 ) -> list[TranscriptSegment]:
     await _get_full_readable_meeting(meeting_id, current_user, db)
@@ -344,7 +358,7 @@ async def get_meeting_transcript(
 @router.get("/{meeting_id}/insights", response_model=list[CopilotInsightRead])
 async def get_meeting_insights(
     meeting_id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_flexible),
     db: AsyncSession = Depends(get_db),
 ) -> list[CopilotInsight]:
     """Every live-copilot cycle's persisted suggestion/blockers/coach_score
@@ -367,7 +381,7 @@ async def get_meeting_insights(
 @router.post("/{meeting_id}/report", response_model=ReportResponse)
 async def create_meeting_report(
     meeting_id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_flexible),
     db: AsyncSession = Depends(get_db),
 ) -> ReportResponse:
     meeting = await _get_owned_meeting(meeting_id, current_user, db)

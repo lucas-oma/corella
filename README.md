@@ -21,6 +21,7 @@ A self-hosted meeting assistant: it records a call from your browser (or takes a
 - **Admin console** — user/group management, and a cost-analytics dashboard (per-user spend, daily trend, a trailing-average 7-day projection) built from a real per-call LLM usage ledger.
 - **Admin live debug panel** — while recording your own call as an admin, toggle a technical event stream (VAD flushes, STT/LLM request+response timing, diarization dispatch) for in-the-moment debugging.
 - **Per-call cost estimate** — a best-effort running total per meeting, from real token usage (LLM calls) and real audio duration (Deepgram STT) where the provider reports it, with a by-provider breakdown in the admin dashboard.
+- **API access** — API keys (Settings) for creating/reading meetings and streaming a live recording from another system, plus per-call-type hooks that fire before a call starts (pull in external context) and after it finishes (push the full result out) — see [`API.md`](API.md).
 
 ## Architecture
 
@@ -122,7 +123,7 @@ Migrations run automatically on `api` startup. `postgres`/`redis`/`qdrant` don't
 
 See [`.env.example`](.env.example) for the full, documented list. Highlights:
 
-- **Core**: `JWT_SECRET` (required), `CORS_ORIGINS`, `ENVIRONMENT`.
+- **Core**: `JWT_SECRET` (required), `CORS_ORIGINS`, `ENVIRONMENT`, `PUBLIC_APP_URL` (identifies this instance in pre/post call-type API hooks — see [API access](#api-access)).
 - **Access control**: `ALLOW_PUBLIC_REGISTRATION`, `ADMIN_EMAIL`/`ADMIN_PASSWORD` (bootstrap admin, see [Access control](#access-control) below).
 - **Data stores**: `DATABASE_URL`, `REDIS_URL`, `QDRANT_URL` — defaults match `docker-compose.yml`'s service names, only change these if you're pointing at externally-hosted stores.
 - **Speech**: `HF_TOKEN` (diarization, see below), `WHISPER_MODEL`/`WHISPER_COMPUTE_TYPE`, optional `DEEPGRAM_API_KEY`/`DEFAULT_MODEL_DEEPGRAM`.
@@ -163,6 +164,14 @@ By default anyone can create their own account (`ALLOW_PUBLIC_REGISTRATION=true`
 `ADMIN_EMAIL`/`ADMIN_PASSWORD` only ever *create* the account — changing them later and restarting won't touch an existing admin's password.
 
 Admins additionally get read-only access to every user's full transcript/audio (not just group-mates' reports) via a dedicated "All meetings" view, and a cost-analytics dashboard aggregated across the whole instance. Every write path (delete, report generation, action-item edits) stays strictly owner-only regardless of role.
+
+## API access
+
+Corella can be integrated with an external system in three ways — full reference (auth, REST/WebSocket shapes, hook payloads, examples) in [`API.md`](API.md):
+
+1. **API keys** (Settings → API keys) — a long-lived credential that acts as its owner, for creating/reading meetings and streaming a live recording without a browser login.
+2. **Live streaming** — the same WebSocket protocol the browser app uses to record is reachable by API key too; no separate streaming endpoint exists.
+3. **Pre/post call-type hooks** (Admin → Call types) — an admin can configure an external API call to fire before a call of a given type starts (optionally feeding the response back into the live copilot's context, alongside the knowledge base) and/or after it finishes (optionally sending the full transcript/report/coaching timeline out to another system). Every such request carries three fixed headers (`X-Corella-App-Url`, `X-Corella-Meeting-Id`, `X-Corella-User-Id`) that can't be overridden by custom header config.
 
 ## Design & branding
 

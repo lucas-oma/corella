@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import secrets
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from uuid import UUID
@@ -63,3 +64,34 @@ def encrypt_secret(plaintext: str) -> str:
 
 def decrypt_secret(ciphertext: str) -> str:
     return _fernet().decrypt(ciphertext.encode()).decode()
+
+
+# API keys (app/models/api_key.py) — a self-service credential for
+# external/machine callers, distinct from the JWT bearer flow above. The
+# prefix lets get_current_user_flexible (app/api/deps.py) tell an API key
+# apart from a JWT at a glance, without needing to attempt-and-fail a JWT
+# decode first; it's also what a leaked-key scanner would grep for.
+API_KEY_PREFIX = "sk_live_"
+
+
+def generate_api_key() -> tuple[str, str, str]:
+    """One freshly-generated key: (full_key — shown to the caller exactly
+    once, display_prefix — stored and shown in the list UI forever,
+    key_hash — the only form actually persisted). The full key is never
+    stored anywhere, mirroring how a password is never stored — only
+    verifiable, never recoverable.
+    """
+    full_key = f"{API_KEY_PREFIX}{secrets.token_urlsafe(32)}"
+    display_prefix = full_key[: len(API_KEY_PREFIX) + 6] + "…"
+    return full_key, display_prefix, hash_api_key(full_key)
+
+
+def hash_api_key(key: str) -> str:
+    """Plain sha256, not bcrypt/passlib — `key` is already a high-entropy
+    random token we generated (secrets.token_urlsafe), not a low-entropy
+    user-chosen secret, so there's no offline-brute-force case a slow
+    hash defends against here; sha256 is the standard approach for this
+    (same as GitHub/Stripe API keys) and is fast enough to hash on every
+    authenticated request without adding real latency.
+    """
+    return hashlib.sha256(key.encode()).hexdigest()

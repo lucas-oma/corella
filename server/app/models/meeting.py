@@ -58,6 +58,14 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     call_type_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("call_types.id", ondelete="SET NULL")
     )
+    # The response body fetched by this meeting's call type's pre-call
+    # hook, if pre_call_use_as_context is on (app/services/admin/
+    # call_hooks.py:dispatch_pre_call, fired from create_meeting) —
+    # capped at settings.pre_call_context_max_chars before storing. Fed
+    # into the live copilot's prompt alongside the regular knowledge-base
+    # context (app/services/copilot/live.py:run_cycle). None when no
+    # pre-call is configured, it failed, or the feature is off.
+    pre_call_context: Mapped[str | None] = mapped_column(Text)
     key_topics: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     sentiment: Mapped[str | None] = mapped_column(String(255))
     notable_quotes: Mapped[list[str] | None] = mapped_column(ARRAY(String))
