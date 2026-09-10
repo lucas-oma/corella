@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.core.security import API_KEY_PREFIX, generate_api_key, hash_api_key
 from app.models.api_key import ApiKey
+from app.models.meeting import Meeting
 
 
 def test_generate_api_key_hash_matches_and_plaintext_is_not_the_hash():
@@ -129,3 +130,24 @@ async def test_api_key_last_used_at_updates_on_use(db, make_user, app_client):
     await db.refresh(refreshed)
     assert refreshed.last_used_at is not None
     assert refreshed.last_used_at >= before.replace(tzinfo=refreshed.last_used_at.tzinfo)
+
+
+@pytest.mark.asyncio
+async def test_meeting_api_key_name_reflects_the_streaming_integration(db, make_user):
+    """Meeting.api_key_name (app/models/meeting.py) is what the "Live via
+    API"/"Recorded via API" badge reads — None for a browser-recorded
+    meeting, the key's own label once one's attached."""
+    user = await make_user()
+    api_key = ApiKey(owner_id=user.id, name="Zapier", key_prefix="sk_live_zap…", key_hash="x" * 64)
+    db.add(api_key)
+    await db.commit()
+
+    browser_meeting = Meeting(owner_id=user.id, title="Browser call")
+    api_meeting = Meeting(owner_id=user.id, title="API call", api_key_id=api_key.id)
+    db.add_all([browser_meeting, api_meeting])
+    await db.commit()
+
+    browser_meeting = await db.get(Meeting, browser_meeting.id, populate_existing=True)
+    api_meeting = await db.get(Meeting, api_meeting.id, populate_existing=True)
+    assert browser_meeting.api_key_name is None
+    assert api_meeting.api_key_name == "Zapier"

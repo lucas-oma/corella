@@ -30,6 +30,7 @@ export default {
           foreground: "#FAFAF9",
         },
         status: {
+          info: "#1D5A8C",
           success: "#1F7A4D",
           warning: "#9A6300",
           danger: "#B3261E",

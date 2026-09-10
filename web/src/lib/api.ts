@@ -155,6 +155,11 @@ export interface Meeting {
   created_at: string;
   owner_id: string;
   owner_name: string;
+  // The integration's own admin-chosen label (Settings -> API keys) if
+  // this meeting is/was actually streamed via an API key rather than the
+  // browser — null otherwise. Drives the "Live via API"/"Recorded via
+  // API" badge.
+  api_key_name: string | null;
 }
 
 /** A group-mate's meeting, from the Dashboard's group-browsing tab — a
@@ -169,6 +174,7 @@ export interface GroupMeeting {
   created_at: string;
   owner_id: string;
   owner_name: string;
+  api_key_name: string | null;
 }
 
 export interface ActionItem {
