@@ -118,8 +118,8 @@ Each call type (**Admin → Call types**) can call an external API **before** a 
 Fires synchronously from `POST /api/meetings`, before the response comes back — bounded by a short timeout (`pre_call_timeout_seconds`, default 5s) so a slow/broken endpoint never blocks or fails meeting creation; a failure here just means no extra context that time, logged server-side.
 
 - **Method**: any (`GET` by default — it's usually a lookup).
-- **URL / headers / body**: fully admin-configurable. Headers support an encrypted `Authorization`-style secret.
-- **"Use response as conversation context"**: when enabled, the response body is stored on the meeting and fed into the live copilot's prompt for every coaching cycle during the call — *alongside*, not instead of, the group's own knowledge base. Capped at `pre_call_context_max_chars` (default 20,000 characters).
+- **URL / headers / body**: fully admin-configurable. Headers support an encrypted `Authorization`-style secret. The body supports `{{placeholder}}` substitution too, for a `POST`/`PUT`/`PATCH` pre-call that needs to send something (e.g. `{"lookup_name": "{{owner_name}}"}` for a CRM query) — but only meeting-level fields are available here, since no transcript or report exists yet at this point: `{{meeting_id}}`, `{{owner_id}}`, `{{owner_name}}`, `{{title}}`, `{{call_type}}`, `{{status}}`, `{{created_at}}`. (The full placeholder set below, including `{{transcript}}`/`{{full_payload}}`/etc., is post-call only.)
+- **"Use response as conversation context"**: when enabled, the response body is stored on the meeting and fed into the live copilot's prompt for every coaching cycle during the call — *alongside*, not instead of, the group's own knowledge base. Capped at `pre_call_context_max_chars` (default 20,000 characters). This is independent of whether a body template is set — the pre-call still fires either way; this flag only controls whether its *response* becomes context. With this off, a pre-call is still useful purely as a side effect (e.g. notifying another system a call started).
 
 ### After the call (post-call)
 
@@ -188,6 +188,29 @@ app.post("/corella-webhook", express.json(), (req, res) => {
 ### Example: a pre-call context lookup
 
 Corella calls `GET https://your-crm.example.com/lookup?...` with the three mandatory headers attached; your endpoint returns plain text or JSON, which becomes the "External context" block in every live-coaching prompt for that call if "use as context" is on.
+
+### Testing your integration: `server/scripts/api_test_server.py`
+
+A small FastAPI app, committed in this repo specifically to stand in for "the other system" on the receiving end of a pre/post call-type hook while you build one — no need to have your real receiving endpoint ready yet, or to guess whether Corella is sending what you think it is.
+
+Run it:
+
+```
+cd server && .venv/bin/uvicorn scripts.api_test_server:app --port 9199 --reload
+```
+
+Then in **Admin → Call types**, point a hook at it from inside the `api`/`worker` containers via `host.docker.internal` (not `localhost` — that resolves to the container itself, not your host machine):
+
+```
+http://host.docker.internal:9199/pre     # any path containing "pre"  -> 200, a fake CRM-lookup-shaped text body
+http://host.docker.internal:9199/post    # anything else             -> 200, {"ok": true}
+http://host.docker.internal:9199/anyfail # any path containing "fail" -> 500, for testing graceful failure
+http://host.docker.internal:9199/anyslow # any path containing "slow" -> sleeps 8s, for testing the timeout path
+```
+
+Every request it receives is logged to its own console (method, the three mandatory headers checked off explicitly, and the body) and kept in memory — `GET http://localhost:9199/requests` to inspect everything received so far as JSON, `DELETE` to clear it between runs.
+
+It's also exercised as real test infrastructure, not just a manual aid: `server/tests/test_call_hooks_integration.py` starts this exact app as a real subprocess and asserts against real loopback HTTP responses — covering both hooks in both their "special" (`pre_call_use_as_context` / `post_call_send_full_payload`) and "regular" (plain fetch / custom template) modes, plus the graceful-failure and timeout paths — complementing `test_call_hooks.py`'s monkeypatched-`httpx` unit tests of the same logic.
 
 ## Errors
 

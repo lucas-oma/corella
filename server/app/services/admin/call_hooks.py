@@ -129,6 +129,29 @@ async def render_template(db: AsyncSession, template: str, meeting: Meeting, rep
     return rendered
 
 
+def render_pre_call_template(template: str, meeting: Meeting) -> str:
+    """Substitutes {{placeholder}} tokens in an admin-authored pre-call
+    body template — a much smaller placeholder set than render_template's
+    (post-call) one, since a pre-call fires before any transcript/report
+    exists: meeting_id, owner_id, owner_name, title, call_type, status,
+    created_at only. No DB access needed (unlike render_template), so
+    this isn't async.
+    """
+    values = {
+        "meeting_id": str(meeting.id),
+        "owner_id": str(meeting.owner_id),
+        "owner_name": meeting.owner_name,
+        "title": meeting.title,
+        "call_type": meeting.call_type.name if meeting.call_type else None,
+        "status": meeting.status.value,
+        "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+    }
+    rendered = template
+    for key, value in values.items():
+        rendered = rendered.replace("{{" + key + "}}", _json_value(value))
+    return rendered
+
+
 async def dispatch_pre_call(db: AsyncSession, meeting: Meeting) -> str | None:
     """Fires the admin-configured pre-call for this meeting's call type,
     if one is enabled — a no-op (returns None, not an error) when there's
@@ -137,6 +160,10 @@ async def dispatch_pre_call(db: AsyncSession, meeting: Meeting) -> str | None:
     means the context needs to exist before the conversation begins, so a
     short bounded wait (settings.pre_call_timeout_seconds) is the correct
     semantic here, not something to route around.
+
+    pre_call_body_template (when set) is substituted via
+    render_pre_call_template before sending — a real case for a POST
+    pre-call, e.g. {"lookup": "{{owner_name}}"} for a CRM query.
 
     Any failure — bad URL, malformed headers, timeout, connection error,
     non-2xx — is logged and swallowed, never raised: meeting creation
@@ -163,9 +190,9 @@ async def dispatch_pre_call(db: AsyncSession, meeting: Meeting) -> str | None:
     body: bytes | None = None
     if call_type.pre_call_body_template:
         try:
-            body = call_type.pre_call_body_template.encode("utf-8")
+            body = render_pre_call_template(call_type.pre_call_body_template, meeting).encode("utf-8")
         except Exception:
-            logger.exception("Pre-call for meeting %s: failed to encode body template", meeting.id)
+            logger.exception("Pre-call for meeting %s: failed to render body template", meeting.id)
             return None
 
     try:

@@ -16,6 +16,7 @@ from app.models.meeting import ActionItemStatus, Channel, Meeting, MeetingStatus
 from app.services.admin.call_hooks import (
     build_full_payload,
     dispatch_pre_call,
+    render_pre_call_template,
     render_template,
 )
 from app.services.copilot.report import ReportResult
@@ -239,6 +240,60 @@ async def test_dispatch_pre_call_returns_response_text(db, make_user, monkeypatc
     result = await dispatch_pre_call(db, meeting)
     assert result == "fetched context text"
     assert _FakeAsyncClient.last_call["method"] == "GET"
+
+
+def test_render_pre_call_template_substitutes_meeting_level_fields():
+    """A real case: a POST pre-call whose body needs the meeting's own
+    identity — no transcript/report exists yet at this point, so this is
+    a smaller placeholder set than render_template's (post-call) one."""
+    from uuid import uuid4
+
+    from app.models.call_type import CallType
+
+    call_type = CallType(name="Sales", slug="sales-pre-body")
+    meeting = Meeting(
+        owner_id=uuid4(),
+        title="Discovery call",
+        status=MeetingStatus.RECORDING,
+        call_type=call_type,
+    )
+    meeting.owner = type("Owner", (), {"full_name": "Jane Doe"})()
+
+    rendered = render_pre_call_template(
+        '{"lookup_name": "{{owner_name}}", "meeting": "{{meeting_id}}", "type": "{{call_type}}"}', meeting
+    )
+    parsed = json.loads(rendered)
+    assert parsed["lookup_name"] == "Jane Doe"
+    assert parsed["meeting"] == str(meeting.id)
+    assert parsed["type"] == "Sales"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pre_call_sends_rendered_body_template(db, make_user, monkeypatch):
+    from app.models.call_type import CallType
+
+    user = await make_user()
+    call_type = CallType(
+        name="Sales",
+        slug="sales-pre-body-dispatch",
+        pre_call_enabled=True,
+        pre_call_url="https://example.com/lookup",
+        pre_call_method="POST",
+        pre_call_body_template='{"owner": "{{owner_name}}"}',
+    )
+    db.add(call_type)
+    await db.commit()
+    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    db.add(meeting)
+    await db.commit()
+    meeting = await db.get(Meeting, meeting.id)
+
+    _FakeAsyncClient.response = _FakeResponse(200, "ok")
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    await dispatch_pre_call(db, meeting)
+    sent_body = json.loads(_FakeAsyncClient.last_call["content"])
+    assert sent_body["owner"] == user.full_name
 
 
 @pytest.mark.asyncio
