@@ -212,6 +212,17 @@ Every request it receives is logged to its own console (method, the three mandat
 
 It's also exercised as real test infrastructure, not just a manual aid: `server/tests/test_call_hooks_integration.py` starts this exact app as a real subprocess and asserts against real loopback HTTP responses — covering both hooks in both their "special" (`pre_call_use_as_context` / `post_call_send_full_payload`) and "regular" (plain fetch / custom template) modes, plus the graceful-failure and timeout paths — complementing `test_call_hooks.py`'s monkeypatched-`httpx` unit tests of the same logic.
 
+### Testing the live-recording WebSocket, with a real UI
+
+The same server also serves a minimal browser page at `http://localhost:9199/` (once it's running) for exercising the *streaming* half of the API — everything Corella's own live-call screen shows, built using nothing but this document: connect, authenticate with an API key, stream your mic, and render transcript (with speaker labels as diarization resolves them), live partial-transcript previews, and the live copilot's coach score/suggestion/blockers/action items as they arrive.
+
+1. Create an API key (Settings → API keys on the real app) and paste it into the page, along with the API's base URL (`http://localhost:8090` in local dev).
+2. Hit **Start** — it creates a meeting via `POST /api/meetings` (proxied through this server itself, purely to sidestep a CORS preflight against your real instance's `CORS_ORIGINS` for this test page's own origin — the WebSocket connection right after is opened directly, browser-to-API, with no proxy involved), opens the live WebSocket authenticated with that key, and starts streaming your mic — same PCM16/16kHz downmix-and-resample the real app's own capture code uses (`/pcm-worklet.js` here is a verbatim copy of `web/public/pcm-worklet.js`).
+3. Speak — the transcript, speaker labels, and (if an LLM is connected on that account) live coaching panel update in real time.
+4. Hit **Stop** — finalizes the meeting exactly like ending a real recording (auto-report, the post-call hook if one's configured for that meeting's call type).
+
+This is deliberately a second, independent implementation of the same protocol `web/src/lib/live.ts` implements — proving the documented API is actually sufficient to build a working live client, not just checking that Corella's own frontend still works.
+
 ## Errors
 
 REST errors are standard FastAPI/Pydantic shape: `{"detail": "..."}` with the appropriate 4xx/5xx status (`401` invalid/missing credentials, `403` insufficient role, `404` not found or not owned, `409` conflict, `422` validation). WebSocket errors are close codes (`4401`/`4404`/`4409`, see above) — there's no in-band `{"type":"error",...}` message today; a failed connection is always a closed connection with a reason string.
