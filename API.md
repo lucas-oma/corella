@@ -221,7 +221,7 @@ The same server also serves a minimal browser page at `http://localhost:9199/` (
 3. Speak — the transcript, speaker labels, and (if an LLM is connected on that account) live coaching panel update in real time.
 4. Hit **Stop** — finalizes the meeting exactly like ending a real recording (auto-report, the post-call hook if one's configured for that meeting's call type).
 
-This is deliberately a second, independent implementation of the same protocol `web/src/lib/live.ts` implements — proving the documented API is actually sufficient to build a working live client, not just checking that Corella's own frontend still works.
+This is deliberately a second, independent implementation of the same protocol `web/src/lib/live.ts` implements — proving the documented API is actually sufficient to build a working live client, not just checking that Corella's own frontend still works. Confirmed end-to-end with a real microphone: live transcript, speaker labels, and coaching (score/suggestion/blockers) all updating in real time, and a clean stop finalizing the meeting with a real report.
 
 ## Errors
 
