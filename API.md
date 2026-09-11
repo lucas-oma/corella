@@ -17,6 +17,8 @@ Authorization: Bearer sk_live_<your-key>
 
 An API key acts **as the user who created it** — it can do anything that user could do through the browser, scoped to their own account (their meetings, their groups' shared knowledge base, etc.). It does *not* currently support fine-grained scopes; treat it like a password.
 
+Each key also has a **max live-session duration** (default 60 minutes, range 1–480), set in Settings and editable later without rotating the key. A live WebSocket authenticated with that key is closed with `4410` when the cap is hit, and the meeting finalizes the same way a `stop` or disconnect would. Browser-recorded (JWT) sessions are not capped. REST calls are unaffected — this bound is only on the streaming connection.
+
 API keys are accepted on: `POST /api/meetings`, `GET /api/meetings/{id}`, `GET /api/meetings/{id}/transcript`, `GET /api/meetings/{id}/insights`, `POST /api/meetings/{id}/report`, and the live WebSocket (`/ws/meetings/{id}/live`). Every other endpoint still requires a JWT (a real browser login) — API keys are scoped to the external-integration surface, not the whole app.
 
 ## REST reference
@@ -85,7 +87,8 @@ ws(s)://<api-host>/ws/meetings/{meeting_id}/live
    |---|---|
    | `4401` | Auth timed out, missing, or invalid (bad JWT/API key) |
    | `4404` | Meeting not found, or not owned by the caller |
-   | `4409` | Meeting isn't in `recording` status (already stopped/finalized) |
+   | `4409` | Meeting isn't in `recording` status (already stopped/finalized), or another connection is already recording it |
+   | `4410` | This API key's max live-session duration was reached — the meeting still finalizes (same path as `stop`/disconnect) |
 
 3. **Stream audio** as binary frames, one frame per chunk: **byte 0** is the channel selector (`0x00` = "me", `0x01` = "them"), the remaining bytes are raw PCM16LE, mono, 16kHz.
    ```
@@ -225,4 +228,4 @@ This is deliberately a second, independent implementation of the same protocol `
 
 ## Errors
 
-REST errors are standard FastAPI/Pydantic shape: `{"detail": "..."}` with the appropriate 4xx/5xx status (`401` invalid/missing credentials, `403` insufficient role, `404` not found or not owned, `409` conflict, `422` validation). WebSocket errors are close codes (`4401`/`4404`/`4409`, see above) — there's no in-band `{"type":"error",...}` message today; a failed connection is always a closed connection with a reason string.
+REST errors are standard FastAPI/Pydantic shape: `{"detail": "..."}` with the appropriate 4xx/5xx status (`401` invalid/missing credentials, `403` insufficient role, `404` not found or not owned, `409` conflict, `422` validation). WebSocket errors are close codes (`4401`/`4404`/`4409`/`4410`, see above) — there's no in-band `{"type":"error",...}` message today; a failed connection is always a closed connection with a reason string.

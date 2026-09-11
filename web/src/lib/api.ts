@@ -230,11 +230,14 @@ export interface SttStatus {
 
 /** A self-service credential for external/machine access (Settings) — the
  * real key is only ever present on the response to createApiKey, never
- * again after that. */
+ * again after that. `max_duration_minutes` caps a live WebSocket session
+ * authenticated with this key (server-enforced; browser recordings are
+ * uncapped). */
 export interface ApiKey {
   id: string;
   name: string;
   key_prefix: string;
+  max_duration_minutes: number;
   created_at: string;
   last_used_at: string | null;
 }
@@ -402,8 +405,16 @@ export const api = {
     request<SttStatus>("/api/settings/stt", { method: "PUT", body: JSON.stringify({ api_key: apiKey }) }),
   removeSttCredential: () => request<SttStatus>("/api/settings/stt", { method: "DELETE" }),
   listApiKeys: () => request<ApiKey[]>("/api/settings/api-keys"),
-  createApiKey: (name: string) =>
-    request<ApiKeyCreated>("/api/settings/api-keys", { method: "POST", body: JSON.stringify({ name }) }),
+  createApiKey: (name: string, maxDurationMinutes: number) =>
+    request<ApiKeyCreated>("/api/settings/api-keys", {
+      method: "POST",
+      body: JSON.stringify({ name, max_duration_minutes: maxDurationMinutes }),
+    }),
+  updateApiKey: (id: string, payload: { max_duration_minutes: number }) =>
+    request<ApiKey>(`/api/settings/api-keys/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   deleteApiKey: (id: string) => request<void>(`/api/settings/api-keys/${id}`, { method: "DELETE" }),
   getAiOverview: () => request<AiOverview>("/api/settings/ai-overview"),
   getPreferences: () => request<Preferences>("/api/settings/preferences"),

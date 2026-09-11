@@ -169,7 +169,7 @@ Admins additionally get read-only access to every user's full transcript/audio (
 
 Corella can be integrated with an external system in three ways — full reference (auth, REST/WebSocket shapes, hook payloads, examples) in [`API.md`](API.md):
 
-1. **API keys** (Settings → API keys) — a long-lived credential that acts as its owner, for creating/reading meetings and streaming a live recording without a browser login.
+1. **API keys** (Settings → API keys) — a long-lived credential that acts as its owner, for creating/reading meetings and streaming a live recording without a browser login. Each key has a max live-session duration (default 60 minutes) so a hung integration can't record forever.
 2. **Live streaming** — the same WebSocket protocol the browser app uses to record is reachable by API key too; no separate streaming endpoint exists.
 3. **Pre/post call-type hooks** (Admin → Call types) — an admin can configure an external API call to fire before a call of a given type starts (optionally feeding the response back into the live copilot's context, alongside the knowledge base) and/or after it finishes (optionally sending the full transcript/report/coaching timeline out to another system). Every such request carries three fixed headers (`X-Corella-App-Url`, `X-Corella-Meeting-Id`, `X-Corella-User-Id`) that can't be overridden by custom header config.
 

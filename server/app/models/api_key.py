@@ -1,12 +1,21 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
+
+# Per-key cap on a live WebSocket session authenticated with this key
+# (app/ws/live_session.py). Browser/JWT recordings are uncapped — a person
+# sitting on the live page is a different risk than a daemon that never
+# sends stop. 60 minutes is the default (and what existing keys get via
+# the migration); 1..480 (8h) is the allowed range, no "unlimited".
+DEFAULT_MAX_DURATION_MINUTES = 60
+MIN_MAX_DURATION_MINUTES = 1
+MAX_MAX_DURATION_MINUTES = 480
 
 
 class ApiKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -34,6 +43,9 @@ class ApiKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255))
     key_prefix: Mapped[str] = mapped_column(String(16))
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    max_duration_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=DEFAULT_MAX_DURATION_MINUTES, server_default="60"
+    )
     # Bumped on every successful authentication (REST or WS) — lets a user
     # tell a live, integrated key apart from one they forgot about.
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

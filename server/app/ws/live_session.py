@@ -496,6 +496,16 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
     reconcile_task = asyncio.create_task(_reconcile_diarization_loop(session))
     debug_pump_task = asyncio.create_task(_pump_debug_events(websocket, session))
     lock_renew_task = asyncio.create_task(_renew_recording_lock_loop(meeting_id, lock_token))
+    # Snapshot at connect — a PATCH of the key mid-call must not move the
+    # goalposts of a session that's already running. Browser/JWT sessions
+    # (api_key_row is None) are uncapped; see ApiKey.max_duration_minutes.
+    duration_task: asyncio.Task | None = None
+    if api_key_row is not None:
+        duration_task = asyncio.create_task(
+            _enforce_max_duration_loop(
+                websocket, session, api_key_row.max_duration_minutes * 60 * 1000
+            )
+        )
 
     await websocket.send_json({"type": "ready"})
     if provider is None:
@@ -547,6 +557,8 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         reconcile_task.cancel()
         debug_pump_task.cancel()
         lock_renew_task.cancel()
+        if duration_task is not None:
+            duration_task.cancel()
         try:
             # Best-effort — a Redis hiccup here must never block the rest
             # of finalize (same discipline as everything else in this
@@ -877,6 +889,34 @@ async def _pump_debug_events(websocket: WebSocket, session: LiveSession) -> None
             await websocket.send_json(event)
         except Exception:
             pass  # client may already be gone
+
+
+# Custom close code (4xxx range, same family as 4401/4404/4409) for the
+# per-API-key live-session duration cap. Documented in API.md — integrators
+# should treat it as "this recording ended because the key's max duration
+# was reached," not as an auth/ownership failure.
+WS_CLOSE_DURATION_LIMIT = 4410
+
+
+async def _enforce_max_duration_loop(
+    websocket: WebSocket, session: LiveSession, max_duration_ms: int
+) -> None:
+    """Closes an API-key-authenticated live session once it hits that
+    key's max_duration_minutes. Sleeps the remaining time in one shot
+    (cancelled from the handler's `finally` on a normal stop/disconnect,
+    so a 60-minute cap doesn't mean a 60-minute-lived task after the
+    call already ended). Closing the socket unblocks the receive loop,
+    which then takes the same finalize path a client-sent `stop` would.
+    """
+    remaining_s = max(0.0, (max_duration_ms - session.elapsed_ms()) / 1000)
+    await asyncio.sleep(remaining_s)
+    try:
+        await websocket.close(
+            code=WS_CLOSE_DURATION_LIMIT,
+            reason="API key max meeting duration reached",
+        )
+    except Exception:
+        pass
 
 
 _LOCK_RENEW_INTERVAL_SECONDS = 10.0

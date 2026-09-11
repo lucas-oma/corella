@@ -22,6 +22,12 @@ import { type CaptureHandle, pcmToWavBlob, startCapture } from "@/lib/live";
 // cleanly. 10s is a practical floor short of a full clip.
 const MIN_VOICE_SAMPLE_SECONDS = 10;
 
+// Per-API-key live-session cap (server/app/models/api_key.py). Same
+// bounds the API itself enforces — a key with no explicit value gets 60.
+const DEFAULT_KEY_DURATION_MINUTES = 60;
+const MIN_KEY_DURATION_MINUTES = 1;
+const MAX_KEY_DURATION_MINUTES = 480;
+
 const PROVIDER_META: Record<ProviderStatus["provider"], { name: string; hint: string }> = {
   anthropic: { name: "Anthropic", hint: "Claude models via your own API key" },
   openai: { name: "OpenAI", hint: "GPT models via your own API key" },
@@ -132,8 +138,11 @@ export default function Settings() {
 
   const [apiKeys, setApiKeys] = useState<ApiKey[] | null>(null);
   const [newKeyName, setNewKeyName] = useState("");
+  const [newKeyDuration, setNewKeyDuration] = useState(DEFAULT_KEY_DURATION_MINUTES);
   const [creatingKey, setCreatingKey] = useState(false);
   const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
+  const [durationDrafts, setDurationDrafts] = useState<Record<string, number>>({});
+  const [savingDurationId, setSavingDurationId] = useState<string | null>(null);
   // The one and only time a real key is ever visible — cleared on
   // dismiss, and never recoverable again after that (only its hash is
   // stored server-side).
@@ -161,18 +170,47 @@ export default function Settings() {
   async function onCreateApiKey() {
     const name = newKeyName.trim();
     if (!name) return;
+    if (newKeyDuration < MIN_KEY_DURATION_MINUTES || newKeyDuration > MAX_KEY_DURATION_MINUTES) {
+      setError(`Max duration must be between ${MIN_KEY_DURATION_MINUTES} and ${MAX_KEY_DURATION_MINUTES} minutes`);
+      return;
+    }
     setError(null);
     setCreatingKey(true);
     try {
-      const created = await api.createApiKey(name);
+      const created = await api.createApiKey(name, newKeyDuration);
       setApiKeys((prev) => [...(prev ?? []), created]);
       setRevealedKey(created);
       setNewKeyName("");
+      setNewKeyDuration(DEFAULT_KEY_DURATION_MINUTES);
       setCopied(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't create API key");
     } finally {
       setCreatingKey(false);
+    }
+  }
+
+  async function onSaveKeyDuration(key: ApiKey) {
+    const minutes = durationDrafts[key.id] ?? key.max_duration_minutes;
+    if (minutes === key.max_duration_minutes) return;
+    if (minutes < MIN_KEY_DURATION_MINUTES || minutes > MAX_KEY_DURATION_MINUTES) {
+      setError(`Max duration must be between ${MIN_KEY_DURATION_MINUTES} and ${MAX_KEY_DURATION_MINUTES} minutes`);
+      return;
+    }
+    setError(null);
+    setSavingDurationId(key.id);
+    try {
+      const updated = await api.updateApiKey(key.id, { max_duration_minutes: minutes });
+      setApiKeys((prev) => prev?.map((row) => (row.id === key.id ? updated : row)) ?? null);
+      setDurationDrafts((prev) => {
+        const next = { ...prev };
+        delete next[key.id];
+        return next;
+      });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't update API key");
+    } finally {
+      setSavingDurationId(null);
     }
   }
 
@@ -829,7 +867,9 @@ export default function Settings() {
             <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">API keys</h2>
             <p className="mt-1 text-xs text-ink-subtle">
               Let an external system create/read meetings and stream a live recording as your account —
-              see <code className="text-[11px]">API.md</code> for the full reference.
+              see <code className="text-[11px]">API.md</code> for the full reference. Each key has a max
+              live-session length (default {DEFAULT_KEY_DURATION_MINUTES} min) so a hung integration can't
+              record forever.
             </p>
           </div>
         </div>
@@ -856,14 +896,25 @@ export default function Settings() {
           </div>
         )}
 
-        <div className="mb-4 flex gap-2">
+        <div className="mb-4 flex flex-wrap items-center gap-2">
           <input
             type="text"
             placeholder="Key name, e.g. Zapier integration"
             value={newKeyName}
             onChange={(e) => setNewKeyName(e.target.value)}
-            className="field flex-1 text-sm"
+            className="field min-w-48 flex-1 text-sm"
           />
+          <label className="flex items-center gap-1.5 text-xs text-ink-subtle">
+            <input
+              type="number"
+              min={MIN_KEY_DURATION_MINUTES}
+              max={MAX_KEY_DURATION_MINUTES}
+              value={newKeyDuration}
+              onChange={(e) => setNewKeyDuration(Number(e.target.value) || DEFAULT_KEY_DURATION_MINUTES)}
+              className="field w-16 text-sm"
+            />
+            min max
+          </label>
           <button
             onClick={onCreateApiKey}
             disabled={creatingKey || !newKeyName.trim()}
@@ -888,13 +939,33 @@ export default function Settings() {
                       : " · never used"}
                   </p>
                 </div>
-                <button
-                  onClick={() => onDeleteApiKey(key)}
-                  disabled={deletingKeyId === key.id}
-                  className="shrink-0 text-xs text-ink-subtle hover:text-status-danger"
-                >
-                  {deletingKeyId === key.id ? "…" : "Delete"}
-                </button>
+                <div className="flex shrink-0 items-center gap-3">
+                  <label className="flex items-center gap-1.5 text-xs text-ink-subtle">
+                    <input
+                      type="number"
+                      min={MIN_KEY_DURATION_MINUTES}
+                      max={MAX_KEY_DURATION_MINUTES}
+                      value={durationDrafts[key.id] ?? key.max_duration_minutes}
+                      onChange={(e) =>
+                        setDurationDrafts((prev) => ({
+                          ...prev,
+                          [key.id]: Number(e.target.value) || MIN_KEY_DURATION_MINUTES,
+                        }))
+                      }
+                      onBlur={() => onSaveKeyDuration(key)}
+                      disabled={savingDurationId === key.id}
+                      className="field w-16 text-sm"
+                    />
+                    min
+                  </label>
+                  <button
+                    onClick={() => onDeleteApiKey(key)}
+                    disabled={deletingKeyId === key.id}
+                    className="shrink-0 text-xs text-ink-subtle hover:text-status-danger"
+                  >
+                    {deletingKeyId === key.id ? "…" : "Delete"}
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
