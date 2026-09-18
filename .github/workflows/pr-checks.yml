@@ -10,6 +10,9 @@ on:
   pull_request:
     branches: [main, release]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: lint
@@ -76,3 +79,14 @@ jobs:
         run: npm ci
       - working-directory: web
         run: npm run build
+
+  live-client:
+    name: live-client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - working-directory: packages/corella-live
+        run: npm install && npm test && npm run build
