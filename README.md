@@ -21,7 +21,7 @@ A self-hosted meeting assistant: it records a call from your browser (or takes a
 - **Admin console** — user/group management, and a cost-analytics dashboard (per-user spend, daily trend, a trailing-average 7-day projection) built from a real per-call LLM usage ledger.
 - **Admin live debug panel** — while recording your own call as an admin, toggle a technical event stream (VAD flushes, STT/LLM request+response timing, diarization dispatch) for in-the-moment debugging.
 - **Per-call cost estimate** — a best-effort running total per meeting, from real token usage (LLM calls) and real audio duration (Deepgram STT) where the provider reports it, with a by-provider breakdown in the admin dashboard.
-- **API access** — API keys (Settings) for creating/reading meetings and streaming a live recording from another system, plus per-call-type hooks that fire before a call starts (pull in external context) and after it finishes (push the full result out) — see [`API.md`](API.md).
+- **API access** — API keys (Settings) for creating/reading meetings and streaming a live recording from another system, plus per-call-type hooks that fire before a call starts (pull in external context) and after it finishes (push the full result out) — see [`API.md`](API.md). A website can use [`packages/corella-live`](packages/corella-live) instead of speaking the WebSocket protocol by hand.
 
 ## Architecture
 
@@ -92,6 +92,8 @@ corella/
   VERSIONING.md              three-digit version guide — when to bump what
   docs/
     AUDIO_PIPELINE.md        transcription/live-streaming/diarization deep dive
+  packages/
+    corella-live/            npm client for the live recording API
 ```
 
 ## Running it
@@ -167,7 +169,9 @@ Admins additionally get read-only access to every user's full transcript/audio (
 
 ## API access
 
-Corella can be integrated with an external system in three ways — full reference (auth, REST/WebSocket shapes, hook payloads, examples) in [`API.md`](API.md):
+Corella can be integrated with an external system in three ways — full reference (auth, REST/WebSocket shapes, hook payloads, examples) in [`API.md`](API.md). For a website that should stream a live conversation, use [`packages/corella-live`](packages/corella-live) (`npm install ./packages/corella-live`) so you do not reimplement the WebSocket quirks (speaker labels in particular).
+
+The three types:
 
 1. **API keys** (Settings → API keys) — a long-lived credential that acts as its owner, for creating/reading meetings and streaming a live recording without a browser login. Each key has a max live-session duration (default 60 minutes) so a hung integration can't record forever.
 2. **Live streaming** — the same WebSocket protocol the browser app uses to record is reachable by API key too; no separate streaming endpoint exists.

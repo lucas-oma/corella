@@ -50,7 +50,8 @@ The `sk_live_` prefix is how the server tells a key apart from a JWT **without**
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/api/meetings` | Create (and start) a meeting |
+| `GET` | `/api/call-types` | Lightweight list: `{id, name, slug, is_default}` — pick an id for create |
+| `POST` | `/api/meetings` | Create (and start) a meeting. Optional `call_type_id`; omit/`null` = instance default |
 | `GET` | `/api/meetings/{id}` | Meeting + report fields. **Group-visible** — see [Access](#access-what-the-key-can-see) |
 | `GET` | `/api/meetings/{id}/transcript` | Owner or admin only |
 | `GET` | `/api/meetings/{id}/insights` | Owner or admin only |
@@ -60,7 +61,6 @@ The `sk_live_` prefix is how the server tells a key apart from a JWT **without**
 Everything else is JWT-only. In particular an API key **cannot**:
 
 - List meetings (`GET /api/meetings`), search, group/all lists
-- List call types (`GET /api/call-types`) — you must already know a `call_type_id`, or omit it and take the instance default
 - Upload / download audio, delete a meeting, read or toggle action items
 - Manage API keys, providers, preferences, knowledge base, or admin resources
 
@@ -94,7 +94,7 @@ Content-Type: application/json
 ```
 
 - `title` defaults to `"Untitled meeting"` if omitted.
-- `call_type_id` is optional. Omit it or send `null` to use whichever call type is currently marked default. Unknown id → `422`. If the instance has no call types at all, the meeting is created untyped (`call_type: null`) and no pre-call fires.
+- `call_type_id` is optional. Omit it or send `null` to use whichever call type is currently marked default. Unknown id → `422`. If the instance has no call types at all, the meeting is created untyped (`call_type: null`) and no pre-call fires. `GET /api/call-types` (API key or JWT) returns `{id, name, slug, is_default}` so you can pick an id.
 - There is **no separate "start" call**. The meeting is created with `status: "recording"` immediately.
 - If that call type has a pre-call hook, it fires **synchronously here**, before the `201` comes back — bounded by `pre_call_timeout_seconds` (default 5s). A slow/broken hook never fails or delays creation past that timeout; you just get no extra context that time.
 - Creating with an API key does **not** mark the meeting as "via API". That stamp (`api_key_name` on later reads) is set only when a live WebSocket actually authenticates with a key. You can create with a JWT and stream with a key (badge appears), or create with a key and record in the browser (no badge).
@@ -347,7 +347,7 @@ WebSocket errors are close codes only (`4401` / `4404` / `4409` / `4410`) plus a
 
 These are the ones that bite integrations. All are real behavior, not omissions.
 
-1. **API keys are not a second copy of the whole API.** List/search/upload/delete/settings/admin/call-type listing are JWT-only. Plan around that: stash `call_type_id` yourself, or always use the default type.
+1. **API keys are not a second copy of the whole API.** List/search/upload/delete/settings/admin (including *managing* call types) are JWT-only. `GET /api/call-types` is the exception — keys can list `{id, name, slug, is_default}` so create can send a real `call_type_id`.
 2. **Create ≠ "recorded via API".** The Dashboard badge is set when the **WebSocket** authenticates with a key, not at `POST /api/meetings`.
 3. **Disconnect finalizes. You cannot resume.** Tab close, process kill, and `stop` all end the meeting. Reconnect → `4409`. Create a new one.
 4. **One live connection per meeting.** Second socket → `4409`, first keeps going. Corella's own "Go to live session" is hidden on API-recorded meetings for this reason; the lock is the real backstop.
@@ -364,7 +364,13 @@ These are the ones that bite integrations. All are real behavior, not omissions.
 15. **CORS applies to browser REST, not to server-to-server REST.** Machine callers should not send the request from a random web origin unless that origin is in `CORS_ORIGINS`.
 16. **Key plaintext is unrecoverable.** Settings list shows a prefix (`sk_live_xxxxxx…`) only. Rotate by creating a new key and deleting the old one; in-flight sockets using the deleted key fail on the next auth (the current socket is not torn down by delete — revoke is "cannot authenticate again").
 17. **Half-open TCP is why the duration cap exists.** Disconnect-to-finalize only runs when the server *sees* the socket die.
-18. **`transcript` has no `speaker_label`, and it often arrives *after* `diarization_update` for the same id** (Deepgram publishes the label to Redis before sending the transcript frame). If you store the name on the transcript object and then `set(id, transcriptEvent)`, you wipe every split and every line falls back to `me`. Keep names in a separate map keyed by segment id — that is what Corella's own live UI does, and what the `api_test_server` page at `/` does.
+18. **`transcript` has no `speaker_label`, and it often arrives *after* `diarization_update` for the same id** (Deepgram publishes the label to Redis before sending the transcript frame). If you store the name on the transcript object and then `set(id, transcriptEvent)`, you wipe every split and every line falls back to `me`. Keep names in a separate map keyed by segment id — that is what Corella's own live UI does, what the `api_test_server` page at `/` does, and what [`packages/corella-live`](packages/corella-live) does for you.
+
+---
+
+## Website client: `packages/corella-live`
+
+An installable TypeScript client that does what the test page below does: create a meeting with an API key, open the live WebSocket, stream PCM, and emit a speaker-labeled transcript. `npm install ./packages/corella-live` from this repo (not on the public registry yet). See that package's README for a 15-line browser example. CORS still applies to `POST /api/meetings` from a browser origin — create from your server and `connect({ meetingId })` if you cannot add the origin to `CORS_ORIGINS`.
 
 ---
 
@@ -395,11 +401,15 @@ Every request is logged (method, the three mandatory headers checked off, body) 
 
 ### Live-recording WebSocket UI
 
-`http://localhost:9199/` — create a meeting with an API key, open the live WebSocket, stream the mic, render transcript / speaker labels / copilot. Meeting create is proxied through this server (`POST /start-test-call`) so you don't have to add this origin to the real app's `CORS_ORIGINS`; the WebSocket is opened browser-to-API directly.
+`http://localhost:9199/` — a sample site that uses [`packages/corella-live`](packages/corella-live) (served at `/corella-live/*`). This page is only UI: create is still proxied (`POST /start-test-call`) so you don't have to add this origin to `CORS_ORIGINS`; connect + mic + labeled transcript go through the package.
+
+Build the client once first:
+
+```
+cd packages/corella-live && npm install && npm run build
+```
 
 1. Create an API key (Settings → API keys) and paste it in, with the API base URL (`http://localhost:8090` in local Docker).
-2. **Start** — `POST /api/meetings`, then WS auth with that key, then mic capture (same PCM16/16 kHz worklet as the real app, served at `/pcm-worklet.js`).
-3. Speak — transcript, labels, and (if an LLM is connected) coaching update live.
+2. **Start** — proxied `POST /api/meetings`, then `CorellaLive.connect` + `startMic()`.
+3. Speak — transcript (already labeled) and (if an LLM is connected) coaching update live.
 4. **Stop** — finalizes like a real recording (auto-report, post-call hook if configured).
-
-This is a second, independent implementation of the protocol `web/src/lib/live.ts` implements — proving this document is enough to build a working live client. Confirmed end-to-end with a real microphone: live transcript, speaker labels, and coaching updating in real time, and a clean stop finalizing with a real report.

@@ -41,8 +41,9 @@ async def get_current_user_flexible(
     """Same bearer-token extraction as get_current_user, but also accepts
     an API key (app/models/api_key.py) in place of a JWT — for the
     handful of routes an external/machine caller actually needs (create
-    meeting, get meeting/transcript/insights/report; see app/api/
-    meetings.py). Every other route keeps using get_current_user
+    meeting, list call types, get meeting/transcript/insights/report;
+    see app/api/meetings.py and app/api/call_types.py). Every other
+    route keeps using get_current_user
     unchanged, so this widened acceptance is scoped to exactly where it's
     needed, not global.
 

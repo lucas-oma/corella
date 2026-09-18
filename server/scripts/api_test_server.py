@@ -45,36 +45,31 @@ Behavior:
 
 Open http://localhost:9199/ in a browser (needs mic permission). Paste
 in an API key (Settings -> API keys on the real app) and the real API's
-base URL (e.g. http://localhost:8090), hit Start: it creates a meeting
-via the real REST API, opens the real live WebSocket authenticated with
-that API key (no browser login involved), streams your mic the exact
-same way the real app's own capture code does (same PCM16/16kHz
-resampling, via the same worklet, served here at /pcm-worklet.js), and
-renders every message type the protocol sends back in real time —
-transcript (with speaker labels, updated live as diarization resolves
-them), live partial-transcript previews, and the live copilot's coach
-score/suggestion/blockers/action items. Hit Stop to finalize the meeting
-exactly like ending a real recording would (auto-report, post-call hook
-if configured).
+base URL (e.g. http://localhost:8090), hit Start. Meeting create is
+proxied here (`POST /start-test-call`) so you don't have to put this
+origin in CORS_ORIGINS; the live socket and mic go through
+`packages/corella-live` (served at `/corella-live/*`) — the same client
+an integrator would npm-install. Build that package first:
 
-The meeting-creation POST goes through this server (/start-test-call)
-rather than straight from the browser, deliberately — a cross-origin
-fetch() with an Authorization header triggers a CORS preflight the real
-app's CORS_ORIGINS won't have been configured to allow for this test
-tool's own origin, and there's no reason to make the user edit their
-real instance's config just to run this. The WebSocket connection itself
-*is* opened directly browser-to-API — cross-origin WS isn't subject to
-that same restriction, so no proxying is needed (or possible, for a
-binary audio stream) there.
+    cd packages/corella-live && npm install && npm run build
+
+The page then connects with `CorellaLive.connect`, streams the mic via
+`startMic()`, and renders the package's already-labeled transcript plus
+copilot events. Stop finalizes like a real recording (auto-report,
+post-call hook if configured).
 """
 
 import asyncio
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
+
+# repo-root/packages/corella-live/dist — built by `npm run build` there.
+_LIVE_CLIENT_DIST = Path(__file__).resolve().parents[2] / "packages" / "corella-live" / "dist"
 
 app = FastAPI(title="Corella API test server")
 
@@ -106,6 +101,24 @@ def _print_request(method: str, path: str, headers: dict, body: str) -> None:
     print("=" * 70)
 
 
+@app.get("/corella-live/{asset_path:path}")
+async def live_client_asset(asset_path: str):
+    """ESM build of packages/corella-live so this page can import it
+    without a bundler. Hook-integration tests never hit this route.
+    """
+    if not _LIVE_CLIENT_DIST.is_dir():
+        return PlainTextResponse(
+            "corella-live dist/ missing — run: cd packages/corella-live && npm install && npm run build",
+            status_code=503,
+        )
+    root = _LIVE_CLIENT_DIST.resolve()
+    target = (root / asset_path).resolve()
+    if not target.is_file() or not target.is_relative_to(root):
+        return PlainTextResponse("not found", status_code=404)
+    media = "application/javascript" if target.suffix == ".js" else "text/plain"
+    return FileResponse(target, media_type=media)
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def catch_all(path: str, request: Request):
     # --- Test-harness machinery (not hook deliveries — never logged) ---
@@ -120,6 +133,8 @@ async def catch_all(path: str, request: Request):
         return JSONResponse(_log)
     if path == "start-test-call" and request.method == "POST":
         return await _start_test_call(request)
+    if path == "list-call-types" and request.method == "POST":
+        return await _list_call_types(request)
 
     # --- Pre/post call-type hook delivery (logged) ---
     body_bytes = await request.body()
@@ -174,6 +189,27 @@ async def _start_test_call(request: Request) -> JSONResponse:
     except httpx.RequestError as e:
         return JSONResponse({"error": f"Couldn't reach {api_base}: {e}"}, status_code=502)
 
+    if response.status_code >= 400:
+        return JSONResponse({"error": response.text}, status_code=response.status_code)
+    return JSONResponse(response.json())
+
+
+async def _list_call_types(request: Request) -> JSONResponse:
+    """Same CORS reason as _start_test_call: GET /api/call-types with an
+    API key from this page would preflight. Proxied so the dropdown can
+    load real ids.
+    """
+    payload = await request.json()
+    api_base = payload["api_base"].rstrip("/")
+    api_key = payload["api_key"]
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{api_base}/api/call-types",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+    except httpx.RequestError as e:
+        return JSONResponse({"error": f"Couldn't reach {api_base}: {e}"}, status_code=502)
     if response.status_code >= 400:
         return JSONResponse({"error": response.text}, status_code=response.status_code)
     return JSONResponse(response.json())
@@ -260,8 +296,9 @@ _LIVE_TEST_PAGE_HTML = """<!doctype html>
   .layout { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
   .col { background: #fff; border: 1px solid #e4e4e1; border-radius: 8px; padding: 14px; }
   .config { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; background: #fff; border-bottom: 1px solid #e4e4e1; align-items: center; }
-  .config input { padding: 6px 8px; border: 1px solid #e4e4e1; border-radius: 6px; font-size: 12px; }
+  .config input, .config select { padding: 6px 8px; border: 1px solid #e4e4e1; border-radius: 6px; font-size: 12px; }
   .config input[type=text] { width: 220px; }
+  .config select { min-width: 180px; }
   button { padding: 7px 14px; border-radius: 6px; border: 1px solid #0b1b33; background: #0b1b33; color: #fafaf9; font-size: 12px; cursor: pointer; }
   button:disabled { opacity: .4; cursor: default; }
   button.secondary { background: #fff; color: #0b1b33; }
@@ -282,15 +319,20 @@ _LIVE_TEST_PAGE_HTML = """<!doctype html>
 <body>
 <header>
   <h1>Corella API test server — live recording</h1>
-  <p>Exercises the documented WebSocket API exactly as an external integrator would build against it — no Corella frontend code involved.</p>
+  <p>Uses <code>corella-live</code> the same way an integrator's site would — this page is only UI. Meeting create is proxied here to skip CORS.</p>
 </header>
 
 <div class="config">
   <label>API base <input type="text" id="apiBase" value="http://localhost:8090"></label>
   <label>API key <input type="text" id="apiKey" placeholder="sk_live_..." size="30"></label>
-  <label>Call type ID <input type="text" id="callTypeId" placeholder="(optional — default type)"></label>
-  <button id="startBtn" onclick="start()">Start</button>
-  <button id="stopBtn" class="secondary" onclick="stop()" disabled>Stop</button>
+  <label>Call type
+    <select id="callTypeId">
+      <option value="">Default type</option>
+    </select>
+  </label>
+  <button type="button" id="loadTypesBtn" class="secondary">Load types</button>
+  <button type="button" id="startBtn">Start</button>
+  <button type="button" id="stopBtn" class="secondary" disabled>Stop</button>
   <span id="status">Idle.</span>
 </div>
 
@@ -311,33 +353,60 @@ _LIVE_TEST_PAGE_HTML = """<!doctype html>
   </div>
 </div>
 
-<script>
-let ws = null, meetingId = null, captureCleanup = null;
-const segments = new Map();
-// Labels live off the transcript row — `transcript` events have no
-// speaker_label, and on the Deepgram path they often arrive *after*
-// diarization_update for the same id (label is published to Redis
-// before the transcript frame is sent). Storing the name on the same
-// object and then segments.set(id, transcript) was wiping every split
-// back to "me". Same split LiveSession.tsx uses.
-const speakerLabels = new Map();
-const partials = { me: "", them: "" };
+<script type="module">
+let session = null;
+let lines = [];
+let partials = { me: "", them: "" };
 
-for (const id of ["apiBase", "apiKey", "callTypeId"]) {
+for (const id of ["apiBase", "apiKey"]) {
   const saved = localStorage.getItem("corella_test_" + id);
   if (saved) document.getElementById(id).value = saved;
   document.getElementById(id).addEventListener("change", (e) => localStorage.setItem("corella_test_" + id, e.target.value));
 }
 
+function fillCallTypes(types, selectedId) {
+  const sel = document.getElementById("callTypeId");
+  const keep = selectedId || sel.value || localStorage.getItem("corella_test_callTypeId") || "";
+  sel.innerHTML = '<option value="">Default type</option>';
+  for (const t of types) {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.name + (t.is_default ? " (default)" : "");
+    sel.appendChild(opt);
+  }
+  if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
+}
+
+async function loadTypes() {
+  const apiBase = document.getElementById("apiBase").value.replace(/\\/$/, "");
+  const apiKey = document.getElementById("apiKey").value.trim();
+  if (!apiKey) { setStatus("Paste an API key first, then Load types."); return; }
+  const resp = await fetch("/list-call-types", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_base: apiBase, api_key: apiKey }),
+  });
+  const body = await resp.json();
+  if (!resp.ok) {
+    setStatus("Couldn't load call types: " + (body.error || resp.status));
+    return;
+  }
+  fillCallTypes(body);
+  setStatus("Loaded " + body.length + " call type" + (body.length === 1 ? "" : "s") + ".");
+}
+
+document.getElementById("callTypeId").addEventListener("change", (e) => {
+  localStorage.setItem("corella_test_callTypeId", e.target.value);
+});
+document.getElementById("loadTypesBtn").addEventListener("click", loadTypes);
+
 function setStatus(s) { document.getElementById("status").textContent = s; }
 function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
 
 function renderTranscript() {
-  const sorted = [...segments.values()].sort((a, b) => a.start_ms - b.start_ms);
-  let html = sorted.map((s) => {
-    const label = speakerLabels.get(s.id) || s.speaker_label || s.channel;
-    return `<div class="line"><b>${escapeHtml(label)}</b>: ${escapeHtml(s.text)}</div>`;
-  }).join("");
+  let html = lines.map((s) =>
+    `<div class="line"><b>${escapeHtml(s.speakerLabel)}</b>: ${escapeHtml(s.text)}</div>`
+  ).join("");
   for (const ch of ["me", "them"]) {
     if (partials[ch]) html += `<div class="line partial"><b>${ch}</b>: ${escapeHtml(partials[ch])}…</div>`;
   }
@@ -359,6 +428,15 @@ function renderCopilot(msg) {
     : "<li>None.</li>";
 }
 
+async function loadClient() {
+  try {
+    return await import("/corella-live/index.js");
+  } catch (e) {
+    setStatus("corella-live is not built. From the repo: cd packages/corella-live && npm install && npm run build");
+    throw e;
+  }
+}
+
 async function start() {
   const apiBase = document.getElementById("apiBase").value.replace(/\\/$/, "");
   const apiKey = document.getElementById("apiKey").value.trim();
@@ -366,8 +444,10 @@ async function start() {
   if (!apiKey) { setStatus("Paste an API key first (Settings -> API keys in the real app)."); return; }
 
   document.getElementById("startBtn").disabled = true;
-  segments.clear(); speakerLabels.clear(); partials.me = ""; partials.them = "";
-  renderTranscript(); renderCopilot({});
+  lines = [];
+  partials = { me: "", them: "" };
+  renderTranscript();
+  renderCopilot({});
   setStatus("Creating meeting…");
 
   const createResp = await fetch("/start-test-call", {
@@ -381,90 +461,47 @@ async function start() {
     document.getElementById("startBtn").disabled = false;
     return;
   }
-  meetingId = created.id;
-  setStatus(`Meeting ${meetingId} created — connecting…`);
+  setStatus(`Meeting ${created.id} created — connecting via corella-live…`);
 
-  const wsUrl = apiBase.replace(/^http/, "ws") + "/ws/meetings/" + meetingId + "/live";
-  ws = new WebSocket(wsUrl);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(JSON.stringify({ type: "auth", api_key: apiKey }));
-  ws.onclose = () => setStatus("Disconnected.");
-  ws.onerror = () => setStatus("WebSocket error — check the browser console.");
-  ws.onmessage = onMessage;
+  let CorellaLive;
+  try {
+    ({ CorellaLive } = await loadClient());
+    session = await CorellaLive.connect({ apiBase, apiKey, meetingId: created.id });
+  } catch (e) {
+    setStatus("Connect failed: " + (e && e.message ? e.message : e));
+    document.getElementById("startBtn").disabled = false;
+    return;
+  }
+
+  session.onTranscript((next) => { lines = next; renderTranscript(); });
+  session.onPartial((p) => { partials = p; renderTranscript(); });
+  session.onCopilot(renderCopilot);
+  session.onCopilotUnavailable(() => setStatus("Recording (no LLM connected for this account — no live suggestions)."));
+  session.onClose(({ code, reason }) => {
+    document.getElementById("stopBtn").disabled = true;
+    document.getElementById("startBtn").disabled = false;
+    if (code === 4410) setStatus("Duration cap (4410) — meeting still finalizes.");
+    else setStatus(reason ? `Disconnected (${code}): ${reason}` : "Disconnected.");
+  });
+
   document.getElementById("stopBtn").disabled = false;
-}
-
-async function onMessage(event) {
-  const msg = JSON.parse(event.data);
-  switch (msg.type) {
-    case "ready":
-      setStatus("Recording — speak into your mic.");
-      await beginCapture();
-      break;
-    case "copilot_unavailable":
-      setStatus("Recording (no LLM connected for this account — no live suggestions).");
-      break;
-    case "transcript":
-      segments.set(msg.segment.id, msg.segment);
-      renderTranscript();
-      break;
-    case "partial_transcript":
-      partials[msg.channel] = msg.text;
-      renderTranscript();
-      break;
-    case "copilot":
-      renderCopilot(msg);
-      break;
-    case "diarization_update":
-    case "speaker_hint":
-      for (const id of msg.removed_segment_ids || []) {
-        segments.delete(id);
-        speakerLabels.delete(id);
-      }
-      for (const seg of msg.segments || []) {
-        segments.set(seg.id, seg);
-        if (seg.speaker_label) speakerLabels.set(seg.id, seg.speaker_label);
-      }
-      renderTranscript();
-      break;
-    case "stopped":
-      setStatus("Stopped — finalizing (report generates automatically).");
-      break;
+  setStatus("Recording — speak into your mic.");
+  try {
+    await session.startMic();
+  } catch (e) {
+    setStatus("Mic failed: " + (e && e.message ? e.message : e));
   }
 }
 
-async function beginCapture() {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const audioCtx = new AudioContext();
-  await audioCtx.audioWorklet.addModule("/pcm-worklet.js");
-  const source = audioCtx.createMediaStreamSource(stream);
-  const worklet = new AudioWorkletNode(audioCtx, "pcm-worklet", { processorOptions: { targetSampleRate: 16000, chunkMs: 200 } });
-  worklet.port.onmessage = (e) => {
-    const pcm = new Int16Array(e.data);
-    const frame = new Uint8Array(1 + pcm.byteLength);
-    frame[0] = 0; // channel 0 = "me" — this test harness only streams the mic, not a second "them" channel
-    frame.set(new Uint8Array(pcm.buffer), 1);
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(frame);
-  };
-  source.connect(worklet);
-  const silence = audioCtx.createGain();
-  silence.gain.value = 0;
-  worklet.connect(silence);
-  silence.connect(audioCtx.destination);
-
-  captureCleanup = () => {
-    source.disconnect(); worklet.disconnect(); silence.disconnect();
-    audioCtx.close(); stream.getTracks().forEach((t) => t.stop());
-  };
-}
-
 function stop() {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "stop" }));
-  if (captureCleanup) { captureCleanup(); captureCleanup = null; }
+  session?.stop();
   document.getElementById("stopBtn").disabled = true;
   document.getElementById("startBtn").disabled = false;
   setStatus("Stopping…");
 }
+
+document.getElementById("startBtn").addEventListener("click", start);
+document.getElementById("stopBtn").addEventListener("click", stop);
 </script>
 </body>
 </html>

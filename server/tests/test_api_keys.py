@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.core.security import API_KEY_PREFIX, generate_api_key, hash_api_key
 from app.models.api_key import ApiKey
+from app.models.call_type import CallType
 from app.models.meeting import Meeting
 
 
@@ -98,6 +99,21 @@ async def test_api_key_authenticates_rest_requests_as_its_owner(db, make_user, a
     )
     assert response.status_code == 201
     assert response.json()["title"] == "Created via API key"
+
+
+@pytest.mark.asyncio
+async def test_api_key_can_list_call_types(db, make_user, app_client):
+    user = await make_user()
+    full_key, prefix, key_hash = generate_api_key()
+    db.add(ApiKey(owner_id=user.id, name="Integration", key_prefix=prefix, key_hash=key_hash))
+    db.add(CallType(name="Sales", slug="sales-via-key", is_default=True))
+    await db.commit()
+
+    response = await app_client.get("/api/call-types", headers={"Authorization": f"Bearer {full_key}"})
+    assert response.status_code == 200
+    rows = response.json()
+    assert any(row["slug"] == "sales-via-key" for row in rows)
+    assert set(rows[0].keys()) == {"id", "name", "slug", "is_default"}
 
 
 @pytest.mark.asyncio
