@@ -2,17 +2,18 @@ import logging
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_admin
 from app.core import storage
 from app.core.db import get_db
+from app.models.group import Group
 from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.user import User
 from app.schemas.kb import KBDocumentRead
-from app.services.access import searchable_owner_ids
+from app.services.access import kb_visible_clause
 from app.services.embeddings.qdrant_store import delete_document_chunks
 from app.workers.celery_app import celery_app
 
@@ -39,15 +40,13 @@ async def list_kb_documents(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[KBDocument]:
-    """Own documents, plus a grouped user's group-mates' documents too —
-    the same shared pool the live copilot draws from
-    (app/services/access.py:searchable_owner_ids), so what's listed here
-    matches what's actually searchable, not just what this user uploaded.
+    """Members see their group's assigned documents (plus any unassigned
+    docs they uploaded). Admins see every document so they can maintain
+    every group's knowledge base.
     """
-    owner_ids = await searchable_owner_ids(db, current_user.id)
     result = await db.scalars(
         select(KBDocument)
-        .where(KBDocument.owner_id.in_(owner_ids))
+        .where(kb_visible_clause(current_user, admin_sees_all=True))
         .order_by(KBDocument.created_at.desc())
     )
     return list(result)
@@ -56,9 +55,13 @@ async def list_kb_documents(
 @router.post("/documents", response_model=KBDocumentRead, status_code=status.HTTP_201_CREATED)
 async def upload_kb_document(
     file: UploadFile,
-    current_user: User = Depends(get_current_user),
+    group_id: UUID | None = Form(default=None),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> KBDocument:
+    """Admin-only. `group_id` assigns the document to that group's shared
+    pool (copilot + member list). Omit it for an unassigned document.
+    """
     if not _looks_like_kb_document(file.filename, file.content_type):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -66,8 +69,15 @@ async def upload_kb_document(
             "Accepted: PDF, Markdown, plain text.",
         )
 
+    group: Group | None = None
+    if group_id is not None:
+        group = await db.get(Group, group_id)
+        if group is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+
     document = KBDocument(
         owner_id=current_user.id,
+        group_id=group_id,
         filename=file.filename or "untitled",
         content_type=file.content_type or "application/octet-stream",
         storage_path="",
@@ -91,17 +101,18 @@ async def upload_kb_document(
     # constructed object, and KBDocumentRead needs owner_name.
     await db.refresh(document)
     document.owner = current_user
+    document.group = group
     return document
 
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_kb_document(
     document_id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     document = await db.get(KBDocument, document_id)
-    if document is None or document.owner_id != current_user.id:
+    if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     await db.delete(document)

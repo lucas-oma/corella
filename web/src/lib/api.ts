@@ -346,6 +346,8 @@ export interface KBDocument {
   created_at: string;
   owner_id: string;
   owner_name: string;
+  group_id: string | null;
+  group_name: string | null;
   keywords: string[] | null;
 }
 
@@ -421,9 +423,10 @@ export const api = {
   savePreferences: (payload: Partial<Preferences>) =>
     request<Preferences>("/api/settings/preferences", { method: "PUT", body: JSON.stringify(payload) }),
   listKBDocuments: () => request<KBDocument[]>("/api/kb/documents"),
-  uploadKBDocument: (file: File) => {
+  uploadKBDocument: (file: File, groupId: string | null = null) => {
     const form = new FormData();
     form.append("file", file);
+    if (groupId) form.append("group_id", groupId);
     return request<KBDocument>("/api/kb/documents", { method: "POST", body: form });
   },
   deleteKBDocument: (id: string) => request<void>(`/api/kb/documents/${id}`, { method: "DELETE" }),

@@ -20,9 +20,10 @@ from app.services.llm.base import LLMError, LLMResponse
 from app.services.llm.resolve import resolve_provider
 
 
-def _ready_doc(owner_id, keywords=None, status=KBDocumentStatus.READY) -> KBDocument:
+def _ready_doc(owner_id, keywords=None, status=KBDocumentStatus.READY, group_id=None) -> KBDocument:
     return KBDocument(
         owner_id=owner_id,
+        group_id=group_id,
         filename="notes.md",
         content_type="text/markdown",
         storage_path="",
@@ -41,8 +42,8 @@ async def test_searchable_kb_keywords_scoped_to_group(db, make_user):
     bob = await make_user(email="bob@example.com", group_id=group.id)
     carol = await make_user(email="carol@example.com")  # different (no) group
 
-    db.add(_ready_doc(alice.id, keywords=["Corella", "Deepgram"]))
-    db.add(_ready_doc(bob.id, keywords=["Nova-3"]))
+    db.add(_ready_doc(alice.id, keywords=["Corella", "Deepgram"], group_id=group.id))
+    db.add(_ready_doc(bob.id, keywords=["Nova-3"], group_id=group.id))
     db.add(_ready_doc(carol.id, keywords=["ShouldNotLeak"]))
     await db.commit()
 

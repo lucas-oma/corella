@@ -1,3 +1,4 @@
+import logging
 from functools import lru_cache
 from uuid import UUID, uuid4
 
@@ -11,6 +12,8 @@ from app.services.embeddings.embed import EMBEDDING_DIM
 # A single shared collection, scoped per-user via the `owner_id` payload
 # field on each point, rather than one collection per user — simpler to
 # manage and Qdrant filters on it cheaply.
+logger = logging.getLogger(__name__)
+
 KB_COLLECTION = "kb_chunks"
 MEETING_COLLECTION = "meeting_chunks"
 SPEAKER_COLLECTION = "speaker_embeddings"
@@ -44,7 +47,11 @@ def ensure_kb_collection() -> None:
 
 
 def upsert_chunks(
-    document_id: UUID, owner_id: UUID, chunks: list[str], embeddings: list[list[float]]
+    document_id: UUID,
+    owner_id: UUID,
+    chunks: list[str],
+    embeddings: list[list[float]],
+    group_id: UUID | None = None,
 ) -> None:
     ensure_kb_collection()
     points = [
@@ -53,6 +60,7 @@ def upsert_chunks(
             vector=embedding,
             payload={
                 "owner_id": str(owner_id),
+                "group_id": str(group_id) if group_id else None,
                 "document_id": str(document_id),
                 "chunk_index": i,
                 "text": chunk,
@@ -63,51 +71,65 @@ def upsert_chunks(
     _client().upsert(collection_name=KB_COLLECTION, points=points)
 
 
-def search_kb(owner_ids: list[UUID], query_embedding: list[float], top_k: int = 5) -> list[str]:
-    """Top-k most relevant KB chunk texts across every id in `owner_ids` —
-    just the caller themselves if ungrouped, or their whole group if they
-    have one (app/services/access.py:searchable_owner_ids — that's where
-    the group-sharing decision actually lives, not here). Empty if the
-    collection doesn't exist yet (no documents ingested) — a normal state,
-    not an error, for a user with no knowledge base.
+def search_kb(
+    owner_ids: list[UUID],
+    query_embedding: list[float],
+    top_k: int = 5,
+    group_id: UUID | None = None,
+) -> list[str]:
+    """Top-k most relevant KB chunk texts. Matches *either* a payload
+    `group_id` (admin-assigned shared KB) *or* a legacy `owner_id` in
+    `owner_ids` (pre-group-column chunks). Empty if the collection
+    doesn't exist yet — a normal state, not an error.
     """
     client = _client()
-    if not client.collection_exists(KB_COLLECTION) or not owner_ids:
+    if not client.collection_exists(KB_COLLECTION):
+        return []
+    should: list[qmodels.FieldCondition] = []
+    if group_id is not None:
+        should.append(
+            qmodels.FieldCondition(key="group_id", match=qmodels.MatchValue(value=str(group_id)))
+        )
+    if owner_ids:
+        should.append(
+            qmodels.FieldCondition(
+                key="owner_id", match=qmodels.MatchAny(any=[str(oid) for oid in owner_ids])
+            )
+        )
+    if not should:
         return []
     result = client.query_points(
         collection_name=KB_COLLECTION,
         query=query_embedding,
-        query_filter=qmodels.Filter(
-            must=[
-                qmodels.FieldCondition(
-                    key="owner_id", match=qmodels.MatchAny(any=[str(oid) for oid in owner_ids])
-                )
-            ]
-        ),
+        query_filter=qmodels.Filter(should=should),
         limit=top_k,
     )
     return [point.payload["text"] for point in result.points if point.payload]
 
 
 def delete_document_chunks(document_id: UUID) -> None:
-    """Best-effort — a document with no chunks yet (never processed, or the
-    collection doesn't exist yet) is a no-op, not an error.
+    """Best-effort — a document with no chunks yet (never processed, the
+    collection doesn't exist, or Qdrant is unreachable) is a no-op, not
+    an error. The Postgres row is already gone by the time this runs.
     """
-    client = _client()
-    if not client.collection_exists(KB_COLLECTION):
-        return
-    client.delete(
-        collection_name=KB_COLLECTION,
-        points_selector=qmodels.FilterSelector(
-            filter=qmodels.Filter(
-                must=[
-                    qmodels.FieldCondition(
-                        key="document_id", match=qmodels.MatchValue(value=str(document_id))
-                    )
-                ]
-            )
-        ),
-    )
+    try:
+        client = _client()
+        if not client.collection_exists(KB_COLLECTION):
+            return
+        client.delete(
+            collection_name=KB_COLLECTION,
+            points_selector=qmodels.FilterSelector(
+                filter=qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="document_id", match=qmodels.MatchValue(value=str(document_id))
+                        )
+                    ]
+                )
+            ),
+        )
+    except Exception:
+        logger.exception("delete_document_chunks: Qdrant cleanup failed for %s", document_id)
 
 
 # --- Meeting transcript search (semantic search on the Dashboard) --------

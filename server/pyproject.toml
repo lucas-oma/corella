@@ -133,4 +133,4 @@ ignore = ["E501"]
 # B008 flags every single one of them (76 hits across this codebase) as
 # if it were the real bug that rule exists to catch elsewhere. This is
 # ruff's own documented fix for FastAPI specifically, not a loophole.
-extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header", "fastapi.Body"]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header", "fastapi.Body", "fastapi.Form"]

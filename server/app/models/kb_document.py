@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
 from app.models.enum_types import pg_enum
+from app.models.group import Group
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.user import User
 
@@ -20,15 +21,21 @@ class KBDocumentStatus(str, enum.Enum):
 
 class KBDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """A knowledge-base source document. Chunked and embedded by a background
-    worker into the shared Qdrant `kb_chunks` collection, scoped by an
-    `owner_id` payload field (see app.services.embeddings), once status
-    transitions past PENDING.
+    worker into the shared Qdrant `kb_chunks` collection, scoped by
+    `group_id` (shared pool) and `owner_id` (legacy / unassigned), once
+    status transitions past PENDING. Only admins create or delete these.
     """
 
     __tablename__ = "kb_documents"
 
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # Null = not assigned to a group (only the uploader / admins see it).
+    # Set when an admin uploads "for this group" so members search it even
+    # if the admin is not in the group.
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("groups.id", ondelete="SET NULL"), index=True
     )
     filename: Mapped[str] = mapped_column(String(512))
     content_type: Mapped[str] = mapped_column(String(255))
@@ -50,6 +57,7 @@ class KBDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     keywords: Mapped[list[str] | None] = mapped_column(ARRAY(String))
 
     owner: Mapped[User] = relationship(lazy="joined")
+    group: Mapped[Group | None] = relationship(lazy="joined")
 
     @property
     def owner_name(self) -> str:
@@ -57,3 +65,7 @@ class KBDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         once a shared group knowledge base means it isn't always the
         viewer's own."""
         return self.owner.full_name
+
+    @property
+    def group_name(self) -> str | None:
+        return self.group.name if self.group is not None else None
