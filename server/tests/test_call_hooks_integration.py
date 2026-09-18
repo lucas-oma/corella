@@ -53,7 +53,14 @@ def receiver() -> str:
         yield base_url
     finally:
         proc.terminate()
-        proc.wait(timeout=5)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            # /slow sleeps 8s; SIGTERM is graceful so uvicorn will wait it
+            # out. Don't let that fail the module after the tests already
+            # passed.
+            proc.kill()
+            proc.wait()
 
 
 @pytest.fixture(autouse=True)
