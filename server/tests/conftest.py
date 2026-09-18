@@ -62,6 +62,7 @@ _TABLES = [
     "speakers",
     "notes",
     "meetings",
+    "api_keys",
     "call_types",
     "voice_identities",
     "llm_usage_events",

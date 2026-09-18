@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5,10 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.core.config import Settings, get_settings
 from app.core.db import get_db
-from app.core.security import encrypt_secret
+from app.core.security import encrypt_secret, generate_api_key
+from app.models.api_key import ApiKey
 from app.models.provider_credential import LLMProvider, ProviderCredential
 from app.models.stt_credential import SttCredential
 from app.models.user import User
+from app.schemas.api_key import ApiKeyCreate, ApiKeyCreated, ApiKeyRead, ApiKeyUpdate
 from app.schemas.settings import (
     AiOverview,
     DiarizationOverview,
@@ -173,6 +177,83 @@ async def delete_stt_credential(
     if get_settings().deepgram_api_key:
         return SttStatus(connected=True, source="env")
     return SttStatus(connected=False, source=None)
+
+
+@router.get("/api-keys", response_model=list[ApiKeyRead])
+async def list_api_keys(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ApiKey]:
+    """Never includes the key itself — only key_hash is stored at all
+    (app/models/api_key.py), and even key_prefix is just enough to tell
+    rows apart, not enough to reconstruct the real key.
+    """
+    result = await db.scalars(
+        select(ApiKey).where(ApiKey.owner_id == current_user.id).order_by(ApiKey.created_at)
+    )
+    return list(result)
+
+
+@router.post("/api-keys", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)
+async def create_api_key(
+    payload: ApiKeyCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ApiKeyCreated:
+    """The only response that ever carries the real key — shown to the
+    user exactly once here; every later read is key_prefix only. See
+    app.core.security.generate_api_key for why this is safe to do without
+    ever persisting the plaintext.
+    """
+    full_key, display_prefix, key_hash = generate_api_key()
+    api_key = ApiKey(
+        owner_id=current_user.id,
+        name=payload.name,
+        key_prefix=display_prefix,
+        key_hash=key_hash,
+        max_duration_minutes=payload.max_duration_minutes,
+    )
+    db.add(api_key)
+    await db.commit()
+    await db.refresh(api_key)
+    return ApiKeyCreated(
+        id=api_key.id,
+        name=api_key.name,
+        key_prefix=api_key.key_prefix,
+        max_duration_minutes=api_key.max_duration_minutes,
+        created_at=api_key.created_at,
+        last_used_at=api_key.last_used_at,
+        key=full_key,
+    )
+
+
+@router.patch("/api-keys/{key_id}", response_model=ApiKeyRead)
+async def update_api_key(
+    key_id: UUID,
+    payload: ApiKeyUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ApiKey:
+    api_key = await db.get(ApiKey, key_id)
+    if api_key is None or api_key.owner_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found")
+    api_key.max_duration_minutes = payload.max_duration_minutes
+    await db.commit()
+    await db.refresh(api_key)
+    return api_key
+
+
+@router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_api_key(
+    key_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    api_key = await db.get(ApiKey, key_id)
+    if api_key is None or api_key.owner_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found")
+    await db.delete(api_key)
+    await db.commit()
 
 
 @router.get("/ai-overview", response_model=AiOverview)

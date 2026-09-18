@@ -7,12 +7,39 @@ import { ApiError, api, type GroupMeeting, type Meeting, type MeetingSearchResul
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
 
+const DASHBOARD_POLL_INTERVAL_MS = 4000;
+
 const STATUS_LABEL: Record<Meeting["status"], string> = {
   recording: "Recording",
   processing: "Processing",
   ready: "Ready",
   failed: "Failed",
 };
+
+// Same border-first, no-fill convention KnowledgeBase.tsx's own status
+// badges already use (ready/failed there) — recording gets the palette's
+// info blue (an "active, in progress" tone distinct from ready's green
+// and failed's red), processing stays neutral, same as KB's own pending/
+// processing choice.
+const STATUS_CLASS: Record<Meeting["status"], string> = {
+  recording: "border-status-info/30 text-status-info",
+  processing: "border-border text-ink-muted dark:border-border-dark",
+  ready: "border-status-success/30 text-status-success",
+  failed: "border-status-danger/30 text-status-danger",
+};
+
+/** A meeting currently (or once) streamed via an API key rather than the
+ * browser — a pulsing dot only while it's actually `recording` (reusing
+ * LiveSession.tsx's own mic/them-active dot idiom), a plain historical
+ * label once it's finished. */
+function ApiKeyBadge({ name, live }: { name: string; live: boolean }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-sm border border-status-info/30 px-2 py-0.5 text-xs text-status-info">
+      {live && <span className="h-1.5 w-1.5 rounded-full bg-status-info animate-pulse" />}
+      {live ? "Live via API" : "Recorded via API"} · {name}
+    </span>
+  );
+}
 
 /** Strip the extension and tidy up a filename for use as a default title,
  * e.g. "sales-call_2026-09-01.m4a" -> "sales-call_2026-09-01". */
@@ -65,6 +92,21 @@ export default function Dashboard() {
     api.listMeetings().then(setMeetings);
   }, []);
 
+  // Own list only re-fetches automatically while something in it is
+  // still `recording` — same conditional-poll shape as KnowledgeBase.tsx
+  // uses for its own pending/processing documents. Without this, a
+  // meeting an API integration started wouldn't visibly update (new
+  // transcript activity, eventually landing on `ready`) without a
+  // manual refresh — the whole point of showing it live in the first
+  // place.
+  useEffect(() => {
+    if (!meetings?.some((m) => m.status === "recording")) return;
+    const timer = setTimeout(() => {
+      api.listMeetings().then(setMeetings);
+    }, DASHBOARD_POLL_INTERVAL_MS);
+    return () => clearTimeout(timer);
+  }, [meetings]);
+
   // Only fetched once the user actually switches to it — someone who never
   // opens the Group/All tab (the vast majority for "All," since it's
   // admin-only) never needs the request at all.
@@ -74,6 +116,21 @@ export default function Dashboard() {
     }
     if (view === "all" && allMeetings === null) {
       api.listAllMeetings().then(setAllMeetings);
+    }
+  }, [view, groupMeetings, allMeetings]);
+
+  // Same conditional poll as the own-list one above, for whichever of
+  // Group/All is the currently-active tab — a teammate's (or, on All,
+  // anyone's) meeting recording live via an API integration should
+  // appear and update the same way your own does.
+  useEffect(() => {
+    if (view === "group" && groupMeetings?.some((m) => m.status === "recording")) {
+      const timer = setTimeout(() => api.listGroupMeetings().then(setGroupMeetings), DASHBOARD_POLL_INTERVAL_MS);
+      return () => clearTimeout(timer);
+    }
+    if (view === "all" && allMeetings?.some((m) => m.status === "recording")) {
+      const timer = setTimeout(() => api.listAllMeetings().then(setAllMeetings), DASHBOARD_POLL_INTERVAL_MS);
+      return () => clearTimeout(timer);
     }
   }, [view, groupMeetings, allMeetings]);
 
@@ -316,9 +373,14 @@ export default function Dashboard() {
                         {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
                       </p>
                     </div>
-                    <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
-                      {STATUS_LABEL[meeting.status]}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {meeting.api_key_name && (
+                        <ApiKeyBadge name={meeting.api_key_name} live={meeting.status === "recording"} />
+                      )}
+                      <span className={`rounded-sm border px-2 py-0.5 text-xs ${STATUS_CLASS[meeting.status]}`}>
+                        {STATUS_LABEL[meeting.status]}
+                      </span>
+                    </div>
                   </Link>
                 </li>
               ))}
@@ -344,7 +406,7 @@ export default function Dashboard() {
                       <p className="text-sm font-medium text-ink dark:text-ink-inverted">
                         {result.title}
                       </p>
-                      <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                      <span className={`rounded-sm border px-2 py-0.5 text-xs ${STATUS_CLASS[result.status]}`}>
                         {STATUS_LABEL[result.status]}
                       </span>
                     </div>
@@ -383,9 +445,14 @@ export default function Dashboard() {
                         {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
                       </p>
                     </div>
-                    <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
-                      {STATUS_LABEL[meeting.status]}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {meeting.api_key_name && (
+                        <ApiKeyBadge name={meeting.api_key_name} live={meeting.status === "recording"} />
+                      )}
+                      <span className={`rounded-sm border px-2 py-0.5 text-xs ${STATUS_CLASS[meeting.status]}`}>
+                        {STATUS_LABEL[meeting.status]}
+                      </span>
+                    </div>
                   </Link>
                 </li>
               ))}
@@ -421,7 +488,10 @@ export default function Dashboard() {
                       </p>
                     </div>
                     <div className="flex items-center gap-3">
-                      <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+                      {meeting.api_key_name && (
+                        <ApiKeyBadge name={meeting.api_key_name} live={meeting.status === "recording"} />
+                      )}
+                      <span className={`rounded-sm border px-2 py-0.5 text-xs ${STATUS_CLASS[meeting.status]}`}>
                         {STATUS_LABEL[meeting.status]}
                       </span>
                       <button

@@ -542,11 +542,26 @@ export default function MeetingDetail() {
 
           {meeting.status === "recording" && (
             <div className="card mt-6 p-6 text-center">
-              <p className="text-sm text-ink-muted">This meeting hasn't been recorded yet.</p>
-              {isOwner && (
-                <Link to={`/meetings/${meeting.id}/live`} className="btn-primary mt-4 inline-flex">
-                  Go to live session
-                </Link>
+              {meeting.api_key_name ? (
+                // No "Go to live session" link here on purpose — that
+                // would open a second WebSocket session on top of the
+                // one the API integration already has open. The backend
+                // rejects a second connection outright now (app/ws/
+                // live_session.py's recording lock), but there's no
+                // reason to even offer the dead end in the first place.
+                <p className="text-sm text-ink-muted">
+                  Being recorded via <span className="text-status-info">{meeting.api_key_name}</span> — this
+                  page will update automatically once it finishes.
+                </p>
+              ) : (
+                <>
+                  <p className="text-sm text-ink-muted">This meeting hasn't been recorded yet.</p>
+                  {isOwner && (
+                    <Link to={`/meetings/${meeting.id}/live`} className="btn-primary mt-4 inline-flex">
+                      Go to live session
+                    </Link>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -572,6 +587,11 @@ export default function MeetingDetail() {
                 <div className="mb-3 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Report</h2>
+                    {meeting.api_key_name && (
+                      <span className="rounded-sm border border-status-info/30 px-2 py-0.5 text-xs text-status-info">
+                        Recorded via API · {meeting.api_key_name}
+                      </span>
+                    )}
                     {meeting.sentiment && (
                       <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
                         {meeting.sentiment}

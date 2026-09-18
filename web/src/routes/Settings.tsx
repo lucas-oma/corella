@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 
 import AppShell from "@/components/AppShell";
-import { ApiError, api, type AiOverview, type Preferences, type ProviderStatus, type SttStatus } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  type AiOverview,
+  type ApiKey,
+  type ApiKeyCreated,
+  type Preferences,
+  type ProviderStatus,
+  type SttStatus,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
 import { type CaptureHandle, pcmToWavBlob, startCapture } from "@/lib/live";
@@ -12,6 +21,12 @@ import { type CaptureHandle, pcmToWavBlob, startCapture } from "@/lib/live";
 // other. A longer sample (the full ~22s real test clips) resolved it
 // cleanly. 10s is a practical floor short of a full clip.
 const MIN_VOICE_SAMPLE_SECONDS = 10;
+
+// Per-API-key live-session cap (server/app/models/api_key.py). Same
+// bounds the API itself enforces — a key with no explicit value gets 60.
+const DEFAULT_KEY_DURATION_MINUTES = 60;
+const MIN_KEY_DURATION_MINUTES = 1;
+const MAX_KEY_DURATION_MINUTES = 480;
 
 const PROVIDER_META: Record<ProviderStatus["provider"], { name: string; hint: string }> = {
   anthropic: { name: "Anthropic", hint: "Claude models via your own API key" },
@@ -121,6 +136,19 @@ export default function Settings() {
   const [savedFlash, setSavedFlash] = useState<"stt" | "llm" | null>(null);
   const savedFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [apiKeys, setApiKeys] = useState<ApiKey[] | null>(null);
+  const [newKeyName, setNewKeyName] = useState("");
+  const [newKeyDuration, setNewKeyDuration] = useState(DEFAULT_KEY_DURATION_MINUTES);
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
+  const [durationDrafts, setDurationDrafts] = useState<Record<string, number>>({});
+  const [savingDurationId, setSavingDurationId] = useState<string | null>(null);
+  // The one and only time a real key is ever visible — cleared on
+  // dismiss, and never recoverable again after that (only its hash is
+  // stored server-side).
+  const [revealedKey, setRevealedKey] = useState<ApiKeyCreated | null>(null);
+  const [copied, setCopied] = useState(false);
+
   const [fullName, setFullName] = useState("");
   const [savingName, setSavingName] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -136,7 +164,86 @@ export default function Settings() {
     api.getSttStatus().then(setSttStatus);
     api.getAiOverview().then(setAiOverview);
     api.getPreferences().then(setPreferences);
+    api.listApiKeys().then(setApiKeys);
   }, []);
+
+  async function onCreateApiKey() {
+    const name = newKeyName.trim();
+    if (!name) return;
+    if (newKeyDuration < MIN_KEY_DURATION_MINUTES || newKeyDuration > MAX_KEY_DURATION_MINUTES) {
+      setError(`Max duration must be between ${MIN_KEY_DURATION_MINUTES} and ${MAX_KEY_DURATION_MINUTES} minutes`);
+      return;
+    }
+    setError(null);
+    setCreatingKey(true);
+    try {
+      const created = await api.createApiKey(name, newKeyDuration);
+      setApiKeys((prev) => [...(prev ?? []), created]);
+      setRevealedKey(created);
+      setNewKeyName("");
+      setNewKeyDuration(DEFAULT_KEY_DURATION_MINUTES);
+      setCopied(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't create API key");
+    } finally {
+      setCreatingKey(false);
+    }
+  }
+
+  async function onSaveKeyDuration(key: ApiKey) {
+    const minutes = durationDrafts[key.id] ?? key.max_duration_minutes;
+    if (minutes === key.max_duration_minutes) return;
+    if (minutes < MIN_KEY_DURATION_MINUTES || minutes > MAX_KEY_DURATION_MINUTES) {
+      setError(`Max duration must be between ${MIN_KEY_DURATION_MINUTES} and ${MAX_KEY_DURATION_MINUTES} minutes`);
+      return;
+    }
+    setError(null);
+    setSavingDurationId(key.id);
+    try {
+      const updated = await api.updateApiKey(key.id, { max_duration_minutes: minutes });
+      setApiKeys((prev) => prev?.map((row) => (row.id === key.id ? updated : row)) ?? null);
+      setDurationDrafts((prev) => {
+        const next = { ...prev };
+        delete next[key.id];
+        return next;
+      });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't update API key");
+    } finally {
+      setSavingDurationId(null);
+    }
+  }
+
+  async function onDeleteApiKey(key: ApiKey) {
+    const ok = await confirm({
+      title: `Delete "${key.name}"?`,
+      description: "Anything still using this key will stop being able to authenticate immediately.",
+      confirmLabel: "Delete key",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setError(null);
+    setDeletingKeyId(key.id);
+    try {
+      await api.deleteApiKey(key.id);
+      setApiKeys((prev) => prev?.filter((k) => k.id !== key.id) ?? null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't delete API key");
+    } finally {
+      setDeletingKeyId(null);
+    }
+  }
+
+  async function onCopyRevealedKey() {
+    if (!revealedKey) return;
+    try {
+      await navigator.clipboard.writeText(revealedKey.key);
+      setCopied(true);
+    } catch {
+      // Clipboard access can be denied by the browser — the key text is
+      // still selectable/visible either way, so this is a soft failure.
+    }
+  }
 
   // Keeps the edit-form drafts in sync whenever the committed preferences
   // change (initial load, or right after a save) — separate from the
@@ -750,6 +857,117 @@ export default function Settings() {
                 {aiOverview.diarization.available ? aiOverview.diarization.pipeline : "Not configured (needs HF_TOKEN)"}
               </p>
             </li>
+          </ul>
+        )}
+      </section>
+
+      <section className="card mt-6 p-6">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">API keys</h2>
+            <p className="mt-1 text-xs text-ink-subtle">
+              Let an external system create/read meetings and stream a live recording as your account —
+              see <code className="text-[11px]">API.md</code> for the full reference. Each key has a max
+              live-session length (default {DEFAULT_KEY_DURATION_MINUTES} min) so a hung integration can't
+              record forever.
+            </p>
+          </div>
+        </div>
+
+        {revealedKey && (
+          <div className="mb-4 rounded-sm border border-accent/30 bg-black/[0.02] p-3 dark:bg-white/[0.04]">
+            <p className="text-xs font-medium text-ink dark:text-ink-inverted">
+              "{revealedKey.name}" created — copy it now, you won't be able to see it again.
+            </p>
+            <div className="mt-2 flex items-center gap-2">
+              <code className="flex-1 overflow-x-auto rounded-sm border border-border bg-surface-raised px-2 py-1.5 text-xs dark:border-border-dark dark:bg-surface-dark-raised">
+                {revealedKey.key}
+              </code>
+              <button onClick={onCopyRevealedKey} className="btn-secondary shrink-0 text-xs">
+                {copied ? "Copied ✓" : "Copy"}
+              </button>
+            </div>
+            <button
+              onClick={() => setRevealedKey(null)}
+              className="mt-2 text-xs text-ink-subtle hover:text-ink dark:hover:text-ink-inverted"
+            >
+              Done, I've saved it
+            </button>
+          </div>
+        )}
+
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            placeholder="Key name, e.g. Zapier integration"
+            value={newKeyName}
+            onChange={(e) => setNewKeyName(e.target.value)}
+            className="field min-w-48 flex-1 text-sm"
+          />
+          <label className="flex items-center gap-1.5 text-xs text-ink-subtle">
+            <input
+              type="number"
+              min={MIN_KEY_DURATION_MINUTES}
+              max={MAX_KEY_DURATION_MINUTES}
+              value={newKeyDuration}
+              onChange={(e) => setNewKeyDuration(Number(e.target.value) || DEFAULT_KEY_DURATION_MINUTES)}
+              className="field w-16 text-sm"
+            />
+            min max
+          </label>
+          <button
+            onClick={onCreateApiKey}
+            disabled={creatingKey || !newKeyName.trim()}
+            className="btn-secondary shrink-0"
+          >
+            {creatingKey ? "Creating…" : "Create key"}
+          </button>
+        </div>
+
+        {apiKeys === null && <p className="text-sm text-ink-muted">Loading…</p>}
+        {apiKeys?.length === 0 && <p className="text-sm text-ink-muted">No API keys yet.</p>}
+        {apiKeys && apiKeys.length > 0 && (
+          <ul className="divide-y divide-border dark:divide-border-dark">
+            {apiKeys.map((key) => (
+              <li key={key.id} className="flex items-center justify-between gap-3 py-2.5">
+                <div className="min-w-0">
+                  <p className="truncate text-sm text-ink dark:text-ink-inverted">{key.name}</p>
+                  <p className="text-xs text-ink-subtle">
+                    <code>{key.key_prefix}</code> · created {new Date(key.created_at).toLocaleDateString()}
+                    {key.last_used_at
+                      ? ` · last used ${new Date(key.last_used_at).toLocaleDateString()}`
+                      : " · never used"}
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-3">
+                  <label className="flex items-center gap-1.5 text-xs text-ink-subtle">
+                    <input
+                      type="number"
+                      min={MIN_KEY_DURATION_MINUTES}
+                      max={MAX_KEY_DURATION_MINUTES}
+                      value={durationDrafts[key.id] ?? key.max_duration_minutes}
+                      onChange={(e) =>
+                        setDurationDrafts((prev) => ({
+                          ...prev,
+                          [key.id]: Number(e.target.value) || MIN_KEY_DURATION_MINUTES,
+                        }))
+                      }
+                      onBlur={() => onSaveKeyDuration(key)}
+                      disabled={savingDurationId === key.id}
+                      className="field w-16 text-sm"
+                    />
+                    min
+                  </label>
+                  <button
+                    onClick={() => onDeleteApiKey(key)}
+                    disabled={deletingKeyId === key.id}
+                    className="shrink-0 text-xs text-ink-subtle hover:text-status-danger"
+                  >
+                    {deletingKeyId === key.id ? "…" : "Delete"}
+                  </button>
+                </div>
+              </li>
+            ))}
           </ul>
         )}
       </section>

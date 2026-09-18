@@ -8,7 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.models.cost import UsageKind
 from app.models.kb_document import KBDocument, KBDocumentStatus
-from app.models.meeting import ActionItem, ActionItemStatus, Channel, CopilotInsight, TranscriptSegment
+from app.models.meeting import (
+    ActionItem,
+    ActionItemStatus,
+    Channel,
+    CopilotInsight,
+    Meeting,
+    TranscriptSegment,
+)
 from app.services.access import searchable_owner_ids
 from app.services.copilot.action_items import persist_new_action_items
 from app.services.copilot.cost import add_meeting_cost
@@ -67,11 +74,21 @@ async def run_cycle(
     ratio = talk_ratio(all_segments)  # whole call, not just the recent window — an honest metric
 
     kb_context = await _retrieve_kb_context(db, owner_id, transcript_text)
+    # The pre-call hook's fetched response, if this meeting's call type had
+    # pre_call_use_as_context on (app/services/admin/call_hooks.py:
+    # dispatch_pre_call, fired once at meeting creation) — a single scalar
+    # column select, not a full Meeting load, since that's all this needs.
+    pre_call_context = await db.scalar(select(Meeting.pre_call_context).where(Meeting.id == meeting_id))
 
     user_content = (
         f"Recent transcript:\n{transcript_text}\n\n"
         f"Talk ratio so far — Me: {ratio['me']}%, Them: {ratio['them']}%"
     )
+    if pre_call_context:
+        # Alongside, not instead of, the knowledge base below — an
+        # external system's own pre-fetched data (e.g. a CRM lookup) is a
+        # different kind of context than the group's uploaded documents.
+        user_content += "\n\nExternal context:\n" + pre_call_context
     if kb_context:
         user_content += "\n\nReference material:\n" + "\n---\n".join(kb_context)
 

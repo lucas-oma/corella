@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
+from app.models.api_key import ApiKey
 from app.models.call_type import CallType
 from app.models.enum_types import pg_enum
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
@@ -58,6 +59,26 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     call_type_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("call_types.id", ondelete="SET NULL")
     )
+    # The response body fetched by this meeting's call type's pre-call
+    # hook, if pre_call_use_as_context is on (app/services/admin/
+    # call_hooks.py:dispatch_pre_call, fired from create_meeting) —
+    # capped at settings.pre_call_context_max_chars before storing. Fed
+    # into the live copilot's prompt alongside the regular knowledge-base
+    # context (app/services/copilot/live.py:run_cycle). None when no
+    # pre-call is configured, it failed, or the feature is off.
+    pre_call_context: Mapped[str | None] = mapped_column(Text)
+    # Set once, the moment a live WS session's auth actually resolves via
+    # an API key (app/ws/live_session.py:live_session_ws) — not at
+    # meeting-creation, since creation and streaming can in principle be
+    # driven by different credentials, and "is/was this meeting recorded
+    # by an external system" is a question about the streaming session,
+    # not the create call. SET NULL (not CASCADE) so deleting a key never
+    # deletes the meetings it was used on — a meeting whose key was later
+    # removed just loses the traceability label, same rationale as
+    # call_type_id above.
+    api_key_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="SET NULL")
+    )
     key_topics: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     sentiment: Mapped[str | None] = mapped_column(String(255))
     notable_quotes: Mapped[list[str] | None] = mapped_column(ARRAY(String))
@@ -66,6 +87,7 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     owner: Mapped[User] = relationship(lazy="joined")
     call_type: Mapped[CallType | None] = relationship(lazy="joined")
+    api_key: Mapped[ApiKey | None] = relationship(lazy="joined")
 
     @property
     def has_audio(self) -> bool:
@@ -79,6 +101,14 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         """Not a column — lets MeetingRead show whose meeting this is, since
         a group member can now view another member's report."""
         return self.owner.full_name
+
+    @property
+    def api_key_name(self) -> str | None:
+        """Not a column — lets MeetingRead/GroupMeetingRead show which
+        integration (by its own admin-chosen label) is/was actually
+        streaming this meeting, via the api_key relationship above. None
+        for a meeting created and recorded through the browser."""
+        return self.api_key.name if self.api_key else None
 
 
 class Speaker(UUIDPrimaryKeyMixin, TimestampMixin, Base):

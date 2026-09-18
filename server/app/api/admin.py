@@ -149,11 +149,18 @@ async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(g
         slug=payload.slug,
         report_guidance=payload.report_guidance,
         is_default=payload.is_default,
-        webhook_enabled=payload.webhook_enabled,
-        webhook_url=payload.webhook_url,
-        webhook_method=payload.webhook_method,
-        webhook_headers_encrypted=encrypt_secret(payload.webhook_headers) if payload.webhook_headers else None,
-        webhook_body_template=payload.webhook_body_template,
+        pre_call_enabled=payload.pre_call_enabled,
+        pre_call_url=payload.pre_call_url,
+        pre_call_method=payload.pre_call_method,
+        pre_call_headers_encrypted=encrypt_secret(payload.pre_call_headers) if payload.pre_call_headers else None,
+        pre_call_body_template=payload.pre_call_body_template,
+        pre_call_use_as_context=payload.pre_call_use_as_context,
+        post_call_enabled=payload.post_call_enabled,
+        post_call_url=payload.post_call_url,
+        post_call_method=payload.post_call_method,
+        post_call_headers_encrypted=encrypt_secret(payload.post_call_headers) if payload.post_call_headers else None,
+        post_call_body_template=payload.post_call_body_template,
+        post_call_send_full_payload=payload.post_call_send_full_payload,
     )
     db.add(call_type)
     if payload.is_default:
@@ -176,9 +183,12 @@ async def update_call_type(call_type_id: UUID, payload: CallTypeUpdate, db: Asyn
         if clash is not None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A call type with this slug already exists")
 
-    if "webhook_headers" in fields:
-        headers = fields.pop("webhook_headers")
-        call_type.webhook_headers_encrypted = encrypt_secret(headers) if headers else None
+    if "pre_call_headers" in fields:
+        headers = fields.pop("pre_call_headers")
+        call_type.pre_call_headers_encrypted = encrypt_secret(headers) if headers else None
+    if "post_call_headers" in fields:
+        headers = fields.pop("post_call_headers")
+        call_type.post_call_headers_encrypted = encrypt_secret(headers) if headers else None
 
     for field, value in fields.items():
         setattr(call_type, field, value)

@@ -55,7 +55,9 @@ export DATABASE_URL=postgresql+psycopg://corella:corella@localhost:15432/corella
 pytest
 ```
 
-`ruff` and `pytest` are both **required checks** on any PR into `main` or `release` (see `.github/workflows/pr-checks.yml`) — the starter suite in `server/tests/` covers the highest-value logic (permission boundaries, credential/provider resolution, webhook templating, pricing math), not every endpoint; growing it is a welcome contribution on its own, not just a side effect of a feature PR. `ruff` also runs on every push to any branch (`.github/workflows/push-lint.yml`, not required, just fast feedback) so style issues surface immediately rather than piling up for review.
+`ruff` and `pytest` are both **required checks** on any PR into `main` or `release` (see `.github/workflows/pr-checks.yml`) — the starter suite in `server/tests/` covers the highest-value logic (permission boundaries, credential/provider resolution, call-type hook templating, pricing math), not every endpoint; growing it is a welcome contribution on its own, not just a side effect of a feature PR. `ruff` also runs on every push to any branch (`.github/workflows/push-lint.yml`, not required, just fast feedback) so style issues surface immediately rather than piling up for review.
+
+Testing a pre/post call-type hook specifically doesn't need a real external system standing by: `server/scripts/api_test_server.py` is a small committed FastAPI app that plays that role, logging every request (with the three mandatory headers checked off explicitly) and keeping it queryable at `GET /requests` — see [`API.md`](API.md#testing-your-integration-server-scriptsapi_test_serverpy). `server/tests/test_call_hooks_integration.py` runs it as a real subprocess and asserts against real loopback HTTP, on top of `test_call_hooks.py`'s monkeypatched-`httpx` unit coverage of the same logic.
 
 Neither replaces this project's other standing discipline: every change has also been verified against a **real, isolated Docker stack** before merging — not the developer's own running instance, and never mocked away. If you're touching backend behavior beyond what the test suite covers, do the same:
 

@@ -15,10 +15,12 @@ from sqlalchemy import func, select
 from app.core import storage
 from app.core.config import get_settings
 from app.core.db import SessionLocal
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token, hash_api_key
+from app.models.api_key import ApiKey
 from app.models.cost import UsageKind
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.models.user import User, UserRole
+from app.services import recording_lock
 from app.services.access import searchable_kb_keywords
 from app.services.asr import deepgram
 from app.services.asr.deepgram_stream import DeepgramLiveStream, DeepgramStreamError, StreamResult
@@ -429,9 +431,10 @@ async def _open_deepgram_stream(websocket: WebSocket, session: LiveSession, chan
 async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
     await websocket.accept()
 
-    user = await _authenticate(websocket)
-    if user is None:
+    auth_result = await _authenticate(websocket)
+    if auth_result is None:
         return
+    user, api_key_row = auth_result
 
     async with SessionLocal() as db:
         meeting = await db.get(Meeting, meeting_id)
@@ -441,7 +444,23 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         if meeting.status != MeetingStatus.RECORDING:
             await websocket.close(code=4409, reason="Meeting is not in a recording state")
             return
+
+        # The *real* guard against two sessions ever attaching to the same
+        # meeting — status alone doesn't do it, since a meeting stays
+        # `recording` for the whole duration of whichever session already
+        # has it. A second connection (another tab, a retried API call, an
+        # owner opening the browser's own live page while an API
+        # integration is already streaming this meeting) must never run a
+        # second independent VAD/diarization/Deepgram pipeline writing
+        # transcript rows for the same meeting_id concurrently.
+        lock_token = await recording_lock.acquire(meeting_id)
+        if lock_token is None:
+            await websocket.close(code=4409, reason="Meeting is already being recorded by another connection")
+            return
+
         meeting.started_at = datetime.now(UTC)
+        if api_key_row is not None:
+            meeting.api_key_id = api_key_row.id
         await db.commit()
         provider = await resolve_provider(db, user.id)
         stt = await resolve_stt_provider(db, user.id)
@@ -476,6 +495,17 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
     diarization_poll_task = asyncio.create_task(_poll_diarization_updates(websocket, session))
     reconcile_task = asyncio.create_task(_reconcile_diarization_loop(session))
     debug_pump_task = asyncio.create_task(_pump_debug_events(websocket, session))
+    lock_renew_task = asyncio.create_task(_renew_recording_lock_loop(meeting_id, lock_token))
+    # Snapshot at connect — a PATCH of the key mid-call must not move the
+    # goalposts of a session that's already running. Browser/JWT sessions
+    # (api_key_row is None) are uncapped; see ApiKey.max_duration_minutes.
+    duration_task: asyncio.Task | None = None
+    if api_key_row is not None:
+        duration_task = asyncio.create_task(
+            _enforce_max_duration_loop(
+                websocket, session, api_key_row.max_duration_minutes * 60 * 1000
+            )
+        )
 
     await websocket.send_json({"type": "ready"})
     if provider is None:
@@ -526,6 +556,17 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         diarization_poll_task.cancel()
         reconcile_task.cancel()
         debug_pump_task.cancel()
+        lock_renew_task.cancel()
+        if duration_task is not None:
+            duration_task.cancel()
+        try:
+            # Best-effort — a Redis hiccup here must never block the rest
+            # of finalize (same discipline as everything else in this
+            # block). Worst case, the lock just expires on its own TTL
+            # instead of being cleared early.
+            await recording_lock.release(meeting_id, lock_token)
+        except Exception:
+            logger.exception("Live session %s: failed to release the recording lock", meeting_id)
 
         if stopped_gracefully:
             try:
@@ -601,10 +642,19 @@ async def _close_deepgram_streams(session: LiveSession) -> None:
         await _log_deepgram_stt_cost(session, stream)
 
 
-async def _authenticate(websocket: WebSocket) -> User | None:
+async def _authenticate(websocket: WebSocket) -> tuple[User, ApiKey | None] | None:
     """Browsers can't set custom WebSocket headers, and a query-string
     token would land in access logs — so auth is the first text frame
-    instead: {"type": "auth", "token": "..."}.
+    instead: {"type": "auth", "token": "..."} for a browser session, or
+    {"type": "auth", "api_key": "..."} for an external/machine caller
+    (app/models/api_key.py) — same credential, same resolution logic as
+    app/api/deps.py:get_current_user_flexible uses for REST, just carried
+    over this protocol's own auth frame instead of a bearer header.
+
+    Returns (user, api_key_row) — api_key_row is None for a browser/JWT
+    session, and set for an API-key session so the caller can record which
+    integration is actually streaming this meeting (Meeting.api_key_id,
+    app/ws/live_session.py:live_session_ws).
     """
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
@@ -614,22 +664,39 @@ async def _authenticate(websocket: WebSocket) -> User | None:
 
     try:
         payload = json.loads(raw)
-        token = payload["token"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        await websocket.close(code=4401, reason='First message must be {"type":"auth","token":...}')
-        return None
-
-    user_id = decode_access_token(token)
-    if user_id is None:
-        await websocket.close(code=4401, reason="Invalid token")
+        token = payload.get("token")
+        api_key = payload.get("api_key")
+    except (json.JSONDecodeError, TypeError):
+        token = api_key = None
+    if not token and not api_key:
+        await websocket.close(
+            code=4401, reason='First message must be {"type":"auth","token":...} or {"type":"auth","api_key":...}'
+        )
         return None
 
     async with SessionLocal() as db:
+        if api_key:
+            api_key_row = await db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(api_key)))
+            if api_key_row is None:
+                await websocket.close(code=4401, reason="Invalid API key")
+                return None
+            user = await db.get(User, api_key_row.owner_id)
+            if user is None:
+                await websocket.close(code=4401, reason="Invalid API key")
+                return None
+            api_key_row.last_used_at = datetime.now(UTC)
+            await db.commit()
+            return user, api_key_row
+
+        user_id = decode_access_token(token)
+        if user_id is None:
+            await websocket.close(code=4401, reason="Invalid token")
+            return None
         user = await db.get(User, user_id)
-    if user is None:
-        await websocket.close(code=4401, reason="Invalid token")
-        return None
-    return user
+        if user is None:
+            await websocket.close(code=4401, reason="Invalid token")
+            return None
+        return user, None
 
 
 def _is_stop(raw: str) -> bool:
@@ -822,6 +889,54 @@ async def _pump_debug_events(websocket: WebSocket, session: LiveSession) -> None
             await websocket.send_json(event)
         except Exception:
             pass  # client may already be gone
+
+
+# Custom close code (4xxx range, same family as 4401/4404/4409) for the
+# per-API-key live-session duration cap. Documented in API.md — integrators
+# should treat it as "this recording ended because the key's max duration
+# was reached," not as an auth/ownership failure.
+WS_CLOSE_DURATION_LIMIT = 4410
+
+
+async def _enforce_max_duration_loop(
+    websocket: WebSocket, session: LiveSession, max_duration_ms: int
+) -> None:
+    """Closes an API-key-authenticated live session once it hits that
+    key's max_duration_minutes. Sleeps the remaining time in one shot
+    (cancelled from the handler's `finally` on a normal stop/disconnect,
+    so a 60-minute cap doesn't mean a 60-minute-lived task after the
+    call already ended). Closing the socket unblocks the receive loop,
+    which then takes the same finalize path a client-sent `stop` would.
+    """
+    remaining_s = max(0.0, (max_duration_ms - session.elapsed_ms()) / 1000)
+    await asyncio.sleep(remaining_s)
+    try:
+        await websocket.close(
+            code=WS_CLOSE_DURATION_LIMIT,
+            reason="API key max meeting duration reached",
+        )
+    except Exception:
+        pass
+
+
+_LOCK_RENEW_INTERVAL_SECONDS = 10.0
+
+
+async def _renew_recording_lock_loop(meeting_id: UUID, lock_token: str) -> None:
+    """Keeps app/services/recording_lock.py's TTL from expiring for as
+    long as this session is alive — well inside the lock's own 30s TTL,
+    so a couple of missed renewals in a row (a slow Redis, a GC pause)
+    still don't let a second connection sneak in. Runs for the life of
+    the connection, cancelled in the main handler's `finally` alongside
+    the other background loops — the lock itself is released right next
+    to that cancellation, not here.
+    """
+    while True:
+        await asyncio.sleep(_LOCK_RENEW_INTERVAL_SECONDS)
+        try:
+            await recording_lock.renew(meeting_id, lock_token)
+        except Exception:
+            logger.exception("Live session %s: failed to renew the recording lock", meeting_id)
 
 
 async def _maybe_trigger_copilot(websocket: WebSocket, session: LiveSession) -> None:
