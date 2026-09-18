@@ -4,6 +4,7 @@ import AppShell from "@/components/AppShell";
 import {
   ApiError,
   api,
+  type AppSecret,
   type CallTypeConfig,
   type CostPeriod,
   type CostSummary,
@@ -89,14 +90,14 @@ function draftFromCallType(ct: CallTypeConfig): CallTypeDraft {
     pre_call_enabled: ct.pre_call_enabled,
     pre_call_url: ct.pre_call_url ?? "",
     pre_call_method: ct.pre_call_method,
-    pre_call_headers: "", // write-only, never returned — blank means "leave unchanged" on save
+    pre_call_headers: ct.pre_call_headers ?? "",
     pre_call_body_template: ct.pre_call_body_template ?? "",
     pre_call_use_as_context: ct.pre_call_use_as_context,
 
     post_call_enabled: ct.post_call_enabled,
     post_call_url: ct.post_call_url ?? "",
     post_call_method: ct.post_call_method,
-    post_call_headers: "", // write-only, never returned — blank means "leave unchanged" on save
+    post_call_headers: ct.post_call_headers ?? "",
     post_call_body_template: ct.post_call_body_template ?? "",
     post_call_send_full_payload: ct.post_call_send_full_payload,
   };
@@ -144,6 +145,7 @@ export default function Admin() {
   const [costs, setCosts] = useState<CostSummary | null>(null);
   const [costPeriod, setCostPeriod] = useState<CostPeriod>("30d");
   const [callTypes, setCallTypes] = useState<CallTypeConfig[] | null>(null);
+  const [secrets, setSecrets] = useState<AppSecret[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -168,6 +170,7 @@ export default function Admin() {
     api.adminListGroups().then(setGroups);
     api.adminListUsers().then(setUsers);
     api.adminListCallTypes().then(setCallTypes);
+    api.adminListSecrets().then(setSecrets);
   }, []);
 
   useEffect(() => {
@@ -334,20 +337,15 @@ export default function Admin() {
         pre_call_url: d.pre_call_url.trim() || null,
         pre_call_method: d.pre_call_method,
         pre_call_body_template: d.pre_call_body_template.trim() || null,
+        pre_call_headers: d.pre_call_headers.trim() || null,
         pre_call_use_as_context: d.pre_call_use_as_context,
 
         post_call_enabled: d.post_call_enabled,
         post_call_url: d.post_call_url.trim() || null,
         post_call_method: d.post_call_method,
+        post_call_headers: d.post_call_headers.trim() || null,
         post_call_body_template: d.post_call_body_template.trim() || null,
         post_call_send_full_payload: d.post_call_send_full_payload,
-
-        // Omitted entirely (not even as an empty string) unless the admin
-        // actually typed something this session — both are write-only and
-        // never come back from the API, so an empty draft field means
-        // "leave whatever's already saved alone," not "clear it."
-        ...(d.pre_call_headers.trim() ? { pre_call_headers: d.pre_call_headers.trim() } : {}),
-        ...(d.post_call_headers.trim() ? { post_call_headers: d.post_call_headers.trim() } : {}),
       };
 
       if (editingCallTypeId === "new") {
@@ -678,8 +676,9 @@ export default function Admin() {
       <section className="card mt-6 p-6">
         <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Call types</h2>
         <p className="mt-1 text-sm text-ink-muted">
-          What steers the post-call report&apos;s focus, and an optional webhook fired once a call of
-          that type finishes automatic processing.
+          What steers the post-call report&apos;s focus, and optional APIs fired before a call of
+          this type starts and after it finishes automatic processing. Put tokens in Settings →
+          Secrets and reference them in headers as {"{{secret.NAME}}"}.
         </p>
 
         <ul className="mt-5 divide-y divide-border dark:divide-border-dark">
@@ -694,6 +693,7 @@ export default function Admin() {
                   onSave={onSaveCallType}
                   onCancel={() => setEditingCallTypeId(null)}
                   saving={busy === "call-type-save"}
+                  secrets={secrets}
                 />
               ) : (
                 <div className="flex items-center justify-between">
@@ -739,6 +739,7 @@ export default function Admin() {
               onSave={onSaveCallType}
               onCancel={() => setEditingCallTypeId(null)}
               saving={busy === "call-type-save"}
+              secrets={secrets}
             />
           ) : (
             <button onClick={onNewCallType} className="btn-secondary">
@@ -935,6 +936,27 @@ export default function Admin() {
  * the Call types section above (new-row create, and expand-to-edit on an
  * existing row), same pattern as Settings.tsx's "AI models in use" inline
  * edit forms. */
+function SecretHeaderHint({ secrets }: { secrets: AppSecret[] }) {
+  if (secrets.length === 0) {
+    return (
+      <p className="text-xs text-ink-subtle">
+        Add a secret in Settings → Secrets, then use {"{{secret.NAME}}"} as a header value.
+      </p>
+    );
+  }
+  return (
+    <p className="text-xs text-ink-subtle">
+      Use {"{{secret.NAME}}"}. Available:{" "}
+      {secrets.map((s, i) => (
+        <span key={s.id}>
+          {i > 0 && ", "}
+          <code>{`{{secret.${s.name}}}`}</code>
+        </span>
+      ))}
+    </p>
+  );
+}
+
 function CallTypeForm({
   draft,
   setDraft,
@@ -942,6 +964,7 @@ function CallTypeForm({
   onSave,
   onCancel,
   saving,
+  secrets,
 }: {
   draft: CallTypeDraft;
   setDraft: React.Dispatch<React.SetStateAction<CallTypeDraft>>;
@@ -949,6 +972,7 @@ function CallTypeForm({
   onSave: () => void;
   onCancel: () => void;
   saving: boolean;
+  secrets: AppSecret[];
 }) {
   return (
     <div className="space-y-2">
@@ -1018,12 +1042,13 @@ function CallTypeForm({
               />
             </div>
             <textarea
-              placeholder='Headers, as JSON — e.g. {"Authorization": "Bearer ..."}. Leave blank to keep whatever is already saved.'
+              placeholder='{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}'
               value={draft.pre_call_headers}
               onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_headers: e.target.value }))}
               rows={2}
               className="field text-sm"
             />
+            <SecretHeaderHint secrets={secrets} />
             <textarea
               placeholder="Body, as JSON — only used for a method that sends one (e.g. POST)"
               value={draft.pre_call_body_template}
@@ -1080,12 +1105,13 @@ function CallTypeForm({
               />
             </div>
             <textarea
-              placeholder='Headers, as JSON — e.g. {"Authorization": "Bearer ..."}. Leave blank to keep whatever is already saved.'
+              placeholder='{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}'
               value={draft.post_call_headers}
               onChange={(e) => setDraft((prev) => ({ ...prev, post_call_headers: e.target.value }))}
               rows={2}
               className="field text-sm"
             />
+            <SecretHeaderHint secrets={secrets} />
             <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
               <input
                 type="checkbox"

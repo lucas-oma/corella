@@ -36,10 +36,9 @@ class CallType(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     pre_call_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     pre_call_url: Mapped[str | None] = mapped_column(String(2048))
     pre_call_method: Mapped[str] = mapped_column(String(16), default="GET")
-    # Encrypted with the same Fernet key derived from jwt_secret every
-    # other credential in this app uses (app.core.security) — headers
-    # commonly carry an Authorization value. Write-only, never returned
-    # by the API after saving, same convention as every other secret.
+    # Encrypted JSON template. Values should be {{secret.NAME}} refs
+    # (Settings → Secrets); dispatch interpolates them. The template is
+    # returned to admins on GET — the secret *values* are not.
     pre_call_headers_encrypted: Mapped[str | None] = mapped_column(Text)
     # Raw JSON text with {{placeholder}} tokens — see
     # app/services/admin/call_hooks.py:render_template for the

@@ -1,4 +1,5 @@
 from app.models.api_key import ApiKey
+from app.models.app_secret import AppSecret
 from app.models.call_profile import CallProfile
 from app.models.call_type import CallType
 from app.models.cost import LLMUsageEvent
@@ -27,4 +28,5 @@ __all__ = [
     "VoiceIdentity",
     "SttCredential",
     "ApiKey",
+    "AppSecret",
 ]
