@@ -1,11 +1,12 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import ColumnElement
 
 from app.core.config import get_settings
 from app.models.kb_document import KBDocument, KBDocumentStatus
-from app.models.user import User
+from app.models.user import User, UserRole
 
 
 async def searchable_owner_ids(db: AsyncSession, owner_id: UUID) -> list[UUID]:
@@ -25,10 +26,30 @@ async def searchable_owner_ids(db: AsyncSession, owner_id: UUID) -> list[UUID]:
     return list(member_ids)
 
 
+def kb_visible_clause(user: User, *, admin_sees_all: bool = False) -> ColumnElement[bool]:
+    """Which kb_documents this user may list / copilot-search.
+
+    A grouped user sees documents assigned to their group, plus any
+    unassigned docs they themselves uploaded (legacy). An ungrouped user
+    sees only their own unassigned docs. Admins are the same for copilot
+    and STT keywords (so one admin meeting doesn't pull every group's
+    KB). The documents list passes admin_sees_all=True so they can
+    maintain every group from /knowledge-base.
+    """
+    if admin_sees_all and user.role == UserRole.ADMIN:
+        return true()
+    if user.group_id is not None:
+        return or_(
+            KBDocument.group_id == user.group_id,
+            and_(KBDocument.group_id.is_(None), KBDocument.owner_id == user.id),
+        )
+    return and_(KBDocument.group_id.is_(None), KBDocument.owner_id == user.id)
+
+
 async def searchable_kb_keywords(db: AsyncSession, owner_id: UUID) -> list[str]:
     """Every distinct keyword LLM-extracted (app/services/embeddings/
     kb_keywords.py) from a READY KB document `owner_id` can search — same
-    owner_ids scope as searchable_owner_ids, just flattened across
+    visibility as copilot (kb_visible_clause), flattened across
     documents, deduped case-insensitively (keeping the first-seen casing),
     and capped, so callers (app/services/asr/*, fed via app/workers/
     tasks.py and app/ws/live_session.py) get one bounded list to pass
@@ -36,10 +57,12 @@ async def searchable_kb_keywords(db: AsyncSession, owner_id: UUID) -> list[str]:
     `initial_prompt`. Pure Postgres — no Qdrant round-trip, since the
     keywords already live on the document row, not just in its chunks.
     """
-    owner_ids = await searchable_owner_ids(db, owner_id)
+    user = await db.get(User, owner_id)
+    if user is None:
+        return []
     rows = await db.scalars(
         select(KBDocument.keywords).where(
-            KBDocument.owner_id.in_(owner_ids),
+            kb_visible_clause(user),
             KBDocument.status == KBDocumentStatus.READY,
             KBDocument.keywords.is_not(None),
         )

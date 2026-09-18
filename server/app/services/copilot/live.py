@@ -16,7 +16,8 @@ from app.models.meeting import (
     Meeting,
     TranscriptSegment,
 )
-from app.services.access import searchable_owner_ids
+from app.models.user import User
+from app.services.access import kb_visible_clause, searchable_owner_ids
 from app.services.copilot.action_items import persist_new_action_items
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import as_str_list, parse_json_response
@@ -186,24 +187,27 @@ def _format_transcript(segments: list[TranscriptSegment]) -> str:
 
 
 async def _retrieve_kb_context(db: AsyncSession, owner_id: UUID, query_text: str) -> list[str]:
-    # Group-aware: a grouped user's copilot can draw on *any* group
-    # member's uploaded documents, not just their own (app/services/access.py)
-    # — so the "does this searcher have any KB at all" check has to look
-    # across the same searchable set, or a grouped user with no docs of
-    # their own would short-circuit here and never see a groupmate's.
-    owner_ids = await searchable_owner_ids(db, owner_id)
+    # Group-aware: a grouped user's copilot draws on documents assigned to
+    # their group (including ones an admin uploaded for them) plus any
+    # unassigned docs they own — same clause as GET /api/kb/documents.
+    user = await db.get(User, owner_id)
+    if user is None:
+        return []
     has_kb = await db.scalar(
         select(KBDocument.id)
-        .where(KBDocument.owner_id.in_(owner_ids), KBDocument.status == KBDocumentStatus.READY)
+        .where(kb_visible_clause(user), KBDocument.status == KBDocumentStatus.READY)
         .limit(1)
     )
     if has_kb is None:
         return []
 
+    owner_ids = await searchable_owner_ids(db, owner_id)
     settings = get_settings()
     try:
         embedding = await embed_query(query_text)
-        return search_kb(owner_ids, embedding, top_k=settings.copilot_kb_top_k)
+        return search_kb(
+            owner_ids, embedding, top_k=settings.copilot_kb_top_k, group_id=user.group_id
+        )
     except Exception:
         logger.exception("KB retrieval failed for owner %s", owner_id)
         return []

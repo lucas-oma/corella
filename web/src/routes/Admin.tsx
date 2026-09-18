@@ -400,8 +400,9 @@ export default function Admin() {
       <section className="card p-6">
         <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">People</h2>
         <p className="mt-1 text-sm text-ink-muted">
-          Members of a group share a knowledge base and can see each other&apos;s call reports.
-          Deleting a group only unassigns its members — their accounts aren&apos;t affected.
+          Members of a group share a knowledge base (only admins upload and maintain it) and can
+          see each other&apos;s call reports. Deleting a group only unassigns its members — their
+          accounts aren&apos;t affected.
         </p>
 
         <div className="mt-6 grid grid-cols-1 gap-8 md:grid-cols-3">

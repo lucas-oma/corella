@@ -269,7 +269,9 @@ def process_kb_document(document_id: str) -> None:
                 raise ValueError("No extractable text found in this document")
 
             embeddings = embed_texts(chunks)
-            upsert_chunks(document.id, document.owner_id, chunks, embeddings)
+            upsert_chunks(
+                document.id, document.owner_id, chunks, embeddings, group_id=document.group_id
+            )
 
             document.chunk_count = len(chunks)
             document.status = KBDocumentStatus.READY

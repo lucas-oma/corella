@@ -17,7 +17,7 @@ A self-hosted meeting assistant: it records a call from your browser (or takes a
 - **Post-call reports** — auto-generated the moment a call finishes: title, summary, key topics, sentiment, notable quotes, action items, talk ratio, and a coach score, tuned by call type (sales/support/interview/1:1/meeting).
 - **Knowledge base** — upload your own documents; the live copilot retrieves relevant snippets via semantic search.
 - **Semantic search** — across your own meeting history, across your group's shared reports, or (as an admin) system-wide.
-- **Groups** — a shared knowledge base and shared voice recognition across teammates, with report-only (not raw transcript) visibility into a group-mate's calls.
+- **Groups** — a shared knowledge base (admins upload and maintain it, assigned per group) and shared voice recognition across teammates, with report-only (not raw transcript) visibility into a group-mate's calls.
 - **Admin console** — user/group management, and a cost-analytics dashboard (per-user spend, daily trend, a trailing-average 7-day projection) built from a real per-call LLM usage ledger.
 - **Admin live debug panel** — while recording your own call as an admin, toggle a technical event stream (VAD flushes, STT/LLM request+response timing, diarization dispatch) for in-the-moment debugging.
 - **Per-call cost estimate** — a best-effort running total per meeting, from real token usage (LLM calls) and real audio duration (Deepgram STT) where the provider reports it, with a by-provider breakdown in the admin dashboard.
