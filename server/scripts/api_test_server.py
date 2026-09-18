@@ -314,6 +314,13 @@ _LIVE_TEST_PAGE_HTML = """<!doctype html>
 <script>
 let ws = null, meetingId = null, captureCleanup = null;
 const segments = new Map();
+// Labels live off the transcript row — `transcript` events have no
+// speaker_label, and on the Deepgram path they often arrive *after*
+// diarization_update for the same id (label is published to Redis
+// before the transcript frame is sent). Storing the name on the same
+// object and then segments.set(id, transcript) was wiping every split
+// back to "me". Same split LiveSession.tsx uses.
+const speakerLabels = new Map();
 const partials = { me: "", them: "" };
 
 for (const id of ["apiBase", "apiKey", "callTypeId"]) {
@@ -327,7 +334,10 @@ function escapeHtml(s) { const d = document.createElement("div"); d.textContent 
 
 function renderTranscript() {
   const sorted = [...segments.values()].sort((a, b) => a.start_ms - b.start_ms);
-  let html = sorted.map((s) => `<div class="line"><b>${escapeHtml(s.speaker_label || s.channel)}</b>: ${escapeHtml(s.text)}</div>`).join("");
+  let html = sorted.map((s) => {
+    const label = speakerLabels.get(s.id) || s.speaker_label || s.channel;
+    return `<div class="line"><b>${escapeHtml(label)}</b>: ${escapeHtml(s.text)}</div>`;
+  }).join("");
   for (const ch of ["me", "them"]) {
     if (partials[ch]) html += `<div class="line partial"><b>${ch}</b>: ${escapeHtml(partials[ch])}…</div>`;
   }
@@ -356,7 +366,7 @@ async function start() {
   if (!apiKey) { setStatus("Paste an API key first (Settings -> API keys in the real app)."); return; }
 
   document.getElementById("startBtn").disabled = true;
-  segments.clear(); partials.me = ""; partials.them = "";
+  segments.clear(); speakerLabels.clear(); partials.me = ""; partials.them = "";
   renderTranscript(); renderCopilot({});
   setStatus("Creating meeting…");
 
@@ -407,8 +417,14 @@ async function onMessage(event) {
       break;
     case "diarization_update":
     case "speaker_hint":
-      for (const id of msg.removed_segment_ids || []) segments.delete(id);
-      for (const seg of msg.segments || []) segments.set(seg.id, seg);
+      for (const id of msg.removed_segment_ids || []) {
+        segments.delete(id);
+        speakerLabels.delete(id);
+      }
+      for (const seg of msg.segments || []) {
+        segments.set(seg.id, seg);
+        if (seg.speaker_label) speakerLabels.set(seg.id, seg.speaker_label);
+      }
       renderTranscript();
       break;
     case "stopped":

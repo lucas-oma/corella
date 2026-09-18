@@ -229,10 +229,10 @@ Closing the Corella web UI without pressing Stop is the same as a bare disconnec
 |---|---|---|
 | `ready` | `{}` | Auth succeeded, safe to start sending audio |
 | `copilot_unavailable` | `{}` | No LLM provider connected — live suggestions off, transcription still works |
-| `transcript` | `{ segment: {id, channel, start_ms, end_ms, text} }` | A committed (final) transcript segment |
+| `transcript` | `{ segment: {id, channel, start_ms, end_ms, text} }` | A committed (final) transcript segment. **No `speaker_label`** — see quirk 18 |
 | `partial_transcript` | `{ channel, text }` | Disposable live preview — replaced by the next `transcript` / `partial_transcript` for that channel, **never persisted** |
 | `copilot` | `{ suggestion, blockers: [string], action_items: [string], coach_score }` | One live-coaching cycle. Also persisted (minus `action_items`) as a row `GET /insights` returns |
-| `diarization_update` / `speaker_hint` | `{ is_snapshot, removed_segment_ids: [string], segments: [{id, channel, start_ms, end_ms, text, speaker_label, linked_user_id}] }` | Speaker labels resolving/changing. A `speaker_hint` is a fast guess; a later `diarization_update` for the same segment overwrites it. Apply as a diff: drop `removed_segment_ids`, upsert `segments` |
+| `diarization_update` / `speaker_hint` | `{ is_snapshot, removed_segment_ids: [string], segments: [{id, channel, start_ms, end_ms, text, speaker_label, linked_user_id}] }` | Speaker labels resolving/changing. A `speaker_hint` is a fast guess; a later `diarization_update` for the same segment overwrites it. Apply as a diff: drop `removed_segment_ids`, upsert `segments`. Keep names in a **separate map keyed by segment id** — do not store them only on the transcript object |
 | `stopped` | `{}` | Acknowledges a graceful client-sent `stop` only |
 | `debug_event` | `{ stage, at_ms, detail }` | Admin-only, and only after the client sent `{"type":"debug","enabled":true}`. Non-admins' debug frames are ignored |
 
@@ -364,6 +364,7 @@ These are the ones that bite integrations. All are real behavior, not omissions.
 15. **CORS applies to browser REST, not to server-to-server REST.** Machine callers should not send the request from a random web origin unless that origin is in `CORS_ORIGINS`.
 16. **Key plaintext is unrecoverable.** Settings list shows a prefix (`sk_live_xxxxxx…`) only. Rotate by creating a new key and deleting the old one; in-flight sockets using the deleted key fail on the next auth (the current socket is not torn down by delete — revoke is "cannot authenticate again").
 17. **Half-open TCP is why the duration cap exists.** Disconnect-to-finalize only runs when the server *sees* the socket die.
+18. **`transcript` has no `speaker_label`, and it often arrives *after* `diarization_update` for the same id** (Deepgram publishes the label to Redis before sending the transcript frame). If you store the name on the transcript object and then `set(id, transcriptEvent)`, you wipe every split and every line falls back to `me`. Keep names in a separate map keyed by segment id — that is what Corella's own live UI does, and what the `api_test_server` page at `/` does.
 
 ---
 
