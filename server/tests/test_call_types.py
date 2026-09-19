@@ -131,6 +131,8 @@ async def test_admin_call_type_listing_returns_header_templates_not_resolved_val
     )
     assert created.status_code == 201
     assert created.json()["pre_call_headers"] == template
+    assert created.json()["pre_call_async"] is False
+    assert created.json()["post_call_async"] is False
     assert "super-secret" not in created.text
 
     listing = await app_client.get("/api/admin/call-types", headers=headers)

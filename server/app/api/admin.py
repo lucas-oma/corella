@@ -263,12 +263,14 @@ async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(g
         pre_call_headers_encrypted=_headers_for_storage(payload.pre_call_headers),
         pre_call_body_template=payload.pre_call_body_template,
         pre_call_use_as_context=payload.pre_call_use_as_context,
+        pre_call_async=payload.pre_call_async,
         post_call_enabled=payload.post_call_enabled,
         post_call_url=payload.post_call_url,
         post_call_method=payload.post_call_method,
         post_call_headers_encrypted=_headers_for_storage(payload.post_call_headers),
         post_call_body_template=payload.post_call_body_template,
         post_call_send_full_payload=payload.post_call_send_full_payload,
+        post_call_async=payload.post_call_async,
     )
     db.add(call_type)
     if payload.is_default:

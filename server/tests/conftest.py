@@ -61,6 +61,7 @@ _TABLES = [
     "transcript_segments",
     "speakers",
     "notes",
+    "hook_logs",
     "meetings",
     "api_keys",
     "app_secrets",

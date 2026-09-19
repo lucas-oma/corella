@@ -96,7 +96,7 @@ Content-Type: application/json
 - `title` defaults to `"Untitled meeting"` if omitted.
 - `call_type_id` is optional. Omit it or send `null` to use whichever call type is currently marked default. Unknown id → `422`. If the instance has no call types at all, the meeting is created untyped (`call_type: null`) and no pre-call fires. `GET /api/call-types` (API key or JWT) returns `{id, name, slug, is_default}` so you can pick an id.
 - There is **no separate "start" call**. The meeting is created with `status: "recording"` immediately.
-- If that call type has a pre-call hook, it fires **synchronously here**, before the `201` comes back — bounded by `pre_call_timeout_seconds` (default 5s). A slow/broken hook never fails or delays creation past that timeout; you just get no extra context that time.
+- If that call type has a pre-call hook, it fires **here**. Default is **sync**: Corella waits (bounded by `pre_call_timeout_seconds`, default 5s) before the `201` comes back. Admins can mark the hook **async** — create returns immediately and the worker runs the same request; if "use as context" is on, live copilot picks the body up on the next cycle. A slow/broken hook never fails creation; you just get no extra context that time.
 - Creating with an API key does **not** mark the meeting as "via API". That stamp (`api_key_name` on later reads) is set only when a live WebSocket actually authenticates with a key. You can create with a JWT and stream with a key (badge appears), or create with a key and record in the browser (no badge).
 
 Response (`201`) — `MeetingRead`:
@@ -248,23 +248,26 @@ These are independent of API keys. They fire for browser-recorded meetings of th
 
 ### Before the call (pre-call)
 
-Fires synchronously from `POST /api/meetings`, before the response comes back — bounded by `pre_call_timeout_seconds` (default **5s**).
+Default: fires **synchronously** from `POST /api/meetings`, before the response comes back — bounded by `pre_call_timeout_seconds` (default **5s**). Admins can check **Don't wait (async)** on the call type: create returns immediately, `corella.dispatch_pre_call` runs the same request, and context (if enabled) lands when the worker finishes.
 
 - **Method**: any (`GET` by default).
 - **URL / headers / body**: admin-configurable. Headers are a JSON object. Put tokens in **Admin → Secrets** and reference them as `{{secret.NAME}}` (e.g. `{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}`). Admin GET returns that template — never the resolved value. Dispatch interpolates the secret at send time. A missing/unknown secret aborts that hook (logged, swallowed). Literal header values still work but will be visible to admins on the next GET.
 - **Body template**: `{{placeholder}}` substitution for `POST`/`PUT`/`PATCH`. Only meeting-level fields exist yet: `{{meeting_id}}`, `{{owner_id}}`, `{{owner_name}}`, `{{title}}`, `{{call_type}}`, `{{status}}`, `{{created_at}}`. Transcript/report placeholders are post-call only. A failed template render aborts that pre-call (logged, swallowed) — meeting creation still succeeds.
 - **"Use response as conversation context"**: when on, the response body is stored on the meeting (`pre_call_context`) and fed into every live-copilot cycle, *alongside* (not instead of) the group's knowledge base. Capped at `pre_call_context_max_chars` (default 20,000). Independent of whether a body template is set — the request still fires; this flag only controls whether the *response* becomes context. With it off, a pre-call is still useful as a side effect (notify another system a call started).
+- **Don't wait (async)** (default off): queue the request instead of blocking create. Use this when the lookup is slow and you would rather start recording first.
 - Non-2xx, timeout, DNS failure, bad URL: logged and swallowed. Returns no context. **Never fails meeting creation.**
 
 ### After the call (post-call)
 
-Fires **once**, right after a call's report finishes **auto**-generating (the Celery `generate_report` task). Not from `POST /api/meetings/{id}/report`. Not if auto-report is skipped (no LLM provider, or `ReportError`). Timeout `post_call_timeout_seconds` (default **30s**). Failures are logged and swallowed — they never mark the meeting failed.
+Fires **once**, right after a call's report finishes **auto**-generating (the Celery `generate_report` task). Not from `POST /api/meetings/{id}/report`. Not if auto-report is skipped (no LLM provider, or `ReportError`). Timeout `post_call_timeout_seconds` (default **30s**). Failures are logged and swallowed — they never mark the meeting failed. **Don't wait (async)** (default off) queues `corella.dispatch_post_call` so the report worker does not sit on that timeout.
 
 - **Method / URL / headers**: same shape as pre-call (defaults to `POST`).
 - **Body**: either a hand-written JSON template with `{{placeholder}}` tokens, or — with **"Send everything"** on — the full structured payload below, no template needed. Send-everything **wins** over a template (the template is not also applied).
 - Post-call always starts from `Content-Type: application/json`, then merges custom headers, then applies the three mandatory headers. A custom header can override `Content-Type`; it cannot override the `X-Corella-*` names.
 
 If auto-report is skipped, the post-call never runs even if the hook is configured. The meeting can still be `ready` with empty report fields.
+
+Admins can open a meeting and expand **API logs** to see each pre/post attempt (method, URL, status, redacted headers/body). Regular users never see this. `GET /api/meetings/{id}/hook-logs` is admin-only (403 otherwise). Credential-named headers (`Authorization`, `*secret*`, `*token*`, …) and resolved `{{secret.NAME}}` values are stored as `••••`.
 
 ### The three mandatory headers
 
@@ -331,7 +334,7 @@ app.post("/corella-webhook", express.json(), (req, res) => {
 
 Corella calls `GET https://your-crm.example.com/lookup?...` with the three mandatory headers attached; your endpoint returns plain text or JSON, which becomes the "External context" block in every live-coaching prompt for that call if "use as context" is on.
 
-From inside the `api`/`worker` **containers**, `localhost` is the container itself. Point hooks at the host with `http://host.docker.internal:<port>/...`.
+From inside the `api`/`worker` **containers**, `localhost` is the container itself. Point hooks at a process on the host with `http://host.docker.internal:<port>/...` (compose sets `extra_hosts: host-gateway` so this resolves on Linux too). In production, use a **public** URL the container can DNS-resolve (`https://<project>.supabase.co/functions/v1/...`), not localhost and not a hostname that only exists on your laptop. A failed DNS lookup (`Name or service not known`) still returns `201` — the meeting is created, the hook is not.
 
 ---
 
@@ -358,7 +361,7 @@ These are the ones that bite integrations. All are real behavior, not omissions.
 9. **Partial transcripts are UI-only.** Only `transcript` (and later diarization rewrites of those segments) is persisted.
 10. **Live `copilot.action_items` ≠ report action items.** The WS field is ephemeral per cycle; durable open/done items come from the report / post-call payload. `GET /insights` has suggestion/blockers/score, not those live action items.
 11. **Post-call runs only after a successful auto-report.** No LLM connected → no auto-report → no hook, even if the recording finalized to `ready`. Manual `POST /report` also does not fire it.
-12. **Pre-call failure is silent to the caller.** You still get `201`. Check Corella logs (or your receiving endpoint) if you expected context/side effects.
+12. **Pre-call failure is silent to the caller.** You still get `201`. The most common prod miss is DNS: the hostname in the hook URL does not resolve *inside* the api container (`Name or service not known`). Admins can open the meeting's **API logs**; otherwise check Corella logs or your receiving endpoint.
 13. **Mandatory hook headers always win.** You cannot spoof `X-Corella-Meeting-Id` via custom header config.
 14. **`GET /meetings/{id}` is group-visible; transcript is not.** An API key whose owner shares a group can read a colleague's summary, not their transcript.
 15. **CORS applies to browser REST, not to server-to-server REST.** Machine callers should not send the request from a random web origin unless that origin is in `CORS_ORIGINS`.

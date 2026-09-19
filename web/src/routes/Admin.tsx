@@ -51,6 +51,7 @@ type CallTypeDraft = {
   pre_call_headers: string;
   pre_call_body_template: string;
   pre_call_use_as_context: boolean;
+  pre_call_async: boolean;
 
   post_call_enabled: boolean;
   post_call_url: string;
@@ -58,6 +59,7 @@ type CallTypeDraft = {
   post_call_headers: string;
   post_call_body_template: string;
   post_call_send_full_payload: boolean;
+  post_call_async: boolean;
 };
 
 const EMPTY_CALL_TYPE_DRAFT: CallTypeDraft = {
@@ -72,6 +74,7 @@ const EMPTY_CALL_TYPE_DRAFT: CallTypeDraft = {
   pre_call_headers: "",
   pre_call_body_template: "",
   pre_call_use_as_context: false,
+  pre_call_async: false,
 
   post_call_enabled: false,
   post_call_url: "",
@@ -79,6 +82,7 @@ const EMPTY_CALL_TYPE_DRAFT: CallTypeDraft = {
   post_call_headers: "",
   post_call_body_template: "",
   post_call_send_full_payload: false,
+  post_call_async: false,
 };
 
 function draftFromCallType(ct: CallTypeConfig): CallTypeDraft {
@@ -94,6 +98,7 @@ function draftFromCallType(ct: CallTypeConfig): CallTypeDraft {
     pre_call_headers: beautifyJson(ct.pre_call_headers ?? ""),
     pre_call_body_template: beautifyJson(ct.pre_call_body_template ?? ""),
     pre_call_use_as_context: ct.pre_call_use_as_context,
+    pre_call_async: ct.pre_call_async,
 
     post_call_enabled: ct.post_call_enabled,
     post_call_url: ct.post_call_url ?? "",
@@ -101,6 +106,7 @@ function draftFromCallType(ct: CallTypeConfig): CallTypeDraft {
     post_call_headers: beautifyJson(ct.post_call_headers ?? ""),
     post_call_body_template: beautifyJson(ct.post_call_body_template ?? ""),
     post_call_send_full_payload: ct.post_call_send_full_payload,
+    post_call_async: ct.post_call_async,
   };
 }
 
@@ -346,6 +352,7 @@ export default function Admin() {
         pre_call_body_template: beautifyJson(d.pre_call_body_template.trim()) || null,
         pre_call_headers: beautifyJson(d.pre_call_headers.trim()) || null,
         pre_call_use_as_context: d.pre_call_use_as_context,
+        pre_call_async: d.pre_call_async,
 
         post_call_enabled: d.post_call_enabled,
         post_call_url: d.post_call_url.trim() || null,
@@ -353,6 +360,7 @@ export default function Admin() {
         post_call_headers: beautifyJson(d.post_call_headers.trim()) || null,
         post_call_body_template: beautifyJson(d.post_call_body_template.trim()) || null,
         post_call_send_full_payload: d.post_call_send_full_payload,
+        post_call_async: d.post_call_async,
       };
 
       if (editingCallTypeId === "new") {
@@ -1340,6 +1348,21 @@ function CallTypeForm({
               />
               Use the response as conversation context, alongside the knowledge base
             </label>
+            <label className="flex items-start gap-2 text-sm text-ink dark:text-ink-inverted">
+              <input
+                type="checkbox"
+                checked={draft.pre_call_async}
+                onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_async: e.target.checked }))}
+                className="mt-0.5 accent-accent"
+              />
+              <span>
+                Don&apos;t wait for this request (async)
+                <span className="mt-0.5 block text-xs text-ink-subtle">
+                  Start the meeting immediately. If context is enabled, copilot picks it up on the next
+                  cycle. Off (default) waits up to a few seconds so context exists before anyone joins.
+                </span>
+              </span>
+            </label>
             <p className="text-xs text-ink-subtle">
               Every request carries these headers automatically: X-Corella-App-Url, X-Corella-Meeting-Id,
               X-Corella-User-Id.
@@ -1412,6 +1435,21 @@ function CallTypeForm({
                 {"{{created_at}}"}, {"{{duration_seconds}}"}, or {"{{full_payload}}"} for everything at once.
               </p>
             )}
+            <label className="flex items-start gap-2 text-sm text-ink dark:text-ink-inverted">
+              <input
+                type="checkbox"
+                checked={draft.post_call_async}
+                onChange={(e) => setDraft((prev) => ({ ...prev, post_call_async: e.target.checked }))}
+                className="mt-0.5 accent-accent"
+              />
+              <span>
+                Don&apos;t wait for this request (async)
+                <span className="mt-0.5 block text-xs text-ink-subtle">
+                  Finish the report without waiting for this API. Off (default) sends it in the same
+                  worker step after the report is saved.
+                </span>
+              </span>
+            </label>
             <p className="text-xs text-ink-subtle">
               Every request carries these headers automatically: X-Corella-App-Url, X-Corella-Meeting-Id,
               X-Corella-User-Id.

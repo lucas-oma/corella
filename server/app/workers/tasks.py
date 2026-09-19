@@ -18,11 +18,19 @@ from app.core.config import get_settings
 from app.core.db import SessionLocal, engine, get_sync_db
 from app.models.cost import UsageKind
 from app.models.kb_document import KBDocument, KBDocumentStatus
-from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
+from app.models.meeting import (
+    ActionItem,
+    ActionItemStatus,
+    Channel,
+    Meeting,
+    MeetingStatus,
+    Speaker,
+    TranscriptSegment,
+)
 from app.models.user import User
 from app.models.voice_identity import VoiceIdentity
 from app.services.access import searchable_kb_keywords
-from app.services.admin.call_hooks import dispatch_post_call
+from app.services.admin.call_hooks import dispatch_post_call, dispatch_pre_call, record_hook_queue_failure
 from app.services.alignment.align import align
 from app.services.asr import deepgram
 from app.services.asr.keyword_prompt import keywords_to_initial_prompt
@@ -32,7 +40,7 @@ from app.services.asr.whisper import transcribe as whisper_transcribe
 from app.services.audio.mixing import read_wav_pcm, slice_pcm, write_wav
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import parse_json_response
-from app.services.copilot.report import ReportError
+from app.services.copilot.report import ReportError, ReportResult
 from app.services.copilot.report import generate_report as run_generate_report
 from app.services.diarization import events as diar_events
 from app.services.diarization.cluster import (
@@ -1031,5 +1039,77 @@ async def _generate_report_async(meeting_id: str) -> None:
         # need real summary/report data. dispatch_post_call is a no-op if
         # this meeting's call type has no post-call configured, and never
         # raises — a broken hook must never affect the meeting's own
-        # success.
+        # success. Async types queue a second task so this worker doesn't
+        # sit on the far-side timeout.
+        if meeting.call_type is not None and meeting.call_type.post_call_async:
+            try:
+                celery_app.send_task("corella.dispatch_post_call", args=[meeting_id])
+            except Exception:
+                logger.exception("Failed to queue post-call for meeting %s", meeting_id)
+                await record_hook_queue_failure(db, meeting, "post")
+                await db.commit()
+        else:
+            await dispatch_post_call(db, meeting, result)
+            await db.commit()
+
+
+@celery_app.task(name="corella.dispatch_pre_call")
+def dispatch_pre_call_task(meeting_id: str) -> None:
+    """Async pre-call: same dispatch as create_meeting's sync path, plus
+    writing Meeting.pre_call_context when that flag is on. Live copilot
+    re-reads the column each cycle, so a late response still becomes
+    context after the socket is already open.
+    """
+    try:
+        asyncio.run(_with_engine_cleanup(_dispatch_pre_call_async(meeting_id)))
+    except Exception:
+        logger.exception("dispatch_pre_call task failed for meeting %s", meeting_id)
+
+
+async def _dispatch_pre_call_async(meeting_id: str) -> None:
+    async with SessionLocal() as db:
+        meeting = await db.get(Meeting, UUID(meeting_id))
+        if meeting is None:
+            return
+        context = await dispatch_pre_call(db, meeting)
+        if meeting.call_type is not None and meeting.call_type.pre_call_use_as_context and context:
+            meeting.pre_call_context = context
+        await db.commit()
+
+
+@celery_app.task(name="corella.dispatch_post_call")
+def dispatch_post_call_task(meeting_id: str) -> None:
+    """Async post-call: rebuilds ReportResult from columns already
+    persisted by generate_report, then runs the same dispatch.
+    """
+    try:
+        asyncio.run(_with_engine_cleanup(_dispatch_post_call_async(meeting_id)))
+    except Exception:
+        logger.exception("dispatch_post_call task failed for meeting %s", meeting_id)
+
+
+async def _dispatch_post_call_async(meeting_id: str) -> None:
+    async with SessionLocal() as db:
+        meeting = await db.get(Meeting, UUID(meeting_id))
+        if meeting is None:
+            return
+        items = list(
+            await db.scalars(
+                select(ActionItem).where(
+                    ActionItem.meeting_id == meeting.id, ActionItem.status == ActionItemStatus.OPEN
+                )
+            )
+        )
+        result = ReportResult(
+            title=meeting.title,
+            summary=meeting.summary or "",
+            key_topics=meeting.key_topics or [],
+            sentiment=meeting.sentiment,
+            notable_quotes=meeting.notable_quotes or [],
+            coach_score=meeting.coach_score,
+            estimated_cost_usd=meeting.estimated_cost_usd,
+            action_items=items,
+            talk_ratio=None,
+        )
         await dispatch_post_call(db, meeting, result)
+        await db.commit()

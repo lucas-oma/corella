@@ -19,8 +19,18 @@ from app.services.admin.call_hooks import (
     dispatch_pre_call,
     render_pre_call_template,
     render_template,
+    request_error_message,
 )
 from app.services.copilot.report import ReportResult
+
+
+def test_request_error_message_explains_dns_failure():
+    msg = request_error_message(
+        httpx.ConnectError("[Errno -2] Name or service not known"),
+        "http://host.docker.internal:54321/functions/v1/corella-pre-call",
+    )
+    assert "host.docker.internal" in msg
+    assert "Cannot resolve hostname" in msg
 
 
 def _report(**overrides) -> ReportResult:
@@ -407,3 +417,195 @@ async def test_missing_secret_aborts_pre_call(db, make_user, monkeypatch):
 
     assert await dispatch_pre_call(db, meeting) is None
     assert _FakeAsyncClient.last_call is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pre_call_persists_redacted_success_log(db, make_user, monkeypatch):
+    from sqlalchemy import select
+
+    from app.models.call_type import CallType
+    from app.models.hook_log import HookLog
+
+    user = await make_user()
+    db.add(AppSecret(name="WEBHOOK_SECRET", value_encrypted=encrypt_secret("the-real-token")))
+    call_type = CallType(
+        name="Sales",
+        slug="sales-hook-log",
+        pre_call_enabled=True,
+        pre_call_url="https://example.com/lookup",
+        pre_call_headers_encrypted=encrypt_secret(
+            json.dumps(
+                {
+                    "Authorization": "Bearer the-real-token",
+                    "X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}",
+                    "X-Team": "growth",
+                }
+            )
+        ),
+    )
+    db.add(call_type)
+    await db.commit()
+    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    db.add(meeting)
+    await db.commit()
+    meeting = await db.get(Meeting, meeting.id, populate_existing=True)
+
+    _FakeAsyncClient.response = _FakeResponse(200, '{"ok": true}')
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    assert await dispatch_pre_call(db, meeting) == '{"ok": true}'
+    await db.commit()
+
+    logs = list(await db.scalars(select(HookLog).where(HookLog.meeting_id == meeting.id)))
+    assert len(logs) == 1
+    log = logs[0]
+    assert log.phase == "pre"
+    assert log.outcome == "success"
+    assert log.response_status == 200
+    assert log.ran_async is False
+    headers = json.loads(log.request_headers)
+    assert headers["Authorization"] == "••••"
+    assert headers["X-Corella-Webhook-Secret"] == "••••"
+    assert headers["X-Team"] == "growth"
+    assert "the-real-token" not in (log.request_headers or "")
+    assert "the-real-token" not in (log.response_body or "")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pre_call_persists_error_log(db, make_user, monkeypatch):
+    from sqlalchemy import select
+
+    from app.models.call_type import CallType
+    from app.models.hook_log import HookLog
+
+    user = await make_user()
+    call_type = CallType(
+        name="Sales", slug="sales-hook-log-err", pre_call_enabled=True, pre_call_url="https://example.com/down"
+    )
+    db.add(call_type)
+    await db.commit()
+    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    db.add(meeting)
+    await db.commit()
+    meeting = await db.get(Meeting, meeting.id, populate_existing=True)
+
+    _FakeAsyncClient.response = httpx.RequestError("connection refused")
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    assert await dispatch_pre_call(db, meeting) is None
+    await db.commit()
+
+    logs = list(await db.scalars(select(HookLog).where(HookLog.meeting_id == meeting.id)))
+    assert len(logs) == 1
+    assert logs[0].outcome == "error"
+    assert "Connection refused" in (logs[0].error or "")
+    assert "example.com/down" in (logs[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_missing_secret_is_logged_and_does_not_fire(db, make_user, monkeypatch):
+    from sqlalchemy import select
+
+    from app.models.call_type import CallType
+    from app.models.hook_log import HookLog
+
+    user = await make_user()
+    call_type = CallType(
+        name="Sales",
+        slug="sales-missing-secret-log",
+        pre_call_enabled=True,
+        pre_call_url="https://example.com/lookup",
+        pre_call_headers_encrypted=encrypt_secret(json.dumps({"Authorization": "{{secret.MISSING}}"})),
+    )
+    db.add(call_type)
+    await db.commit()
+    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    db.add(meeting)
+    await db.commit()
+    meeting = await db.get(Meeting, meeting.id, populate_existing=True)
+
+    _FakeAsyncClient.last_call = None
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    assert await dispatch_pre_call(db, meeting) is None
+    await db.commit()
+    logs = list(await db.scalars(select(HookLog).where(HookLog.meeting_id == meeting.id)))
+    assert len(logs) == 1
+    assert logs[0].outcome == "error"
+    assert "secret" in (logs[0].error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_hook_logs_endpoint_is_admin_only(app_client, db, make_user, auth_headers, monkeypatch):
+    from app.models.call_type import CallType
+    from app.models.user import UserRole
+
+    admin = await make_user(email="admin-hooks@example.com", role=UserRole.ADMIN)
+    owner = await make_user(email="owner-hooks@example.com")
+    call_type = CallType(
+        name="Sales", slug="sales-hook-logs-api", pre_call_enabled=True, pre_call_url="https://example.com/lookup"
+    )
+    db.add(call_type)
+    await db.commit()
+
+    _FakeAsyncClient.response = _FakeResponse(200, "fetched")
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    created = await app_client.post(
+        "/api/meetings",
+        json={"title": "Hooked", "call_type_id": str(call_type.id)},
+        headers=auth_headers(owner),
+    )
+    assert created.status_code == 201
+    meeting_id = created.json()["id"]
+
+    member_resp = await app_client.get(f"/api/meetings/{meeting_id}/hook-logs", headers=auth_headers(owner))
+    assert member_resp.status_code == 403
+
+    admin_resp = await app_client.get(f"/api/meetings/{meeting_id}/hook-logs", headers=auth_headers(admin))
+    assert admin_resp.status_code == 200
+    logs = admin_resp.json()
+    assert len(logs) == 1
+    assert logs[0]["phase"] == "pre"
+    assert logs[0]["outcome"] == "success"
+    assert logs[0]["response_body"] == "fetched"
+
+
+@pytest.mark.asyncio
+async def test_async_pre_call_is_queued_not_awaited(app_client, db, make_user, auth_headers, monkeypatch):
+    from app.models.call_type import CallType
+    from app.models.meeting import Meeting
+
+    sent: list[tuple] = []
+    monkeypatch.setattr(
+        "app.api.meetings.celery_app.send_task",
+        lambda name, args=None, **_kwargs: sent.append((name, args)),
+    )
+    _FakeAsyncClient.last_call = None
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    user = await make_user()
+    call_type = CallType(
+        name="Sales",
+        slug="sales-async-pre",
+        pre_call_enabled=True,
+        pre_call_url="https://example.com/lookup",
+        pre_call_use_as_context=True,
+        pre_call_async=True,
+    )
+    db.add(call_type)
+    await db.commit()
+
+    created = await app_client.post(
+        "/api/meetings",
+        json={"title": "Async pre", "call_type_id": str(call_type.id)},
+        headers=auth_headers(user),
+    )
+    assert created.status_code == 201
+    meeting_id = created.json()["id"]
+    assert sent == [("corella.dispatch_pre_call", [meeting_id])]
+    assert _FakeAsyncClient.last_call is None
+
+    meeting = await db.get(Meeting, meeting_id)
+    assert meeting is not None
+    assert meeting.pre_call_context is None

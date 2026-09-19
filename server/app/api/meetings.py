@@ -11,13 +11,15 @@ from app.api.deps import get_current_user, get_current_user_flexible, require_ad
 from app.core import storage
 from app.core.db import get_db
 from app.models.call_type import CallType
+from app.models.hook_log import HookLog
 from app.models.meeting import ActionItem, CopilotInsight, Meeting, MeetingStatus, TranscriptSegment
 from app.models.user import User, UserRole
 from app.schemas.copilot_insight import CopilotInsightRead
+from app.schemas.hook_log import HookLogRead
 from app.schemas.meeting import GroupMeetingRead, MeetingCreate, MeetingRead, MeetingSearchResult
 from app.schemas.report import ActionItemRead, ActionItemUpdate, ReportResponse
 from app.schemas.transcript import TranscriptSegmentRead
-from app.services.admin.call_hooks import dispatch_pre_call
+from app.services.admin.call_hooks import dispatch_pre_call, record_hook_queue_failure
 from app.services.copilot.report import ReportError, generate_report
 from app.services.embeddings.qdrant_store import delete_meeting_chunks
 from app.services.embeddings.qdrant_store import search_meetings as qdrant_search_meetings
@@ -137,17 +139,24 @@ async def create_meeting(
     meeting.owner = current_user
     meeting.call_type = call_type
 
-    # "Before the call starts" — fired synchronously (bounded by
-    # settings.pre_call_timeout_seconds) so any fetched context actually
-    # exists before the conversation begins, whether this meeting was
-    # just created by a browser session or by an API key. A no-op if this
-    # call type has no pre-call configured; never raises on failure (see
-    # dispatch_pre_call's own docstring) — this response is never delayed
-    # or broken by an external system being down.
-    context = await dispatch_pre_call(db, meeting)
-    if call_type is not None and call_type.pre_call_use_as_context and context:
-        meeting.pre_call_context = context
-        await db.commit()
+    # Pre-call: default sync so context exists before the 201 (and the
+    # live socket) — bounded by settings.pre_call_timeout_seconds. Async
+    # queues the same dispatch on the worker so create returns immediately;
+    # live copilot re-reads pre_call_context each cycle. A no-op if this
+    # call type has no pre-call configured; never raises on failure.
+    if call_type is not None and call_type.pre_call_enabled and call_type.pre_call_url:
+        if call_type.pre_call_async:
+            try:
+                celery_app.send_task("corella.dispatch_pre_call", args=[str(meeting.id)])
+            except Exception:
+                logger.exception("Failed to queue pre-call for meeting %s", meeting.id)
+                await record_hook_queue_failure(db, meeting, "pre")
+                await db.commit()
+        else:
+            context = await dispatch_pre_call(db, meeting)
+            if call_type.pre_call_use_as_context and context:
+                meeting.pre_call_context = context
+            await db.commit()
 
     return meeting
 
@@ -276,6 +285,25 @@ async def get_meeting(
     db: AsyncSession = Depends(get_db),
 ) -> Meeting:
     return await _get_group_visible_meeting(meeting_id, current_user, db)
+
+
+@router.get("/{meeting_id}/hook-logs", response_model=list[HookLogRead])
+async def list_meeting_hook_logs(
+    meeting_id: UUID,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[HookLog]:
+    """Admin-only redacted pre/post hook attempts for this meeting.
+    Empty when no call-type hook was involved. Regular users get 403 —
+    these never ride along on MeetingRead.
+    """
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    result = await db.scalars(
+        select(HookLog).where(HookLog.meeting_id == meeting_id).order_by(HookLog.created_at)
+    )
+    return list(result)
 
 
 @router.post("/{meeting_id}/audio", response_model=MeetingRead)

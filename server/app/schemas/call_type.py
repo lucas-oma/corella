@@ -36,6 +36,7 @@ class CallTypeRead(BaseModel):
     pre_call_headers: str | None = None
     pre_call_body_template: str | None
     pre_call_use_as_context: bool
+    pre_call_async: bool
 
     post_call_enabled: bool
     post_call_url: str | None
@@ -43,6 +44,7 @@ class CallTypeRead(BaseModel):
     post_call_headers: str | None = None
     post_call_body_template: str | None
     post_call_send_full_payload: bool
+    post_call_async: bool
 
 
 class CallTypeCreate(BaseModel):
@@ -60,6 +62,7 @@ class CallTypeCreate(BaseModel):
     pre_call_headers: str | None = None
     pre_call_body_template: str | None = None
     pre_call_use_as_context: bool = False
+    pre_call_async: bool = False
 
     post_call_enabled: bool = False
     post_call_url: str | None = None
@@ -67,6 +70,7 @@ class CallTypeCreate(BaseModel):
     post_call_headers: str | None = None
     post_call_body_template: str | None = None
     post_call_send_full_payload: bool = False
+    post_call_async: bool = False
 
 
 class CallTypeUpdate(BaseModel):
@@ -85,6 +89,7 @@ class CallTypeUpdate(BaseModel):
     pre_call_headers: str | None = None
     pre_call_body_template: str | None = None
     pre_call_use_as_context: bool | None = None
+    pre_call_async: bool | None = None
 
     post_call_enabled: bool | None = None
     post_call_url: str | None = None
@@ -92,3 +97,4 @@ class CallTypeUpdate(BaseModel):
     post_call_headers: str | None = None
     post_call_body_template: str | None = None
     post_call_send_full_payload: bool | None = None
+    post_call_async: bool | None = None
