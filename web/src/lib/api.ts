@@ -126,14 +126,23 @@ export interface CallTypeConfig {
   pre_call_enabled: boolean;
   pre_call_url: string | null;
   pre_call_method: string;
+  pre_call_headers: string | null;
   pre_call_body_template: string | null;
   pre_call_use_as_context: boolean;
 
   post_call_enabled: boolean;
   post_call_url: string | null;
   post_call_method: string;
+  post_call_headers: string | null;
   post_call_body_template: string | null;
   post_call_send_full_payload: boolean;
+}
+
+export interface AppSecret {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Meeting {
@@ -450,17 +459,15 @@ export const api = {
     request<CostSummary>(`/api/admin/costs?period=${period}`),
   getCallTypes: () => request<CallTypeOption[]>("/api/call-types"),
   adminListCallTypes: () => request<CallTypeConfig[]>("/api/admin/call-types"),
-  adminCreateCallType: (
-    payload: Partial<CallTypeConfig> & {
-      name: string;
-      slug: string;
-      pre_call_headers?: string;
-      post_call_headers?: string;
-    },
-  ) => request<CallTypeConfig>("/api/admin/call-types", { method: "POST", body: JSON.stringify(payload) }),
-  adminUpdateCallType: (
-    id: string,
-    payload: Partial<CallTypeConfig> & { pre_call_headers?: string; post_call_headers?: string },
-  ) => request<CallTypeConfig>(`/api/admin/call-types/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  adminCreateCallType: (payload: Partial<CallTypeConfig> & { name: string; slug: string }) =>
+    request<CallTypeConfig>("/api/admin/call-types", { method: "POST", body: JSON.stringify(payload) }),
+  adminUpdateCallType: (id: string, payload: Partial<CallTypeConfig>) =>
+    request<CallTypeConfig>(`/api/admin/call-types/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   adminDeleteCallType: (id: string) => request<void>(`/api/admin/call-types/${id}`, { method: "DELETE" }),
+  adminListSecrets: () => request<AppSecret[]>("/api/admin/secrets"),
+  adminCreateSecret: (payload: { name: string; value: string }) =>
+    request<AppSecret>("/api/admin/secrets", { method: "POST", body: JSON.stringify(payload) }),
+  adminUpdateSecret: (id: string, payload: { name?: string; value?: string }) =>
+    request<AppSecret>(`/api/admin/secrets/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  adminDeleteSecret: (id: string) => request<void>(`/api/admin/secrets/${id}`, { method: "DELETE" }),
 };

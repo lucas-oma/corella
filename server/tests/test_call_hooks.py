@@ -12,6 +12,7 @@ import pytest
 
 from app.core.config import get_settings
 from app.core.security import encrypt_secret
+from app.models.app_secret import AppSecret
 from app.models.meeting import ActionItemStatus, Channel, Meeting, MeetingStatus
 from app.services.admin.call_hooks import (
     build_full_payload,
@@ -345,3 +346,64 @@ async def test_mandatory_headers_cannot_be_overridden_by_custom_headers(db, make
     assert sent_headers["X-Corella-App-Url"] == get_settings().public_app_url
     assert sent_headers["X-Corella-User-Id"] == str(user.id)
     assert sent_headers["X-Custom"] == "1"  # the admin's own header still gets through
+
+
+@pytest.mark.asyncio
+async def test_secret_placeholders_in_headers_are_interpolated(db, make_user, monkeypatch):
+    from app.models.call_type import CallType
+
+    user = await make_user()
+    db.add(AppSecret(name="WEBHOOK_SECRET", value_encrypted=encrypt_secret("the-real-token")))
+    call_type = CallType(
+        name="Sales",
+        slug="sales-secret-headers",
+        pre_call_enabled=True,
+        pre_call_url="https://example.com/lookup",
+        pre_call_headers_encrypted=encrypt_secret(
+            json.dumps({"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}", "X-Team": "growth"})
+        ),
+    )
+    db.add(call_type)
+    await db.commit()
+    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    db.add(meeting)
+    await db.commit()
+    meeting = await db.get(Meeting, meeting.id)
+
+    _FakeAsyncClient.response = _FakeResponse(200, "ok")
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    await dispatch_pre_call(db, meeting)
+    sent_headers = _FakeAsyncClient.last_call["headers"]
+    assert sent_headers["X-Corella-Webhook-Secret"] == "the-real-token"
+    assert sent_headers["X-Team"] == "growth"
+    assert "{{secret." not in sent_headers["X-Corella-Webhook-Secret"]
+
+
+@pytest.mark.asyncio
+async def test_missing_secret_aborts_pre_call(db, make_user, monkeypatch):
+    from app.models.call_type import CallType
+
+    user = await make_user()
+    call_type = CallType(
+        name="Sales",
+        slug="sales-missing-secret",
+        pre_call_enabled=True,
+        pre_call_url="https://example.com/lookup",
+        pre_call_headers_encrypted=encrypt_secret(
+            json.dumps({"X-Corella-Webhook-Secret": "{{secret.MISSING}}"})
+        ),
+    )
+    db.add(call_type)
+    await db.commit()
+    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    db.add(meeting)
+    await db.commit()
+    meeting = await db.get(Meeting, meeting.id)
+
+    _FakeAsyncClient.last_call = None
+    _FakeAsyncClient.response = _FakeResponse(200, "ok")
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    assert await dispatch_pre_call(db, meeting) is None
+    assert _FakeAsyncClient.last_call is None

@@ -109,3 +109,30 @@ async def test_public_call_type_listing_omits_admin_only_fields(app_client, db, 
     assert listing.status_code == 200
     row = listing.json()[0]
     assert set(row.keys()) == {"id", "name", "slug", "is_default"}
+
+
+@pytest.mark.asyncio
+async def test_admin_call_type_listing_returns_header_templates_not_resolved_values(
+    app_client, make_user, auth_headers
+):
+    admin = await make_user(email="admin@example.com", role=UserRole.ADMIN)
+    headers = auth_headers(admin)
+    template = '{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}'
+    created = await app_client.post(
+        "/api/admin/call-types",
+        json={
+            "name": "Sales call",
+            "slug": "sales-headers",
+            "pre_call_enabled": True,
+            "pre_call_url": "https://example.com/lookup",
+            "pre_call_headers": template,
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201
+    assert created.json()["pre_call_headers"] == template
+    assert "super-secret" not in created.text
+
+    listing = await app_client.get("/api/admin/call-types", headers=headers)
+    row = next(ct for ct in listing.json() if ct["slug"] == "sales-headers")
+    assert row["pre_call_headers"] == template

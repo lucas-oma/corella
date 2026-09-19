@@ -1,3 +1,5 @@
+import json
+import logging
 from typing import Literal
 from uuid import UUID
 
@@ -7,15 +9,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
 from app.core.db import get_db
-from app.core.security import encrypt_secret, hash_password
+from app.core.security import decrypt_secret, encrypt_secret, hash_password
+from app.models.app_secret import AppSecret
 from app.models.call_type import CallType
 from app.models.group import Group
 from app.models.user import User
+from app.schemas.app_secret import AppSecretCreate, AppSecretRead, AppSecretUpdate
 from app.schemas.call_type import CallTypeCreate, CallTypeRead, CallTypeUpdate
 from app.schemas.cost import CostSummaryRead, DailyCostRead, ProviderCostBreakdownRead, UserCostBreakdownRead
 from app.schemas.group import GroupCreate, GroupRead
 from app.schemas.user import AdminUserCreate, AdminUserUpdate, UserRead
 from app.services.admin.costs import get_cost_summary
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
@@ -132,14 +138,116 @@ async def _unset_other_defaults(db: AsyncSession, exclude_id: UUID | None) -> No
         other.is_default = False
 
 
-@router.get("/call-types", response_model=list[CallTypeRead])
-async def list_call_types(db: AsyncSession = Depends(get_db)) -> list[CallType]:
-    result = await db.scalars(select(CallType).order_by(CallType.created_at))
+def _decrypt_headers(encrypted: str | None) -> str | None:
+    if not encrypted:
+        return None
+    try:
+        return decrypt_secret(encrypted)
+    except Exception:
+        logger.exception("Failed to decrypt call-type headers")
+        return None
+
+
+def _headers_for_storage(raw: str | None) -> str | None:
+    """Validate admin-authored header JSON (object) and encrypt the
+    template as written. Empty/None clears. Values should be
+    {{secret.NAME}} refs; literal tokens still work but will be visible
+    to admins on the next GET."""
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Headers must be valid JSON: {exc}",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Headers must be a JSON object",
+        )
+    return encrypt_secret(text)
+
+
+def _to_call_type_read(call_type: CallType) -> CallTypeRead:
+    return CallTypeRead.model_validate(call_type).model_copy(
+        update={
+            "pre_call_headers": _decrypt_headers(call_type.pre_call_headers_encrypted),
+            "post_call_headers": _decrypt_headers(call_type.post_call_headers_encrypted),
+        }
+    )
+
+
+async def _require_unique_secret_name(
+    db: AsyncSession, name: str, exclude_id: UUID | None = None
+) -> None:
+    query = select(AppSecret).where(AppSecret.name == name)
+    if exclude_id is not None:
+        query = query.where(AppSecret.id != exclude_id)
+    existing = await db.scalar(query)
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A secret with this name already exists",
+        )
+
+
+@router.get("/secrets", response_model=list[AppSecretRead])
+async def list_secrets(db: AsyncSession = Depends(get_db)) -> list[AppSecret]:
+    result = await db.scalars(select(AppSecret).order_by(AppSecret.name))
     return list(result)
 
 
+@router.post("/secrets", response_model=AppSecretRead, status_code=status.HTTP_201_CREATED)
+async def create_secret(payload: AppSecretCreate, db: AsyncSession = Depends(get_db)) -> AppSecret:
+    await _require_unique_secret_name(db, payload.name)
+    secret = AppSecret(name=payload.name, value_encrypted=encrypt_secret(payload.value))
+    db.add(secret)
+    await db.commit()
+    await db.refresh(secret)
+    return secret
+
+
+@router.patch("/secrets/{secret_id}", response_model=AppSecretRead)
+async def update_secret(
+    secret_id: UUID, payload: AppSecretUpdate, db: AsyncSession = Depends(get_db)
+) -> AppSecret:
+    secret = await db.get(AppSecret, secret_id)
+    if secret is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
+
+    if "name" in payload.model_fields_set and payload.name is not None and payload.name != secret.name:
+        await _require_unique_secret_name(db, payload.name, exclude_id=secret.id)
+        secret.name = payload.name
+    if "value" in payload.model_fields_set and payload.value is not None:
+        secret.value_encrypted = encrypt_secret(payload.value)
+
+    await db.commit()
+    await db.refresh(secret)
+    return secret
+
+
+@router.delete("/secrets/{secret_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_secret(secret_id: UUID, db: AsyncSession = Depends(get_db)) -> None:
+    secret = await db.get(AppSecret, secret_id)
+    if secret is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
+    await db.delete(secret)
+    await db.commit()
+
+
+@router.get("/call-types", response_model=list[CallTypeRead])
+async def list_call_types(db: AsyncSession = Depends(get_db)) -> list[CallTypeRead]:
+    result = await db.scalars(select(CallType).order_by(CallType.created_at))
+    return [_to_call_type_read(ct) for ct in result]
+
+
 @router.post("/call-types", response_model=CallTypeRead, status_code=status.HTTP_201_CREATED)
-async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(get_db)) -> CallType:
+async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(get_db)) -> CallTypeRead:
     existing = await db.scalar(select(CallType).where(CallType.slug == payload.slug))
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A call type with this slug already exists")
@@ -152,13 +260,13 @@ async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(g
         pre_call_enabled=payload.pre_call_enabled,
         pre_call_url=payload.pre_call_url,
         pre_call_method=payload.pre_call_method,
-        pre_call_headers_encrypted=encrypt_secret(payload.pre_call_headers) if payload.pre_call_headers else None,
+        pre_call_headers_encrypted=_headers_for_storage(payload.pre_call_headers),
         pre_call_body_template=payload.pre_call_body_template,
         pre_call_use_as_context=payload.pre_call_use_as_context,
         post_call_enabled=payload.post_call_enabled,
         post_call_url=payload.post_call_url,
         post_call_method=payload.post_call_method,
-        post_call_headers_encrypted=encrypt_secret(payload.post_call_headers) if payload.post_call_headers else None,
+        post_call_headers_encrypted=_headers_for_storage(payload.post_call_headers),
         post_call_body_template=payload.post_call_body_template,
         post_call_send_full_payload=payload.post_call_send_full_payload,
     )
@@ -168,11 +276,13 @@ async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(g
         await _unset_other_defaults(db, call_type.id)
     await db.commit()
     await db.refresh(call_type)
-    return call_type
+    return _to_call_type_read(call_type)
 
 
 @router.patch("/call-types/{call_type_id}", response_model=CallTypeRead)
-async def update_call_type(call_type_id: UUID, payload: CallTypeUpdate, db: AsyncSession = Depends(get_db)) -> CallType:
+async def update_call_type(
+    call_type_id: UUID, payload: CallTypeUpdate, db: AsyncSession = Depends(get_db)
+) -> CallTypeRead:
     call_type = await db.get(CallType, call_type_id)
     if call_type is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call type not found")
@@ -184,11 +294,9 @@ async def update_call_type(call_type_id: UUID, payload: CallTypeUpdate, db: Asyn
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A call type with this slug already exists")
 
     if "pre_call_headers" in fields:
-        headers = fields.pop("pre_call_headers")
-        call_type.pre_call_headers_encrypted = encrypt_secret(headers) if headers else None
+        call_type.pre_call_headers_encrypted = _headers_for_storage(fields.pop("pre_call_headers"))
     if "post_call_headers" in fields:
-        headers = fields.pop("post_call_headers")
-        call_type.post_call_headers_encrypted = encrypt_secret(headers) if headers else None
+        call_type.post_call_headers_encrypted = _headers_for_storage(fields.pop("post_call_headers"))
 
     for field, value in fields.items():
         setattr(call_type, field, value)
@@ -198,7 +306,7 @@ async def update_call_type(call_type_id: UUID, payload: CallTypeUpdate, db: Asyn
 
     await db.commit()
     await db.refresh(call_type)
-    return call_type
+    return _to_call_type_read(call_type)
 
 
 @router.delete("/call-types/{call_type_id}", status_code=status.HTTP_204_NO_CONTENT)

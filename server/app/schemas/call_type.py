@@ -18,9 +18,9 @@ class CallTypeOption(BaseModel):
 
 class CallTypeRead(BaseModel):
     """Admin-only full shape (GET/POST/PATCH /api/admin/call-types).
-    pre_call_headers/post_call_headers are deliberately absent —
-    write-only, same secret-handling convention as every other credential
-    in this app."""
+    Header fields are the stored templates (often {{secret.NAME}} refs) —
+    decrypted for the admin UI. Real secret *values* live in app_secrets
+    and are never returned."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -33,12 +33,14 @@ class CallTypeRead(BaseModel):
     pre_call_enabled: bool
     pre_call_url: str | None
     pre_call_method: str
+    pre_call_headers: str | None = None
     pre_call_body_template: str | None
     pre_call_use_as_context: bool
 
     post_call_enabled: bool
     post_call_url: str | None
     post_call_method: str
+    post_call_headers: str | None = None
     post_call_body_template: str | None
     post_call_send_full_payload: bool
 
@@ -52,8 +54,9 @@ class CallTypeCreate(BaseModel):
     pre_call_enabled: bool = False
     pre_call_url: str | None = None
     pre_call_method: str = "GET"
-    # Raw JSON object text, e.g. '{"Authorization": "Bearer ..."}' —
-    # encrypted at rest (app.core.security.encrypt_secret), never returned.
+    # Raw JSON object text, e.g. '{"Authorization": "Bearer {{secret.NAME}}"}'
+    # — encrypted at rest; the template (not resolved values) is returned
+    # on GET so admins can see which secrets a hook uses.
     pre_call_headers: str | None = None
     pre_call_body_template: str | None = None
     pre_call_use_as_context: bool = False

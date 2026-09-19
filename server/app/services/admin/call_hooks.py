@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from uuid import UUID
 
 import httpx
@@ -8,12 +9,62 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.security import decrypt_secret
+from app.models.app_secret import AppSecret
 from app.models.meeting import Channel, CopilotInsight, Meeting, TranscriptSegment
 from app.services.copilot.report import ReportResult
 
 logger = logging.getLogger(__name__)
 
 _LABELS = {Channel.ME: "Me", Channel.THEM: "Them"}
+
+# Matches {{secret.NAME}} — NAME is the same character class
+# app/schemas/app_secret.py:SECRET_NAME_RE accepts.
+_SECRET_REF = re.compile(r"\{\{secret\.([A-Za-z][A-Za-z0-9_]*)\}\}")
+
+
+async def resolve_custom_headers(db: AsyncSession, encrypted: str | None) -> dict[str, str] | None:
+    """Decrypt stored header JSON and replace {{secret.NAME}} tokens with
+    the matching AppSecret value. Returns an empty dict when nothing is
+    configured. Returns None (caller should abort the hook) when the blob
+    is unreadable or a referenced secret is missing — sending a request
+    without the auth header would look like success and leak a 401 to
+    the far side.
+    """
+    if not encrypted:
+        return {}
+    try:
+        parsed = json.loads(decrypt_secret(encrypted))
+    except Exception:
+        logger.exception("Failed to decrypt/parse call-type headers")
+        return None
+    if not isinstance(parsed, dict):
+        logger.warning("Call-type headers were not a JSON object")
+        return None
+
+    names: set[str] = set()
+    for value in parsed.values():
+        if isinstance(value, str):
+            names.update(_SECRET_REF.findall(value))
+
+    values: dict[str, str] = {}
+    if names:
+        rows = await db.scalars(select(AppSecret).where(AppSecret.name.in_(names)))
+        for secret in rows:
+            try:
+                values[secret.name] = decrypt_secret(secret.value_encrypted)
+            except Exception:
+                logger.exception("Failed to decrypt app secret %s", secret.name)
+                return None
+        missing = names - values.keys()
+        if missing:
+            logger.warning("Call-type headers reference unknown secrets: %s", ", ".join(sorted(missing)))
+            return None
+
+    resolved: dict[str, str] = {}
+    for key, value in parsed.items():
+        text = value if isinstance(value, str) else str(value)
+        resolved[str(key)] = _SECRET_REF.sub(lambda match: values[match.group(1)], text)
+    return resolved
 
 
 def _mandatory_headers(meeting_id: UUID, owner_id: UUID) -> dict[str, str]:
@@ -178,14 +229,11 @@ async def dispatch_pre_call(db: AsyncSession, meeting: Meeting) -> str | None:
         return None
 
     settings = get_settings()
-    headers: dict[str, str] = {}
-    if call_type.pre_call_headers_encrypted:
-        try:
-            headers.update(json.loads(decrypt_secret(call_type.pre_call_headers_encrypted)))
-        except Exception:
-            logger.exception("Pre-call for meeting %s: failed to decrypt/parse headers", meeting.id)
-            return None
-    headers.update(_mandatory_headers(meeting.id, meeting.owner_id))
+    custom = await resolve_custom_headers(db, call_type.pre_call_headers_encrypted)
+    if custom is None:
+        logger.warning("Pre-call for meeting %s: headers could not be resolved", meeting.id)
+        return None
+    headers = {**custom, **_mandatory_headers(meeting.id, meeting.owner_id)}
 
     body: bytes | None = None
     if call_type.pre_call_body_template:
@@ -244,14 +292,11 @@ async def dispatch_post_call(db: AsyncSession, meeting: Meeting, report: ReportR
         logger.exception("Post-call for meeting %s: failed to build body", meeting.id)
         return
 
-    headers = {"Content-Type": "application/json"}
-    if call_type.post_call_headers_encrypted:
-        try:
-            headers.update(json.loads(decrypt_secret(call_type.post_call_headers_encrypted)))
-        except Exception:
-            logger.exception("Post-call for meeting %s: failed to decrypt/parse headers", meeting.id)
-            return
-    headers.update(_mandatory_headers(meeting.id, meeting.owner_id))
+    custom = await resolve_custom_headers(db, call_type.post_call_headers_encrypted)
+    if custom is None:
+        logger.warning("Post-call for meeting %s: headers could not be resolved", meeting.id)
+        return
+    headers = {"Content-Type": "application/json", **custom, **_mandatory_headers(meeting.id, meeting.owner_id)}
 
     try:
         async with httpx.AsyncClient(timeout=settings.post_call_timeout_seconds) as client:
