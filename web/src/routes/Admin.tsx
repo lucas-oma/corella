@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import AppShell from "@/components/AppShell";
+import JsonTemplateField, { beautifyJson } from "@/components/JsonTemplateField";
 import {
   ApiError,
   api,
@@ -90,15 +91,15 @@ function draftFromCallType(ct: CallTypeConfig): CallTypeDraft {
     pre_call_enabled: ct.pre_call_enabled,
     pre_call_url: ct.pre_call_url ?? "",
     pre_call_method: ct.pre_call_method,
-    pre_call_headers: ct.pre_call_headers ?? "",
-    pre_call_body_template: ct.pre_call_body_template ?? "",
+    pre_call_headers: beautifyJson(ct.pre_call_headers ?? ""),
+    pre_call_body_template: beautifyJson(ct.pre_call_body_template ?? ""),
     pre_call_use_as_context: ct.pre_call_use_as_context,
 
     post_call_enabled: ct.post_call_enabled,
     post_call_url: ct.post_call_url ?? "",
     post_call_method: ct.post_call_method,
-    post_call_headers: ct.post_call_headers ?? "",
-    post_call_body_template: ct.post_call_body_template ?? "",
+    post_call_headers: beautifyJson(ct.post_call_headers ?? ""),
+    post_call_body_template: beautifyJson(ct.post_call_body_template ?? ""),
     post_call_send_full_payload: ct.post_call_send_full_payload,
   };
 }
@@ -145,7 +146,13 @@ export default function Admin() {
   const [costs, setCosts] = useState<CostSummary | null>(null);
   const [costPeriod, setCostPeriod] = useState<CostPeriod>("30d");
   const [callTypes, setCallTypes] = useState<CallTypeConfig[] | null>(null);
-  const [secrets, setSecrets] = useState<AppSecret[]>([]);
+  const [secrets, setSecrets] = useState<AppSecret[] | null>(null);
+  const [newSecretName, setNewSecretName] = useState("");
+  const [newSecretValue, setNewSecretValue] = useState("");
+  const [creatingSecret, setCreatingSecret] = useState(false);
+  const [editingSecretId, setEditingSecretId] = useState<string | null>(null);
+  const [secretDraftName, setSecretDraftName] = useState("");
+  const [secretDraftValue, setSecretDraftValue] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -336,15 +343,15 @@ export default function Admin() {
         pre_call_enabled: d.pre_call_enabled,
         pre_call_url: d.pre_call_url.trim() || null,
         pre_call_method: d.pre_call_method,
-        pre_call_body_template: d.pre_call_body_template.trim() || null,
-        pre_call_headers: d.pre_call_headers.trim() || null,
+        pre_call_body_template: beautifyJson(d.pre_call_body_template.trim()) || null,
+        pre_call_headers: beautifyJson(d.pre_call_headers.trim()) || null,
         pre_call_use_as_context: d.pre_call_use_as_context,
 
         post_call_enabled: d.post_call_enabled,
         post_call_url: d.post_call_url.trim() || null,
         post_call_method: d.post_call_method,
-        post_call_headers: d.post_call_headers.trim() || null,
-        post_call_body_template: d.post_call_body_template.trim() || null,
+        post_call_headers: beautifyJson(d.post_call_headers.trim()) || null,
+        post_call_body_template: beautifyJson(d.post_call_body_template.trim()) || null,
         post_call_send_full_payload: d.post_call_send_full_payload,
       };
 
@@ -386,11 +393,84 @@ export default function Admin() {
     }
   }
 
+  async function onCreateSecret() {
+    const name = newSecretName.trim();
+    if (!name || !newSecretValue) return;
+    setError(null);
+    setCreatingSecret(true);
+    try {
+      const created = await api.adminCreateSecret({ name, value: newSecretValue });
+      setSecrets((prev) => [...(prev ?? []), created].sort((a, b) => a.name.localeCompare(b.name)));
+      setNewSecretName("");
+      setNewSecretValue("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't create secret");
+    } finally {
+      setCreatingSecret(false);
+    }
+  }
+
+  function onEditSecret(secret: AppSecret) {
+    setError(null);
+    setEditingSecretId(secret.id);
+    setSecretDraftName(secret.name);
+    setSecretDraftValue("");
+  }
+
+  async function onSaveSecret(secret: AppSecret) {
+    const name = secretDraftName.trim();
+    if (!name) return;
+    const payload: { name?: string; value?: string } = {};
+    if (name !== secret.name) payload.name = name;
+    if (secretDraftValue) payload.value = secretDraftValue;
+    if (!payload.name && !payload.value) {
+      setEditingSecretId(null);
+      return;
+    }
+    setError(null);
+    setBusy(secret.id);
+    try {
+      const updated = await api.adminUpdateSecret(secret.id, payload);
+      setSecrets(
+        (prev) =>
+          prev?.map((row) => (row.id === updated.id ? updated : row)).sort((a, b) => a.name.localeCompare(b.name)) ??
+          null,
+      );
+      setEditingSecretId(null);
+      setSecretDraftValue("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't update secret");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onDeleteSecret(secret: AppSecret) {
+    const ok = await confirm({
+      title: `Delete "${secret.name}"?`,
+      description: `Call-type headers that use {{secret.${secret.name}}} will stop resolving until you point them at another secret.`,
+      confirmLabel: "Delete secret",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setError(null);
+    setBusy(secret.id);
+    try {
+      await api.adminDeleteSecret(secret.id);
+      setSecrets((prev) => prev?.filter((row) => row.id !== secret.id) ?? null);
+      if (editingSecretId === secret.id) setEditingSecretId(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't delete secret");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <AppShell>
       <div className="mb-8">
         <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">Admin</h1>
-        <p className="mt-1 text-sm text-ink-muted">Accounts, groups, call types, and spend.</p>
+        <p className="mt-1 text-sm text-ink-muted">Accounts, groups, secrets, call types, and spend.</p>
       </div>
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
@@ -674,11 +754,115 @@ export default function Admin() {
       </section>
 
       <section className="card mt-6 p-6">
+        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Secrets</h2>
+        <p className="mt-1 text-sm text-ink-muted">
+          Named values for call-type pre/post headers. The name is visible on the type; the value
+          is stored encrypted and never shown again. Reference as{" "}
+          <code className="text-[11px]">{"{{secret.NAME}}"}</code>.
+        </p>
+
+        <form
+          autoComplete="off"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onCreateSecret();
+          }}
+          className="mb-4 mt-5 flex flex-wrap items-center gap-2"
+        >
+          <SecretNameField
+            value={newSecretName}
+            onChange={setNewSecretName}
+            placeholder="NAME, e.g. WEBHOOK_SECRET"
+          />
+          <SecretValueField value={newSecretValue} onChange={setNewSecretValue} placeholder="Value" />
+          <button
+            type="submit"
+            disabled={creatingSecret || !newSecretName.trim() || !newSecretValue}
+            className="btn-secondary shrink-0"
+          >
+            {creatingSecret ? "Saving…" : "Add secret"}
+          </button>
+        </form>
+
+        {secrets === null && <p className="text-sm text-ink-muted">Loading…</p>}
+        {secrets?.length === 0 && <p className="text-sm text-ink-muted">No secrets yet.</p>}
+        {secrets && secrets.length > 0 && (
+          <ul className="divide-y divide-border dark:divide-border-dark">
+            {secrets.map((secret) => (
+              <li key={secret.id} className="py-2.5">
+                {editingSecretId === secret.id ? (
+                  <form
+                    autoComplete="off"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      onSaveSecret(secret);
+                    }}
+                    className="space-y-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <SecretNameField value={secretDraftName} onChange={setSecretDraftName} />
+                      <SecretValueField
+                        value={secretDraftValue}
+                        onChange={setSecretDraftValue}
+                        placeholder="New value — leave blank to keep"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="submit"
+                        disabled={busy === secret.id || !secretDraftName.trim()}
+                        className="btn-secondary"
+                      >
+                        {busy === secret.id ? "Saving…" : "Save"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingSecretId(null)}
+                        className="text-xs text-ink-subtle"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm text-ink dark:text-ink-inverted">{secret.name}</p>
+                      <p className="text-xs text-ink-subtle">
+                        <code>{`{{secret.${secret.name}}}`}</code>
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => onEditSecret(secret)}
+                        className="text-xs text-accent hover:underline"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteSecret(secret)}
+                        disabled={busy === secret.id}
+                        className="text-xs text-ink-subtle hover:text-status-danger"
+                      >
+                        {busy === secret.id ? "…" : "Delete"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="card mt-6 p-6">
         <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Call types</h2>
         <p className="mt-1 text-sm text-ink-muted">
           What steers the post-call report&apos;s focus, and optional APIs fired before a call of
-          this type starts and after it finishes automatic processing. Put tokens in Settings →
-          Secrets and reference them in headers as {"{{secret.NAME}}"}.
+          this type starts and after it finishes automatic processing. Put tokens in Secrets above
+          and reference them in headers as {"{{secret.NAME}}"}.
         </p>
 
         <ul className="mt-5 divide-y divide-border dark:divide-border-dark">
@@ -693,7 +877,7 @@ export default function Admin() {
                   onSave={onSaveCallType}
                   onCancel={() => setEditingCallTypeId(null)}
                   saving={busy === "call-type-save"}
-                  secrets={secrets}
+                  secrets={secrets ?? []}
                 />
               ) : (
                 <div className="flex items-center justify-between">
@@ -739,7 +923,7 @@ export default function Admin() {
               onSave={onSaveCallType}
               onCancel={() => setEditingCallTypeId(null)}
               saving={busy === "call-type-save"}
-              secrets={secrets}
+              secrets={secrets ?? []}
             />
           ) : (
             <button onClick={onNewCallType} className="btn-secondary">
@@ -936,11 +1120,106 @@ export default function Admin() {
  * the Call types section above (new-row create, and expand-to-edit on an
  * existing row), same pattern as Settings.tsx's "AI models in use" inline
  * edit forms. */
+const SECRET_FIELD_GUARD = {
+  autoComplete: "off" as const,
+  autoCorrect: "off" as const,
+  autoCapitalize: "off" as const,
+  spellCheck: false,
+  // Chrome/1Password treat type=password + a neighboring text field as a
+  // login form and fill saved email/password. Keep type=text and mask in CSS.
+  "data-1p-ignore": true,
+  "data-lpignore": "true",
+  "data-form-type": "other",
+};
+
+function SecretNameField({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <input
+      {...SECRET_FIELD_GUARD}
+      type="text"
+      name="corella-secret-name"
+      placeholder={placeholder}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="field min-w-48 flex-1 text-sm"
+    />
+  );
+}
+
+function SecretValueField({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="relative min-w-48 flex-1">
+      <input
+        {...SECRET_FIELD_GUARD}
+        type="text"
+        name="corella-secret-value"
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={`field w-full pr-10 text-sm ${visible ? "" : "[-webkit-text-security:disc]"}`}
+      />
+      <button
+        type="button"
+        onClick={() => setVisible((prev) => !prev)}
+        aria-label={visible ? "Hide secret" : "Show secret"}
+        className="absolute inset-y-0 right-0 flex items-center px-2.5 text-ink-subtle hover:text-ink dark:hover:text-ink-inverted"
+      >
+        {visible ? <EyeOffIcon /> : <EyeIcon />}
+      </button>
+    </div>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.75" />
+    </svg>
+  );
+}
+
+function EyeOffIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M3 3l18 18M10.5 10.7a3 3 0 0 0 4.2 4.2M9.5 5.2A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a17.3 17.3 0 0 1-3.2 4.4M6.1 6.2A17.6 17.6 0 0 0 2 12s3.5 7 10 7c1.4 0 2.7-.3 3.8-.7"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function SecretHeaderHint({ secrets }: { secrets: AppSecret[] }) {
   if (secrets.length === 0) {
     return (
       <p className="text-xs text-ink-subtle">
-        Add a secret in Settings → Secrets, then use {"{{secret.NAME}}"} as a header value.
+        Add a secret in Secrets above, then use {"{{secret.NAME}}"} as a header value.
       </p>
     );
   }
@@ -1041,20 +1320,16 @@ function CallTypeForm({
                 className="field flex-1 text-sm"
               />
             </div>
-            <textarea
-              placeholder='{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}'
+            <JsonTemplateField
+              placeholder={'{\n  "X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"\n}'}
               value={draft.pre_call_headers}
-              onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_headers: e.target.value }))}
-              rows={2}
-              className="field text-sm"
+              onChange={(value) => setDraft((prev) => ({ ...prev, pre_call_headers: value }))}
             />
             <SecretHeaderHint secrets={secrets} />
-            <textarea
-              placeholder="Body, as JSON — only used for a method that sends one (e.g. POST)"
+            <JsonTemplateField
+              placeholder={'{\n  "title": "{{title}}"\n}'}
               value={draft.pre_call_body_template}
-              onChange={(e) => setDraft((prev) => ({ ...prev, pre_call_body_template: e.target.value }))}
-              rows={2}
-              className="field text-sm"
+              onChange={(value) => setDraft((prev) => ({ ...prev, pre_call_body_template: value }))}
             />
             <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
               <input
@@ -1104,12 +1379,10 @@ function CallTypeForm({
                 className="field flex-1 text-sm"
               />
             </div>
-            <textarea
-              placeholder='{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}'
+            <JsonTemplateField
+              placeholder={'{\n  "X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"\n}'}
               value={draft.post_call_headers}
-              onChange={(e) => setDraft((prev) => ({ ...prev, post_call_headers: e.target.value }))}
-              rows={2}
-              className="field text-sm"
+              onChange={(value) => setDraft((prev) => ({ ...prev, post_call_headers: value }))}
             />
             <SecretHeaderHint secrets={secrets} />
             <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
@@ -1124,13 +1397,11 @@ function CallTypeForm({
               Send everything (transcript, report, live-copilot suggestions/blockers/score timeline, action
               items) instead of a custom body
             </label>
-            <textarea
-              placeholder='Body template, as JSON — e.g. {"meeting": "{{meeting_id}}", "summary": "{{summary}}"}'
+            <JsonTemplateField
+              placeholder={'{\n  "meeting": "{{meeting_id}}",\n  "summary": "{{summary}}"\n}'}
               value={draft.post_call_body_template}
-              onChange={(e) => setDraft((prev) => ({ ...prev, post_call_body_template: e.target.value }))}
+              onChange={(value) => setDraft((prev) => ({ ...prev, post_call_body_template: value }))}
               disabled={draft.post_call_send_full_payload}
-              rows={3}
-              className="field text-sm disabled:opacity-40"
             />
             {!draft.post_call_send_full_payload && (
               <p className="text-xs text-ink-subtle">

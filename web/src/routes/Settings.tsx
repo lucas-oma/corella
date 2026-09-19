@@ -7,7 +7,6 @@ import {
   type AiOverview,
   type ApiKey,
   type ApiKeyCreated,
-  type AppSecret,
   type Preferences,
   type ProviderStatus,
   type SttStatus,
@@ -149,16 +148,8 @@ export default function Settings() {
   // stored server-side).
   const [revealedKey, setRevealedKey] = useState<ApiKeyCreated | null>(null);
   const [copied, setCopied] = useState(false);
-
-  const [secrets, setSecrets] = useState<AppSecret[] | null>(null);
-  const [newSecretName, setNewSecretName] = useState("");
-  const [newSecretValue, setNewSecretValue] = useState("");
-  const [creatingSecret, setCreatingSecret] = useState(false);
-  const [editingSecretId, setEditingSecretId] = useState<string | null>(null);
-  const [secretDraftName, setSecretDraftName] = useState("");
-  const [secretDraftValue, setSecretDraftValue] = useState("");
-  const [savingSecretId, setSavingSecretId] = useState<string | null>(null);
-  const [deletingSecretId, setDeletingSecretId] = useState<string | null>(null);
+  const newKeyNameRef = useRef<HTMLInputElement>(null);
+  const [keyNameNeeded, setKeyNameNeeded] = useState(false);
 
   const [fullName, setFullName] = useState("");
   const [savingName, setSavingName] = useState(false);
@@ -178,11 +169,15 @@ export default function Settings() {
     api.listApiKeys().then(setApiKeys);
   }, []);
 
-  useEffect(() => {
-    if (user?.role === "admin") {
-      api.adminListSecrets().then(setSecrets);
+  function onCreateApiKeyClick() {
+    if (!newKeyName.trim()) {
+      setKeyNameNeeded(true);
+      newKeyNameRef.current?.focus();
+      return;
     }
-  }, [user?.role]);
+    setKeyNameNeeded(false);
+    onCreateApiKey();
+  }
 
   async function onCreateApiKey() {
     const name = newKeyName.trim();
@@ -259,79 +254,6 @@ export default function Settings() {
     } catch {
       // Clipboard access can be denied by the browser — the key text is
       // still selectable/visible either way, so this is a soft failure.
-    }
-  }
-
-  async function onCreateSecret() {
-    const name = newSecretName.trim();
-    if (!name || !newSecretValue) return;
-    setError(null);
-    setCreatingSecret(true);
-    try {
-      const created = await api.adminCreateSecret({ name, value: newSecretValue });
-      setSecrets((prev) => [...(prev ?? []), created].sort((a, b) => a.name.localeCompare(b.name)));
-      setNewSecretName("");
-      setNewSecretValue("");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't create secret");
-    } finally {
-      setCreatingSecret(false);
-    }
-  }
-
-  function onEditSecret(secret: AppSecret) {
-    setError(null);
-    setEditingSecretId(secret.id);
-    setSecretDraftName(secret.name);
-    setSecretDraftValue("");
-  }
-
-  async function onSaveSecret(secret: AppSecret) {
-    const name = secretDraftName.trim();
-    if (!name) return;
-    const payload: { name?: string; value?: string } = {};
-    if (name !== secret.name) payload.name = name;
-    if (secretDraftValue) payload.value = secretDraftValue;
-    if (!payload.name && !payload.value) {
-      setEditingSecretId(null);
-      return;
-    }
-    setError(null);
-    setSavingSecretId(secret.id);
-    try {
-      const updated = await api.adminUpdateSecret(secret.id, payload);
-      setSecrets(
-        (prev) =>
-          prev?.map((row) => (row.id === updated.id ? updated : row)).sort((a, b) => a.name.localeCompare(b.name)) ??
-          null,
-      );
-      setEditingSecretId(null);
-      setSecretDraftValue("");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't update secret");
-    } finally {
-      setSavingSecretId(null);
-    }
-  }
-
-  async function onDeleteSecret(secret: AppSecret) {
-    const ok = await confirm({
-      title: `Delete "${secret.name}"?`,
-      description: `Call-type headers that use {{secret.${secret.name}}} will stop resolving until you point them at another secret.`,
-      confirmLabel: "Delete secret",
-      variant: "danger",
-    });
-    if (!ok) return;
-    setError(null);
-    setDeletingSecretId(secret.id);
-    try {
-      await api.adminDeleteSecret(secret.id);
-      setSecrets((prev) => prev?.filter((row) => row.id !== secret.id) ?? null);
-      if (editingSecretId === secret.id) setEditingSecretId(null);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't delete secret");
-    } finally {
-      setDeletingSecretId(null);
     }
   }
 
@@ -951,110 +873,6 @@ export default function Settings() {
         )}
       </section>
 
-      {user?.role === "admin" && (
-        <section className="card mt-6 p-6">
-          <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Secrets</h2>
-          <p className="mt-1 text-sm text-ink-muted">
-            Named values for call-type pre/post headers. The name is visible in Admin → Call types;
-            the value is stored encrypted and never shown again. Reference as{" "}
-            <code className="text-[11px]">{"{{secret.NAME}}"}</code>.
-          </p>
-
-          <div className="mb-4 mt-5 flex flex-wrap items-center gap-2">
-            <input
-              type="text"
-              placeholder="NAME, e.g. WEBHOOK_SECRET"
-              value={newSecretName}
-              onChange={(e) => setNewSecretName(e.target.value)}
-              className="field min-w-48 flex-1 text-sm"
-            />
-            <input
-              type="password"
-              placeholder="Value"
-              value={newSecretValue}
-              onChange={(e) => setNewSecretValue(e.target.value)}
-              className="field min-w-48 flex-1 text-sm"
-            />
-            <button
-              onClick={onCreateSecret}
-              disabled={creatingSecret || !newSecretName.trim() || !newSecretValue}
-              className="btn-secondary shrink-0"
-            >
-              {creatingSecret ? "Saving…" : "Add secret"}
-            </button>
-          </div>
-
-          {secrets === null && <p className="text-sm text-ink-muted">Loading…</p>}
-          {secrets?.length === 0 && <p className="text-sm text-ink-muted">No secrets yet.</p>}
-          {secrets && secrets.length > 0 && (
-            <ul className="divide-y divide-border dark:divide-border-dark">
-              {secrets.map((secret) => (
-                <li key={secret.id} className="py-2.5">
-                  {editingSecretId === secret.id ? (
-                    <div className="space-y-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <input
-                          type="text"
-                          value={secretDraftName}
-                          onChange={(e) => setSecretDraftName(e.target.value)}
-                          className="field min-w-48 flex-1 text-sm"
-                        />
-                        <input
-                          type="password"
-                          placeholder="New value — leave blank to keep"
-                          value={secretDraftValue}
-                          onChange={(e) => setSecretDraftValue(e.target.value)}
-                          className="field min-w-48 flex-1 text-sm"
-                        />
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => onSaveSecret(secret)}
-                          disabled={savingSecretId === secret.id || !secretDraftName.trim()}
-                          className="btn-secondary"
-                        >
-                          {savingSecretId === secret.id ? "Saving…" : "Save"}
-                        </button>
-                        <button
-                          onClick={() => setEditingSecretId(null)}
-                          className="text-xs text-ink-subtle"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm text-ink dark:text-ink-inverted">{secret.name}</p>
-                        <p className="text-xs text-ink-subtle">
-                          <code>{`{{secret.${secret.name}}}`}</code>
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-3">
-                        <button
-                          onClick={() => onEditSecret(secret)}
-                          className="text-xs text-accent hover:underline"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => onDeleteSecret(secret)}
-                          disabled={deletingSecretId === secret.id}
-                          className="text-xs text-ink-subtle hover:text-status-danger"
-                        >
-                          {deletingSecretId === secret.id ? "…" : "Delete"}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
-
       <section className="card mt-6 p-6">
         <div className="mb-3 flex items-center justify-between">
           <div>
@@ -1090,33 +908,51 @@ export default function Settings() {
           </div>
         )}
 
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          <input
-            type="text"
-            placeholder="Key name, e.g. Zapier integration"
-            value={newKeyName}
-            onChange={(e) => setNewKeyName(e.target.value)}
-            className="field min-w-48 flex-1 text-sm"
-          />
-          <label className="flex items-center gap-1.5 text-xs text-ink-subtle">
+        <form
+          className="mb-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onCreateApiKeyClick();
+          }}
+        >
+          <div className="flex flex-wrap items-center gap-2">
             <input
-              type="number"
-              min={MIN_KEY_DURATION_MINUTES}
-              max={MAX_KEY_DURATION_MINUTES}
-              value={newKeyDuration}
-              onChange={(e) => setNewKeyDuration(Number(e.target.value) || DEFAULT_KEY_DURATION_MINUTES)}
-              className="field w-16 text-sm"
+              ref={newKeyNameRef}
+              type="text"
+              placeholder="Key name, e.g. Zapier integration"
+              value={newKeyName}
+              onChange={(e) => {
+                setNewKeyName(e.target.value);
+                if (e.target.value.trim()) setKeyNameNeeded(false);
+              }}
+              className={`field min-w-48 flex-1 text-sm ${
+                keyNameNeeded ? "border-status-danger focus:border-status-danger" : ""
+              }`}
             />
-            min max
-          </label>
-          <button
-            onClick={onCreateApiKey}
-            disabled={creatingKey || !newKeyName.trim()}
-            className="btn-secondary shrink-0"
-          >
-            {creatingKey ? "Creating…" : "Create key"}
-          </button>
-        </div>
+            <label className="flex items-center gap-1.5 text-xs text-ink-subtle">
+              <input
+                type="number"
+                min={MIN_KEY_DURATION_MINUTES}
+                max={MAX_KEY_DURATION_MINUTES}
+                value={newKeyDuration}
+                onChange={(e) => setNewKeyDuration(Number(e.target.value) || DEFAULT_KEY_DURATION_MINUTES)}
+                className="field w-16 text-sm"
+              />
+              min max
+            </label>
+            <button
+              type="submit"
+              disabled={creatingKey}
+              aria-disabled={!newKeyName.trim()}
+              className={`btn-secondary shrink-0 ${newKeyName.trim() ? "" : "opacity-40"}`}
+            >
+              {creatingKey ? "Creating…" : "Create key"}
+            </button>
+          </div>
+          {keyNameNeeded && (
+            <p className="mt-1.5 text-xs text-status-danger">Give the key a name first.</p>
+          )}
+        </form>
 
         {apiKeys === null && <p className="text-sm text-ink-muted">Loading…</p>}
         {apiKeys?.length === 0 && <p className="text-sm text-ink-muted">No API keys yet.</p>}

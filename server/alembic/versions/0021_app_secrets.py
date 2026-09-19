@@ -4,7 +4,7 @@ Revision ID: 0021
 Revises: 0020
 Create Date: 2026-09-18
 
-Admins manage these in Settings → Secrets. Call-type pre/post headers
+Admins manage these in Admin → Secrets. Call-type pre/post headers
 store {{secret.NAME}} templates (returned on GET) and dispatch
 interpolates the real value. The value itself is never returned.
 """

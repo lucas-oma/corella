@@ -21,7 +21,7 @@
   }
 
   .btn-secondary {
-    @apply inline-flex items-center justify-center rounded border border-border bg-transparent px-4 py-2 text-sm font-medium text-ink transition-colors hover:bg-black/[0.03] dark:border-border-dark dark:text-ink-inverted dark:hover:bg-white/[0.04];
+    @apply inline-flex items-center justify-center rounded border border-border bg-transparent px-4 py-2 text-sm font-medium text-ink transition-colors hover:bg-black/[0.03] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:border-border-dark dark:text-ink-inverted dark:hover:bg-white/[0.04] dark:disabled:hover:bg-transparent;
   }
 
   /* Confirm-dialog destructive confirm only — never a page-level primary.

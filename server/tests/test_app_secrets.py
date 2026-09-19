@@ -1,4 +1,4 @@
-"""Admin-managed named secrets (Settings → Secrets): values never leave
+"""Admin-managed named secrets (Admin → Secrets): values never leave
 the API, names are unique, members cannot touch the vault.
 """
 
