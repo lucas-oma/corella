@@ -6,7 +6,7 @@ from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class AppSecret(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Instance-wide named secret (Admin / Settings → Secrets).
+    """Instance-wide named secret (Admin → Secrets).
 
     Values are encrypted at rest (app.core.security.encrypt_secret) and
     never returned by the API — list/create/update expose `name` only.
