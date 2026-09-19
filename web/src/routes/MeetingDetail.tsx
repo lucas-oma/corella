@@ -7,6 +7,7 @@ import {
   api,
   type ActionItem,
   type CopilotInsight,
+  type HookLog,
   type Meeting,
   type TranscriptSegment,
 } from "@/lib/api";
@@ -59,6 +60,73 @@ function formatTimestamp(ms: number): string {
  * below a cent. */
 function formatCost(usd: number): string {
   return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
+function prettyLogText(raw: string | null): string {
+  if (!raw) return "";
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+function AdminHookLogs({ logs }: { logs: HookLog[] }) {
+  if (logs.length === 0) return null;
+  const pre = logs.filter((log) => log.phase === "pre");
+  const post = logs.filter((log) => log.phase === "post");
+  return (
+    <details className="card mt-6 p-5">
+      <summary className="cursor-pointer text-sm font-medium text-ink dark:text-ink-inverted">
+        API logs
+        <span className="ml-2 font-normal text-ink-subtle">
+          {pre.length} pre · {post.length} post · admin only
+        </span>
+      </summary>
+      <div className="mt-4 space-y-4">
+        {logs.map((log) => (
+          <HookLogEntry key={log.id} log={log} />
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function HookLogEntry({ log }: { log: HookLog }) {
+  const ok = log.outcome === "success";
+  return (
+    <div className="rounded-sm border border-border p-3 dark:border-border-dark">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-medium text-ink dark:text-ink-inverted">
+          {log.phase === "pre" ? "Pre-call" : log.phase === "post" ? "Post-call" : log.phase}
+        </span>
+        <span className={ok ? "text-status-info" : "text-status-danger"}>{log.outcome}</span>
+        <span className="font-mono text-ink-muted">
+          {log.method} {log.url}
+        </span>
+        {log.response_status != null && <span className="text-ink-subtle">HTTP {log.response_status}</span>}
+        {log.duration_ms != null && <span className="text-ink-subtle">{log.duration_ms} ms</span>}
+        {log.ran_async && <span className="text-ink-subtle">async</span>}
+      </div>
+      {log.error && <p className="mt-2 text-xs text-status-danger">{log.error}</p>}
+      {log.request_headers && (
+        <HookLogBlock label="Request headers" text={prettyLogText(log.request_headers)} />
+      )}
+      {log.request_body && <HookLogBlock label="Request body" text={prettyLogText(log.request_body)} />}
+      {log.response_body && <HookLogBlock label="Response" text={prettyLogText(log.response_body)} />}
+    </div>
+  );
+}
+
+function HookLogBlock({ label, text }: { label: string; text: string }) {
+  return (
+    <details className="mt-2">
+      <summary className="cursor-pointer text-xs text-ink-subtle">{label}</summary>
+      <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-sm bg-black/[0.03] p-2 font-mono text-[11px] text-ink dark:bg-white/[0.04] dark:text-ink-inverted">
+        {text}
+      </pre>
+    </details>
+  );
 }
 
 /** A resolved identity linked to an enrolled account (segment.linked_user_id)
@@ -250,7 +318,8 @@ export default function MeetingDetail() {
   // not just the report) — but never the write controls below, which stay
   // strictly isOwner. Server-enforced too (GET .../audio and .../transcript
   // 404 for anyone else, admin included, on write routes).
-  const canViewFull = isOwner || user?.role === "admin";
+  const isAdmin = user?.role === "admin";
+  const canViewFull = isOwner || isAdmin;
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
   const [insights, setInsights] = useState<CopilotInsight[] | null>(null);
   // True while the transcript-loading effect below is still re-polling for
@@ -267,6 +336,7 @@ export default function MeetingDetail() {
   // True while the "ready" catch-up effect below is still waiting on the
   // auto-generated report to land — see REPORT_GRACE_MS's docstring.
   const [reportPending, setReportPending] = useState(false);
+  const [hookLogs, setHookLogs] = useState<HookLog[] | null>(null);
 
   async function onDelete() {
     if (!meetingId) return;
@@ -309,6 +379,41 @@ export default function MeetingDetail() {
       clearTimeout(timer);
     };
   }, [meetingId]);
+
+  // Admin-only hook logs. Regular users never call this route (403). Poll
+  // while the meeting is still in flight, and briefly after ready, so an
+  // async pre/post can appear without a refresh.
+  useEffect(() => {
+    if (!meetingId || !isAdmin) {
+      setHookLogs(null);
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const started = Date.now();
+
+    async function poll() {
+      try {
+        const logs = await api.getMeetingHookLogs(meetingId!);
+        if (!cancelled) setHookLogs(logs);
+      } catch {
+        if (!cancelled) setHookLogs([]);
+      }
+      const inFlight = meeting?.status === "recording" || meeting?.status === "processing";
+      const recentReady =
+        meeting?.status === "ready" && Date.now() - started < REPORT_GRACE_MS + 30_000;
+      if (!cancelled && (inFlight || recentReady || !meeting?.status)) {
+        timer = setTimeout(poll, 4000);
+      }
+    }
+
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [meetingId, isAdmin, meeting?.status]);
 
   // Once the transcript is ready, load it plus the audio (as an object URL,
   // since <audio src> can't carry our Authorization header) — for the owner
@@ -827,6 +932,8 @@ export default function MeetingDetail() {
               )}
             </div>
           )}
+
+          {isAdmin && hookLogs && <AdminHookLogs logs={hookLogs} />}
         </>
       )}
     </AppShell>

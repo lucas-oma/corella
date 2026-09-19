@@ -16,10 +16,12 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.security import encrypt_secret
 from app.models.call_type import CallType
+from app.models.hook_log import HookLog
 from app.models.meeting import Meeting
 from app.services.admin.call_hooks import dispatch_post_call, dispatch_pre_call
 from app.services.copilot.report import ReportResult
@@ -175,6 +177,8 @@ async def test_create_meeting_respects_use_as_context_flag(db, make_user, auth_h
     assert meeting_on.pre_call_context is not None and "CRM lookup" in meeting_on.pre_call_context
     assert meeting_off.pre_call_context is None
     assert len(_received()) == 2  # both fired
+    logs = list(await db.scalars(select(HookLog).where(HookLog.meeting_id == meeting_on.id)))
+    assert len(logs) == 1 and logs[0].phase == "pre" and logs[0].outcome == "success"
 
 
 # --- Pre-call: POST with a rendered body template (a real "regular" shape) --
@@ -258,10 +262,13 @@ async def test_post_call_regular_mode_sends_only_templated_fields(db, make_user,
     )
 
     await dispatch_post_call(db, meeting, _report(summary="Custom template real test."))
+    await db.commit()
 
     received = _received()
     body = json.loads(received[0]["body"])
     assert body == {"id": str(meeting.id), "summary": "Custom template real test."}  # nothing else leaked in
+    logs = list(await db.scalars(select(HookLog).where(HookLog.meeting_id == meeting.id)))
+    assert len(logs) == 1 and logs[0].phase == "post" and logs[0].outcome == "success"
 
 
 # --- Mandatory headers, over real HTTP ----------------------------------

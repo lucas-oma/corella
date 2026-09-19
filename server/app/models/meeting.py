@@ -61,11 +61,12 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     # The response body fetched by this meeting's call type's pre-call
     # hook, if pre_call_use_as_context is on (app/services/admin/
-    # call_hooks.py:dispatch_pre_call, fired from create_meeting) —
-    # capped at settings.pre_call_context_max_chars before storing. Fed
-    # into the live copilot's prompt alongside the regular knowledge-base
-    # context (app/services/copilot/live.py:run_cycle). None when no
-    # pre-call is configured, it failed, or the feature is off.
+    # call_hooks.py:dispatch_pre_call, fired from create_meeting or the
+    # async corella.dispatch_pre_call worker) — capped at
+    # settings.pre_call_context_max_chars before storing. Fed into the
+    # live copilot's prompt alongside the regular knowledge-base context
+    # (app/services/copilot/live.py:run_cycle). None when no pre-call is
+    # configured, it failed, or the feature is off.
     pre_call_context: Mapped[str | None] = mapped_column(Text)
     # Set once, the moment a live WS session's auth actually resolves via
     # an API key (app/ws/live_session.py:live_session_ws) — not at

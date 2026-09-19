@@ -4,6 +4,7 @@ from app.models.call_profile import CallProfile
 from app.models.call_type import CallType
 from app.models.cost import LLMUsageEvent
 from app.models.group import Group
+from app.models.hook_log import HookLog
 from app.models.kb_document import KBDocument
 from app.models.meeting import ActionItem, CopilotInsight, Meeting, Note, Speaker, TranscriptSegment
 from app.models.provider_credential import ProviderCredential
@@ -29,4 +30,5 @@ __all__ = [
     "SttCredential",
     "ApiKey",
     "AppSecret",
+    "HookLog",
 ]

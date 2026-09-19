@@ -49,6 +49,11 @@ class CallType(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # live copilot's prompt alongside the regular knowledge-base context
     # (app/services/copilot/live.py:run_cycle) — not just logged/ignored.
     pre_call_use_as_context: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Default false = wait for the hook (bounded) before create_meeting
+    # returns. True = queue corella.dispatch_pre_call and return immediately;
+    # live copilot re-reads Meeting.pre_call_context each cycle, so context
+    # still lands mid-call if use_as_context is on.
+    pre_call_async: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Fired once from _generate_report_async (app/workers/tasks.py) after
     # a successful auto-generated report — the original single "webhook"
@@ -64,3 +69,7 @@ class CallType(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # items with status — everything) is sent as JSON instead — see
     # app/services/admin/call_hooks.py:build_full_payload.
     post_call_send_full_payload: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Default false = run in the generate_report worker after the report
+    # is persisted. True = queue corella.dispatch_post_call so report
+    # completion doesn't wait on the far side.
+    post_call_async: Mapped[bool] = mapped_column(Boolean, default=False)

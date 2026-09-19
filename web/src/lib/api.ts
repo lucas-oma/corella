@@ -129,6 +129,7 @@ export interface CallTypeConfig {
   pre_call_headers: string | null;
   pre_call_body_template: string | null;
   pre_call_use_as_context: boolean;
+  pre_call_async: boolean;
 
   post_call_enabled: boolean;
   post_call_url: string | null;
@@ -136,6 +137,23 @@ export interface CallTypeConfig {
   post_call_headers: string | null;
   post_call_body_template: string | null;
   post_call_send_full_payload: boolean;
+  post_call_async: boolean;
+}
+
+export interface HookLog {
+  id: string;
+  phase: "pre" | "post" | string;
+  outcome: "success" | "error" | string;
+  method: string;
+  url: string;
+  request_headers: string | null;
+  request_body: string | null;
+  response_status: number | null;
+  response_body: string | null;
+  error: string | null;
+  duration_ms: number | null;
+  ran_async: boolean;
+  created_at: string;
 }
 
 export interface AppSecret {
@@ -440,6 +458,7 @@ export const api = {
   },
   deleteKBDocument: (id: string) => request<void>(`/api/kb/documents/${id}`, { method: "DELETE" }),
   generateReport: (id: string) => request<Report>(`/api/meetings/${id}/report`, { method: "POST" }),
+  getMeetingHookLogs: (id: string) => request<HookLog[]>(`/api/meetings/${id}/hook-logs`),
   listActionItems: (id: string) => request<ActionItem[]>(`/api/meetings/${id}/action-items`),
   updateActionItem: (meetingId: string, itemId: string, status: ActionItem["status"]) =>
     request<ActionItem>(`/api/meetings/${meetingId}/action-items/${itemId}`, {

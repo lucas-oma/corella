@@ -68,6 +68,12 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+    extra_hosts:
+      # Linux Docker has no host.docker.internal unless we add it. Hook URLs
+      # aimed at a process on the host (local Supabase, api_test_server)
+      # fail with "Name or service not known" without this. Harmless on
+      # Docker Desktop, where the name already exists.
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
       interval: 10s
@@ -88,6 +94,8 @@ services:
       - audio_data:${AUDIO_STORAGE_PATH:-/data/audio}
       - kb_data:${KB_STORAGE_PATH:-/data/kb}
       - model_cache:/root/.cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
