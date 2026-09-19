@@ -24,6 +24,19 @@ const EMPTY_NEW_USER = {
   group_id: NO_GROUP,
 };
 
+/** Chrome/1Password treat type=password + a neighboring email/text field
+ * as a login form and fill the signed-in admin's credentials. Keep
+ * type=text and mask password-ish values in CSS instead. */
+const AUTOFILL_GUARD = {
+  autoComplete: "off" as const,
+  autoCorrect: "off" as const,
+  autoCapitalize: "off" as const,
+  spellCheck: false,
+  "data-1p-ignore": true,
+  "data-lpignore": "true",
+  "data-form-type": "other",
+};
+
 const COST_PERIODS: { id: CostPeriod; label: string }[] = [
   { id: "7d", label: "7 days" },
   { id: "30d", label: "30 days" },
@@ -655,7 +668,11 @@ export default function Admin() {
             </ul>
 
             {addingUser && (
-              <div className="mt-4 rounded border border-border bg-surface p-4 dark:border-border-dark dark:bg-surface-dark">
+              <form
+                autoComplete="off"
+                className="mt-4 rounded border border-border bg-surface p-4 dark:border-border-dark dark:bg-surface-dark"
+                onSubmit={(e) => e.preventDefault()}
+              >
                 <p className="text-sm font-medium text-ink dark:text-ink-inverted">New user</p>
                 <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
@@ -663,8 +680,10 @@ export default function Admin() {
                       Full name
                     </label>
                     <input
+                      {...AUTOFILL_GUARD}
                       id="new-user-name"
                       type="text"
+                      name="corella-new-user-name"
                       autoFocus
                       value={newUser.full_name}
                       onChange={(e) => setNewUser((prev) => ({ ...prev, full_name: e.target.value }))}
@@ -676,8 +695,11 @@ export default function Admin() {
                       Email
                     </label>
                     <input
+                      {...AUTOFILL_GUARD}
                       id="new-user-email"
-                      type="email"
+                      type="text"
+                      inputMode="email"
+                      name="corella-new-user-email"
                       value={newUser.email}
                       onChange={(e) => setNewUser((prev) => ({ ...prev, email: e.target.value }))}
                       className="field text-sm"
@@ -688,11 +710,13 @@ export default function Admin() {
                       Password
                     </label>
                     <input
+                      {...AUTOFILL_GUARD}
                       id="new-user-password"
-                      type="password"
+                      type="text"
+                      name="corella-new-user-password"
                       value={newUser.password}
                       onChange={(e) => setNewUser((prev) => ({ ...prev, password: e.target.value }))}
-                      className="field text-sm"
+                      className="field text-sm [-webkit-text-security:disc]"
                     />
                   </div>
                   <div>
@@ -755,7 +779,7 @@ export default function Admin() {
                     Cancel
                   </button>
                 </div>
-              </div>
+              </form>
             )}
           </div>
         </div>
@@ -1128,18 +1152,6 @@ export default function Admin() {
  * the Call types section above (new-row create, and expand-to-edit on an
  * existing row), same pattern as Settings.tsx's "AI models in use" inline
  * edit forms. */
-const SECRET_FIELD_GUARD = {
-  autoComplete: "off" as const,
-  autoCorrect: "off" as const,
-  autoCapitalize: "off" as const,
-  spellCheck: false,
-  // Chrome/1Password treat type=password + a neighboring text field as a
-  // login form and fill saved email/password. Keep type=text and mask in CSS.
-  "data-1p-ignore": true,
-  "data-lpignore": "true",
-  "data-form-type": "other",
-};
-
 function SecretNameField({
   value,
   onChange,
@@ -1151,7 +1163,7 @@ function SecretNameField({
 }) {
   return (
     <input
-      {...SECRET_FIELD_GUARD}
+      {...AUTOFILL_GUARD}
       type="text"
       name="corella-secret-name"
       placeholder={placeholder}
@@ -1175,7 +1187,7 @@ function SecretValueField({
   return (
     <div className="relative min-w-48 flex-1">
       <input
-        {...SECRET_FIELD_GUARD}
+        {...AUTOFILL_GUARD}
         type="text"
         name="corella-secret-value"
         placeholder={placeholder}
