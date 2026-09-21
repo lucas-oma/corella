@@ -24,7 +24,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="border-b border-border dark:border-border-dark">
+      <header className="sticky top-0 z-40 border-b border-border bg-surface dark:border-border-dark dark:bg-surface-dark">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-8">
             <div className="flex items-end gap-1.5">

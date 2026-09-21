@@ -116,7 +116,7 @@ Not yet promoted to a shared class, but used consistently as an inline pattern a
 
 ### Navigation
 
-Primary nav is Meetings, Knowledge base, and Settings. Active vs. inactive follow one rule: active gets a filled `accent` pill (`bg-accent text-accent-foreground`), inactive gets muted text with a subtle hover background (`hover:bg-black/[0.03] dark:hover:bg-white/[0.04]`). See `AppShell.tsx`.
+Primary nav is Meetings, Knowledge base, and Settings. The bar is sticky at the top of the viewport (`sticky top-0` on the header in `AppShell.tsx`) so it stays put while the page scrolls — opaque `bg-surface` / `dark:bg-surface-dark` so content doesn't show through. Active vs. inactive follow one rule: active gets a filled `accent` pill (`bg-accent text-accent-foreground`), inactive gets muted text with a subtle hover background (`hover:bg-black/[0.03] dark:hover:bg-white/[0.04]`).
 
 Organization, Super admin, and Sign out live in the account menu on the right. The trigger is the Corella-bird avatar plus a disclosure chevron (hover/open fill, not a static image). The active org name sits to its left, separated by a 1px `border` rule.
 
