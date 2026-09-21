@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
+import PageHeader from "@/components/PageHeader";
 import {
   type CaptureHandle,
   type CopilotEvent,
@@ -15,6 +16,7 @@ import {
 } from "@/lib/live";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
+import { isOrgAdmin } from "@/lib/org";
 
 type ConnectionState = "connecting" | "connected" | "error";
 
@@ -289,19 +291,21 @@ export default function LiveSession() {
 
   return (
     <AppShell>
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">Recording</h1>
-          <p className="mt-1 text-sm text-ink-muted">
+      <PageHeader
+        title="Recording"
+        subtitle={
+          <>
             {connection === "connecting" && "Connecting…"}
             {connection === "connected" && "Live — transcript updates a few seconds after each pause."}
             {connection === "error" && "Connection error"}
-          </p>
-        </div>
-        <button onClick={onStop} disabled={stopping || connection !== "connected"} className="btn-primary">
-          {stopping ? "Stopping…" : "Stop"}
-        </button>
-      </div>
+          </>
+        }
+        actions={
+          <button onClick={onStop} disabled={stopping || connection !== "connected"} className="btn-primary">
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
+        }
+      />
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
 
@@ -324,7 +328,7 @@ export default function LiveSession() {
             Share tab audio
           </button>
         )}
-        {user?.role === "admin" && connection === "connected" && (
+        {isOrgAdmin(user) && connection === "connected" && (
           <button
             onClick={onToggleDebug}
             className={`btn-secondary ${themActive ? "" : "ml-auto"}`}

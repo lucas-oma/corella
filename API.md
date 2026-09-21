@@ -18,7 +18,7 @@ Base URL is your instance's API origin. In local Docker that is `http://localhos
 |---|---|---|---|
 | **API key REST** | You → Corella | `Authorization: Bearer sk_live_…` | Create a meeting, poll results |
 | **Live WebSocket** | You ↔ Corella | First text frame `{"type":"auth","api_key":"…"}` | Stream audio, receive transcript/copilot live |
-| **Call-type hooks** | Corella → you | *Your* endpoint; Corella always sends three `X-Corella-*` headers | Pre-call lookup / post-call push |
+| **Call-type hooks** | Corella → you | *Your* endpoint; Corella always sends four `X-Corella-*` headers | Pre-call lookup / post-call push |
 
 A typical phone-bridge or CRM integration uses all three: REST to create the meeting, WebSocket to stream audio, a post-call hook to push the finished report back into the CRM. A "just notify us when a call ends" integration only needs the hook. A "pull the transcript later" integration only needs the API key.
 
@@ -30,7 +30,11 @@ Two credential types exist. They are **not** interchangeable on every route.
 
 ### JWT (browser login)
 
-`POST /api/auth/login` returns a short-lived JWT (`access_token_expire_minutes`, default 24h, HS256). This is what the web app uses. It unlocks **the whole API** (settings, admin, knowledge base, uploads, deletes, …).
+`POST /api/auth/login` returns a short-lived JWT (`access_token_expire_minutes`, default 24h, HS256, payload `{sub, exp}` — org is **not** in the token). This is what the web app uses. It unlocks **the whole API** (settings, organization, super-admin, knowledge base, uploads, deletes, …). Active org is stored on the user (`PUT /api/organizations/current`).
+
+`GET /api/auth/me` returns `is_super_admin`, `active_organization_id`, `organizations: [{id, name, role, is_instance_org}]`, and `group_ids` in the active org. There is no global `role` / `group_id`.
+
+`GET /api/auth/config` is public: `{ "allow_public_registration": true, "max_orgs_per_user": 1 }`.
 
 ### API key (machine / external)
 
@@ -40,7 +44,7 @@ A long-lived credential created in **Settings → API keys** (or `POST /api/sett
 Authorization: Bearer sk_live_<your-key>
 ```
 
-An API key acts **as the user who created it**. No fine-grained scopes — treat it like a password for that account. It can only reach the **integration surface** below, not the rest of the app. Using it on a JWT-only route returns `401`.
+An API key acts **as the user who created it, in the organization it was minted in**. Switching orgs in the UI does not move the key. No fine-grained scopes — treat it like a password for that account in that org. It can only reach the **integration surface** below, not org/super-admin surfaces. Using it on a JWT-only route returns `401`.
 
 The `sk_live_` prefix is how the server tells a key apart from a JWT **without** attempting a JWT decode first. Do not strip it; a key that does not start with `sk_live_` is treated as a (then-invalid) JWT.
 
@@ -51,10 +55,10 @@ The `sk_live_` prefix is how the server tells a key apart from a JWT **without**
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/api/call-types` | Lightweight list: `{id, name, slug, is_default}` — pick an id for create |
-| `POST` | `/api/meetings` | Create (and start) a meeting. Optional `call_type_id`; omit/`null` = instance default |
+| `POST` | `/api/meetings` | Create (and start) a meeting. Optional `call_type_id`; omit/`null` = that org's default |
 | `GET` | `/api/meetings/{id}` | Meeting + report fields. **Group-visible** — see [Access](#access-what-the-key-can-see) |
-| `GET` | `/api/meetings/{id}/transcript` | Owner or admin only |
-| `GET` | `/api/meetings/{id}/insights` | Owner or admin only |
+| `GET` | `/api/meetings/{id}/transcript` | Owner, org owner/admin, or super_admin |
+| `GET` | `/api/meetings/{id}/insights` | Owner, org owner/admin, or super_admin |
 | `POST` | `/api/meetings/{id}/report` | Owner only; synchronous regenerate |
 | WS | `/ws/meetings/{id}/live` | Live recording |
 
@@ -62,7 +66,7 @@ Everything else is JWT-only. In particular an API key **cannot**:
 
 - List meetings (`GET /api/meetings`), search, group/all lists
 - Upload / download audio, delete a meeting, read or toggle action items
-- Manage API keys, providers, preferences, knowledge base, or admin resources
+- Manage API keys, providers, preferences, knowledge base, or org/super-admin resources
 
 ### Managing keys (JWT / Settings UI)
 
@@ -129,7 +133,7 @@ POST /api/meetings/{id}/report       → generates (or regenerates) the summary/
 
 **Insights.** The persisted live-copilot timeline, timestamp-ordered. `at_ms` lines up with `transcript[].start_ms` / `end_ms`. This shape does **not** include `action_items` — those on the live `copilot` WebSocket message are per-cycle suggestions; the durable open/done action items live on the report (`POST /report` / post-call payload).
 
-**`POST /report`.** Owner-only (not even an admin of someone else's meeting). Requires an LLM provider connected for that account (`422` otherwise). Synchronous. A normal auto-generated report already fires once a recording finishes; this is for a forced refresh. **It does not fire the post-call hook** — regenerating is not "the conversation ending" a second time.
+**`POST /report`.** Owner-only (not even an org admin of someone else's meeting). Requires an LLM provider connected for that account (`422` otherwise). Synchronous. A normal auto-generated report already fires once a recording finishes; this is for a forced refresh. **It does not fire the post-call hook** — regenerating is not "the conversation ending" a second time.
 
 ### Meeting status
 
@@ -146,16 +150,40 @@ You cannot resume a meeting. Once it leaves `recording`, a WebSocket reconnect i
 
 ## Access: what the key can see
 
-Same rules as the browser, because the key *is* that user.
+Same rules as the browser, because the key *is* that user **in the key's org**.
 
-| Resource | Owner | Same group | Admin |
-|---|---|---|---|
-| `GET /meetings/{id}` (report fields) | yes | yes | yes |
-| Transcript / insights | yes | **no** | yes |
-| `POST /report` | yes | no | **no** (no admin override on writes) |
-| Live WebSocket | yes | no | no (must be the owner) |
+| Resource | Meeting owner | Org owner/admin | Group-mate | Member (no shared group) | Super admin |
+|---|---|---|---|---|---|
+| `GET /meetings/{id}` (report fields) | yes | yes (this org) | yes (this org) | no | yes (cross-org) |
+| Transcript / insights / audio | yes | yes (this org) | **no** | no | yes (cross-org) |
+| `POST /report`, delete, action-item writes | yes | **no** | no | no | **no** |
+| Live WebSocket | yes | no | no | no | no (must be the owner) |
+| `GET /api/meetings/org` and `/search/org` | — | yes (this org) | — | — | — |
+| `GET /api/meetings/all` and `/search/all` | — | **no** (not the dashboard All tab) | — | — | yes (instance-wide) |
 
-Group membership never grants the raw recording. `404` is used for both missing and forbidden (no `403` on these reads), so you cannot probe whether an id exists.
+Group membership never grants the raw recording. `404` is used for both missing and forbidden on meeting reads (no `403` there), so you cannot probe whether an id exists. Org-admin "All" on the dashboard hits `/meetings/org`, not `/meetings/all`.
+
+---
+
+## Organizations and invites (JWT)
+
+Browser-only. Active org is stored on the user, not in the JWT.
+
+| Method | Path | Who |
+|---|---|---|
+| `GET` | `/api/organizations` | Any signed-in user — their memberships |
+| `POST` | `/api/organizations` | Open mode, under `MAX_ORGS_PER_USER` owned-org cap |
+| `PUT` | `/api/organizations/current` | Member of the target org |
+| `PATCH` / `DELETE` | `/api/organizations/{id}` | Owner/admin rename; owner delete (not the instance/default org, and never the last org) |
+| `GET` / `POST` / `PATCH` / `DELETE` | `/api/organizations/{id}/members` | Owner/admin; cannot touch the owner; cannot invite/create as `owner` |
+| `POST` | `/api/organizations/{id}/transfer` | Owner only |
+| `POST` | `/api/organizations/{id}/leave` | Anyone except the last owner |
+| `GET` / `POST` / `DELETE` | `/api/organizations/{id}/invites` | Owner/admin. Token returned once; store a hash. Resend mints a new token |
+| `GET` | `/api/invites/{token}` | Public preview (org name, email, role, expiry) |
+| `POST` | `/api/invites/{token}/accept` | Public — works when registration is closed. New email: body `{password, full_name}`. Existing email: log in first (409 if logged out, 403 if email mismatch) |
+| `GET` / `POST` / `DELETE` / `PUT` | `/api/organizations/{id}/groups` (+ `/members`) | Owner/admin. Groups are org-scoped; membership is many-to-many |
+
+Call types, secrets, and org costs stay on `/api/admin/*` but are scoped to the **active org** (org owner/admin). Super-admin-only: `GET /api/admin/organizations`, `GET /api/admin/users`, `PATCH /api/admin/users/{id}/super-admin`, `GET /api/admin/costs/instance`, plus `/api/meetings/all` and `/search/all`.
 
 ---
 
@@ -234,24 +262,24 @@ Closing the Corella web UI without pressing Stop is the same as a bare disconnec
 | `copilot` | `{ suggestion, blockers: [string], action_items: [string], coach_score }` | One live-coaching cycle. Also persisted (minus `action_items`) as a row `GET /insights` returns |
 | `diarization_update` / `speaker_hint` | `{ is_snapshot, removed_segment_ids: [string], segments: [{id, channel, start_ms, end_ms, text, speaker_label, linked_user_id}] }` | Speaker labels resolving/changing. A `speaker_hint` is a fast guess; a later `diarization_update` for the same segment overwrites it. Apply as a diff: drop `removed_segment_ids`, upsert `segments`. Keep names in a **separate map keyed by segment id** — do not store them only on the transcript object |
 | `stopped` | `{}` | Acknowledges a graceful client-sent `stop` only |
-| `debug_event` | `{ stage, at_ms, detail }` | Admin-only, and only after the client sent `{"type":"debug","enabled":true}`. Non-admins' debug frames are ignored |
+| `debug_event` | `{ stage, at_ms, detail }` | Org owner/admin or super_admin only, and only after the client sent `{"type":"debug","enabled":true}`. Other users' debug frames are ignored |
 
-Client → server text frames besides `auth` / `stop`: `{"type":"debug","enabled": true|false}` (admin no-op otherwise).
+Client → server text frames besides `auth` / `stop`: `{"type":"debug","enabled": true|false}` (no-op otherwise).
 
 ---
 
 ## Pre/post call-type hooks
 
-Configured per call type in **Admin → Call types** (JWT / admin UI — not the API-key surface). Corella is the HTTP *client* here; your system is the server.
+Configured per call type in **Organization → Call types** (JWT / org-admin UI — not the API-key surface). Corella is the HTTP *client* here; your system is the server.
 
 These are independent of API keys. They fire for browser-recorded meetings of that type too.
 
 ### Before the call (pre-call)
 
-Default: fires **synchronously** from `POST /api/meetings`, before the response comes back — bounded by `pre_call_timeout_seconds` (default **5s**). Admins can check **Don't wait (async)** on the call type: create returns immediately, `corella.dispatch_pre_call` runs the same request, and context (if enabled) lands when the worker finishes.
+Default: fires **synchronously** from `POST /api/meetings`, before the response comes back — bounded by `pre_call_timeout_seconds` (default **5s**). Org owner/admins can check **Don't wait (async)** on the call type: create returns immediately, `corella.dispatch_pre_call` runs the same request, and context (if enabled) lands when the worker finishes.
 
 - **Method**: any (`GET` by default).
-- **URL / headers / body**: admin-configurable. Headers are a JSON object. Put tokens in **Admin → Secrets** and reference them as `{{secret.NAME}}` (e.g. `{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}`). Admin GET returns that template — never the resolved value. Dispatch interpolates the secret at send time. A missing/unknown secret aborts that hook (logged, swallowed). Literal header values still work but will be visible to admins on the next GET.
+- **URL / headers / body**: org owner/admin-configurable. Headers are a JSON object. Put tokens in **Organization → Secrets** and reference them as `{{secret.NAME}}` (e.g. `{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}`). Org-admin GET returns that template — never the resolved value. Dispatch interpolates the secret at send time. A missing/unknown secret aborts that hook (logged, swallowed). Literal header values still work but will be visible to org admins on the next GET.
 - **Body template**: `{{placeholder}}` substitution for `POST`/`PUT`/`PATCH`. Only meeting-level fields exist yet: `{{meeting_id}}`, `{{owner_id}}`, `{{owner_name}}`, `{{title}}`, `{{call_type}}`, `{{status}}`, `{{created_at}}`. Transcript/report placeholders are post-call only. A failed template render aborts that pre-call (logged, swallowed) — meeting creation still succeeds.
 - **"Use response as conversation context"**: when on, the response body is stored on the meeting (`pre_call_context`) and fed into every live-copilot cycle, *alongside* (not instead of) the group's knowledge base. Capped at `pre_call_context_max_chars` (default 20,000). Independent of whether a body template is set — the request still fires; this flag only controls whether the *response* becomes context. With it off, a pre-call is still useful as a side effect (notify another system a call started).
 - **Don't wait (async)** (default off): queue the request instead of blocking create. Use this when the lookup is slow and you would rather start recording first.
@@ -263,13 +291,13 @@ Fires **once**, right after a call's report finishes **auto**-generating (the Ce
 
 - **Method / URL / headers**: same shape as pre-call (defaults to `POST`).
 - **Body**: either a hand-written JSON template with `{{placeholder}}` tokens, or — with **"Send everything"** on — the full structured payload below, no template needed. Send-everything **wins** over a template (the template is not also applied).
-- Post-call always starts from `Content-Type: application/json`, then merges custom headers, then applies the three mandatory headers. A custom header can override `Content-Type`; it cannot override the `X-Corella-*` names.
+- Post-call always starts from `Content-Type: application/json`, then merges custom headers, then applies the four mandatory headers. A custom header can override `Content-Type`; it cannot override the `X-Corella-*` names.
 
 If auto-report is skipped, the post-call never runs even if the hook is configured. The meeting can still be `ready` with empty report fields.
 
-Admins can open a meeting and expand **API logs** to see each pre/post attempt (method, URL, status, redacted headers/body). Regular users never see this. `GET /api/meetings/{id}/hook-logs` is admin-only (403 otherwise). Credential-named headers (`Authorization`, `*secret*`, `*token*`, …) and resolved `{{secret.NAME}}` values are stored as `••••`.
+Org owner/admins can open a meeting and expand **API logs** to see each pre/post attempt (method, URL, status, redacted headers/body). Regular members never see this. `GET /api/meetings/{id}/hook-logs` is org-admin (or super_admin) only (403 otherwise). Credential-named headers (`Authorization`, `*secret*`, `*token*`, …) and resolved `{{secret.NAME}}` values are stored as `••••`.
 
-### The three mandatory headers
+### The four mandatory headers
 
 On **every** pre-call and post-call, **always**, after custom headers are merged. A custom header of the same name is overwritten:
 
@@ -278,6 +306,7 @@ On **every** pre-call and post-call, **always**, after custom headers are merged
 | `X-Corella-App-Url` | This instance's public URL (`public_app_url`, default `http://localhost:8080`) — identifies *which* deployment the request came from. Not the same as `PUBLIC_API_URL` (that's which API the browser talks to). |
 | `X-Corella-Meeting-Id` | The meeting's UUID |
 | `X-Corella-User-Id` | The meeting **owner's** user UUID (not whoever triggered create, which is the same person when using their own API key) |
+| `X-Corella-Org-Id` | The meeting's organization UUID |
 
 ### Placeholder reference (post-call body templates)
 
@@ -332,7 +361,7 @@ app.post("/corella-webhook", express.json(), (req, res) => {
 
 ### Example: a pre-call context lookup
 
-Corella calls `GET https://your-crm.example.com/lookup?...` with the three mandatory headers attached; your endpoint returns plain text or JSON, which becomes the "External context" block in every live-coaching prompt for that call if "use as context" is on.
+Corella calls `GET https://your-crm.example.com/lookup?...` with the four mandatory headers attached; your endpoint returns plain text or JSON, which becomes the "External context" block in every live-coaching prompt for that call if "use as context" is on.
 
 From inside the `api`/`worker` **containers**, `localhost` is the container itself. Point hooks at a process on the host with `http://host.docker.internal:<port>/...` (compose sets `extra_hosts: host-gateway` so this resolves on Linux too). In production, use a **public** URL the container can DNS-resolve (`https://<project>.supabase.co/functions/v1/...`), not localhost and not a hostname that only exists on your laptop. A failed DNS lookup (`Name or service not known`) still returns `201` — the meeting is created, the hook is not.
 
@@ -340,7 +369,7 @@ From inside the `api`/`worker` **containers**, `localhost` is the container itse
 
 ## Errors
 
-REST errors are standard FastAPI/Pydantic shape: `{"detail": "..."}` with the appropriate 4xx/5xx (`401` invalid/missing credentials, `403` insufficient role — admin routes, `404` not found or not owned, `409` conflict, `415` upload that doesn't look like audio, `422` validation / unknown `call_type_id` / no LLM for `POST /report`).
+REST errors are standard FastAPI/Pydantic shape: `{"detail": "..."}` with the appropriate 4xx/5xx (`401` invalid/missing credentials, `403` insufficient role — org-admin / super-admin routes, `404` not found or not owned, `409` conflict, `410` expired invite, `415` upload that doesn't look like audio, `422` validation / unknown `call_type_id` / no LLM for `POST /report`).
 
 WebSocket errors are close codes only (`4401` / `4404` / `4409` / `4410`) plus a reason string. There is no in-band `{"type":"error",...}` today; a failed connection is always a closed connection.
 
@@ -350,24 +379,26 @@ WebSocket errors are close codes only (`4401` / `4404` / `4409` / `4410`) plus a
 
 These are the ones that bite integrations. All are real behavior, not omissions.
 
-1. **API keys are not a second copy of the whole API.** List/search/upload/delete/settings/admin (including *managing* call types) are JWT-only. `GET /api/call-types` is the exception — keys can list `{id, name, slug, is_default}` so create can send a real `call_type_id`.
-2. **Create ≠ "recorded via API".** The Dashboard badge is set when the **WebSocket** authenticates with a key, not at `POST /api/meetings`.
-3. **Disconnect finalizes. You cannot resume.** Tab close, process kill, and `stop` all end the meeting. Reconnect → `4409`. Create a new one.
-4. **One live connection per meeting.** Second socket → `4409`, first keeps going. Corella's own "Go to live session" is hidden on API-recorded meetings for this reason; the lock is the real backstop.
-5. **Duration cap is API-key / WebSocket only.** Forgotten Corella browser tabs are not capped. REST polling is not capped. Changing the key's minutes does not affect an in-flight session.
-6. **`4410` still produces a real meeting** (audio, report, post-call). Handle it as "time's up", not "auth failed".
-7. **Auth is the first WS frame, in 5 seconds, or `4401`.** Don't open the socket and then wait on your audio pipeline before sending `auth`.
-8. **Audio format is fixed.** PCM16LE mono 16 kHz, channel byte prefix. No `Content-Type`, no JSON wrapper, no Opus/WebM.
-9. **Partial transcripts are UI-only.** Only `transcript` (and later diarization rewrites of those segments) is persisted.
-10. **Live `copilot.action_items` ≠ report action items.** The WS field is ephemeral per cycle; durable open/done items come from the report / post-call payload. `GET /insights` has suggestion/blockers/score, not those live action items.
-11. **Post-call runs only after a successful auto-report.** No LLM connected → no auto-report → no hook, even if the recording finalized to `ready`. Manual `POST /report` also does not fire it.
-12. **Pre-call failure is silent to the caller.** You still get `201`. The most common prod miss is DNS: the hostname in the hook URL does not resolve *inside* the api container (`Name or service not known`). Admins can open the meeting's **API logs**; otherwise check Corella logs or your receiving endpoint.
-13. **Mandatory hook headers always win.** You cannot spoof `X-Corella-Meeting-Id` via custom header config.
-14. **`GET /meetings/{id}` is group-visible; transcript is not.** An API key whose owner shares a group can read a colleague's summary, not their transcript.
-15. **CORS applies to browser REST, not to server-to-server REST.** Machine callers should not send the request from a random web origin unless that origin is in `CORS_ORIGINS`.
-16. **Key plaintext is unrecoverable.** Settings list shows a prefix (`sk_live_xxxxxx…`) only. Rotate by creating a new key and deleting the old one; in-flight sockets using the deleted key fail on the next auth (the current socket is not torn down by delete — revoke is "cannot authenticate again").
-17. **Half-open TCP is why the duration cap exists.** Disconnect-to-finalize only runs when the server *sees* the socket die.
-18. **`transcript` has no `speaker_label`, and it often arrives *after* `diarization_update` for the same id** (Deepgram publishes the label to Redis before sending the transcript frame). If you store the name on the transcript object and then `set(id, transcriptEvent)`, you wipe every split and every line falls back to `me`. Keep names in a separate map keyed by segment id — that is what Corella's own live UI does, what the `api_test_server` page at `/` does, and what [`packages/corella-live`](packages/corella-live) does for you.
+1. **API keys are not a second copy of the whole API.** List/search/upload/delete/settings/org/super-admin (including *managing* call types) are JWT-only. `GET /api/call-types` is the exception — keys can list `{id, name, slug, is_default}` for the key's org so create can send a real `call_type_id`.
+2. **API keys stay in the org they were created in.** The owner's switcher does not move them.
+3. **Create ≠ the "API: …" badge.** The Dashboard badge is set when the **WebSocket** authenticates with a key, not at `POST /api/meetings`.
+4. **Disconnect finalizes. You cannot resume.** Tab close, process kill, and `stop` all end the meeting. Reconnect → `4409`. Create a new one.
+5. **One live connection per meeting.** Second socket → `4409`, first keeps going. Corella's own "Go to live session" is hidden on API-recorded meetings for this reason; the lock is the real backstop.
+6. **Duration cap is API-key / WebSocket only.** Forgotten Corella browser tabs are not capped. REST polling is not capped. Changing the key's minutes does not affect an in-flight session.
+7. **`4410` still produces a real meeting** (audio, report, post-call). Handle it as "time's up", not "auth failed".
+8. **Auth is the first WS frame, in 5 seconds, or `4401`.** Don't open the socket and then wait on your audio pipeline before sending `auth`.
+9. **Audio format is fixed.** PCM16LE mono 16 kHz, channel byte prefix. No `Content-Type`, no JSON wrapper, no Opus/WebM.
+10. **Partial transcripts are UI-only.** Only `transcript` (and later diarization rewrites of those segments) is persisted.
+11. **Live `copilot.action_items` ≠ report action items.** The WS field is ephemeral per cycle; durable open/done items come from the report / post-call payload. `GET /insights` has suggestion/blockers/score, not those live action items.
+12. **Post-call runs only after a successful auto-report.** No LLM connected → no auto-report → no hook, even if the recording finalized to `ready`. Manual `POST /report` also does not fire it.
+13. **Pre-call failure is silent to the caller.** You still get `201`. The most common prod miss is DNS: the hostname in the hook URL does not resolve *inside* the api container (`Name or service not known`). Org owner/admins can open the meeting's **API logs**; otherwise check Corella logs or your receiving endpoint.
+14. **Mandatory hook headers always win.** You cannot spoof `X-Corella-Meeting-Id` or `X-Corella-Org-Id` via custom header config.
+15. **`GET /meetings/{id}` is group-visible; transcript is not.** An API key whose owner shares a group in that org can read a colleague's summary, not their transcript.
+16. **Org "All" is not instance `/all`.** Org owner/admin dashboard All uses `GET /api/meetings/org`. `GET /api/meetings/all` and `/search/all` are super-admin-only and the only cross-org read path.
+17. **CORS applies to browser REST, not to server-to-server REST.** Machine callers should not send the request from a random web origin unless that origin is in `CORS_ORIGINS`.
+18. **Key plaintext is unrecoverable.** Settings list shows a prefix (`sk_live_xxxxxx…`) only. Rotate by creating a new key and deleting the old one; in-flight sockets using the deleted key fail on the next auth (the current socket is not torn down by delete — revoke is "cannot authenticate again").
+19. **Half-open TCP is why the duration cap exists.** Disconnect-to-finalize only runs when the server *sees* the socket die.
+20. **`transcript` has no `speaker_label`, and it often arrives *after* `diarization_update` for the same id** (Deepgram publishes the label to Redis before sending the transcript frame). If you store the name on the transcript object and then `set(id, transcriptEvent)`, you wipe every split and every line falls back to `me`. Keep names in a separate map keyed by segment id — that is what Corella's own live UI does, what the `api_test_server` page at `/` does, and what [`packages/corella-live`](packages/corella-live) does for you.
 
 ---
 
@@ -398,7 +429,7 @@ http://host.docker.internal:9199/anyfail # any path containing "fail" → 500, f
 http://host.docker.internal:9199/anyslow # any path containing "slow" → sleeps 8s, for testing the timeout path
 ```
 
-Every request is logged (method, the three mandatory headers checked off, body) and kept in memory — `GET http://localhost:9199/requests` to inspect, `DELETE` to clear.
+Every request is logged (method, the four mandatory headers checked off, body) and kept in memory — `GET http://localhost:9199/requests` to inspect, `DELETE` to clear.
 
 `server/tests/test_call_hooks_integration.py` starts this exact app as a subprocess and asserts against real loopback HTTP — both hooks in "special" (`pre_call_use_as_context` / `post_call_send_full_payload`) and "regular" (plain fetch / custom template) modes, plus failure and timeout — on top of `test_call_hooks.py`'s monkeypatched-`httpx` unit tests.
 

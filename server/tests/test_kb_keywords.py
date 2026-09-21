@@ -11,8 +11,9 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.models.cost import LLMUsageEvent, UsageKind
-from app.models.group import Group
+from app.models.group import Group, GroupMembership
 from app.models.kb_document import KBDocument, KBDocumentStatus
+from app.models.organization import Organization, OrgRole
 from app.services.access import searchable_kb_keywords
 from app.services.embeddings import kb_keywords as kb_keywords_module
 from app.services.embeddings.kb_keywords import extract_keywords_via_llm
@@ -20,9 +21,10 @@ from app.services.llm.base import LLMError, LLMResponse
 from app.services.llm.resolve import resolve_provider
 
 
-def _ready_doc(owner_id, keywords=None, status=KBDocumentStatus.READY, group_id=None) -> KBDocument:
+def _ready_doc(owner_id, organization_id, keywords=None, status=KBDocumentStatus.READY, group_id=None) -> KBDocument:
     return KBDocument(
         owner_id=owner_id,
+        organization_id=organization_id,
         group_id=group_id,
         filename="notes.md",
         content_type="text/markdown",
@@ -34,34 +36,44 @@ def _ready_doc(owner_id, keywords=None, status=KBDocumentStatus.READY, group_id=
 
 @pytest.mark.asyncio
 async def test_searchable_kb_keywords_scoped_to_group(db, make_user):
-    group = Group(name="Test Group")
+    alice = await make_user(email="alice@example.com")
+    organization = await db.get(Organization, alice.active_organization_id)
+    group = Group(name="Test Group", organization_id=organization.id)
     db.add(group)
+    await db.flush()
+    db.add(GroupMembership(user_id=alice.id, group_id=group.id))
     await db.commit()
 
-    alice = await make_user(email="alice@example.com", group_id=group.id)
-    bob = await make_user(email="bob@example.com", group_id=group.id)
-    carol = await make_user(email="carol@example.com")  # different (no) group
+    bob = await make_user(
+        email="bob@example.com",
+        org=organization,
+        org_role=OrgRole.MEMBER,
+        group_ids=[group.id],
+    )
+    carol = await make_user(email="carol@example.com")
 
-    db.add(_ready_doc(alice.id, keywords=["Corella", "Deepgram"], group_id=group.id))
-    db.add(_ready_doc(bob.id, keywords=["Nova-3"], group_id=group.id))
-    db.add(_ready_doc(carol.id, keywords=["ShouldNotLeak"]))
+    db.add(
+        _ready_doc(alice.id, organization.id, keywords=["Corella", "Deepgram"], group_id=group.id)
+    )
+    db.add(_ready_doc(bob.id, organization.id, keywords=["Nova-3"], group_id=group.id))
+    db.add(_ready_doc(carol.id, carol.active_organization_id, keywords=["ShouldNotLeak"]))
     await db.commit()
 
-    alice_keywords = set(await searchable_kb_keywords(db, alice.id))
+    alice_keywords = set(await searchable_kb_keywords(db, alice.id, organization.id))
     assert alice_keywords == {"Corella", "Deepgram", "Nova-3"}
 
-    carol_keywords = set(await searchable_kb_keywords(db, carol.id))
+    carol_keywords = set(await searchable_kb_keywords(db, carol.id, carol.active_organization_id))
     assert carol_keywords == {"ShouldNotLeak"}
 
 
 @pytest.mark.asyncio
 async def test_searchable_kb_keywords_dedupes_case_insensitively(db, make_user):
     user = await make_user()
-    db.add(_ready_doc(user.id, keywords=["Corella"]))
-    db.add(_ready_doc(user.id, keywords=["corella", "Deepgram"]))
+    db.add(_ready_doc(user.id, user.active_organization_id, keywords=["Corella"]))
+    db.add(_ready_doc(user.id, user.active_organization_id, keywords=["corella", "Deepgram"]))
     await db.commit()
 
-    keywords = await searchable_kb_keywords(db, user.id)
+    keywords = await searchable_kb_keywords(db, user.id, user.active_organization_id)
     assert keywords.count("Corella") + keywords.count("corella") == 1  # first-seen casing kept
     assert "Deepgram" in keywords
 
@@ -69,21 +81,21 @@ async def test_searchable_kb_keywords_dedupes_case_insensitively(db, make_user):
 @pytest.mark.asyncio
 async def test_searchable_kb_keywords_ignores_non_ready_and_null(db, make_user):
     user = await make_user()
-    db.add(_ready_doc(user.id, keywords=["PendingTerm"], status=KBDocumentStatus.PENDING))
-    db.add(_ready_doc(user.id, keywords=None))
+    db.add(_ready_doc(user.id, user.active_organization_id, keywords=["PendingTerm"], status=KBDocumentStatus.PENDING))
+    db.add(_ready_doc(user.id, user.active_organization_id, keywords=None))
     await db.commit()
 
-    assert await searchable_kb_keywords(db, user.id) == []
+    assert await searchable_kb_keywords(db, user.id, user.active_organization_id) == []
 
 
 @pytest.mark.asyncio
 async def test_searchable_kb_keywords_respects_limit(db, make_user, monkeypatch):
     monkeypatch.setattr(get_settings(), "stt_keyword_limit", 2)
     user = await make_user()
-    db.add(_ready_doc(user.id, keywords=["One", "Two", "Three", "Four"]))
+    db.add(_ready_doc(user.id, user.active_organization_id, keywords=["One", "Two", "Three", "Four"]))
     await db.commit()
 
-    assert len(await searchable_kb_keywords(db, user.id)) == 2
+    assert len(await searchable_kb_keywords(db, user.id, user.active_organization_id)) == 2
 
 
 @pytest.mark.asyncio

@@ -79,4 +79,4 @@ Chunks should already be 16 kHz mono PCM16. No codec negotiation.
 
 ## What this package does not do
 
-JWT login, Settings, admin, knowledge base, call-type hooks, or Corella's own React UI. API keys only reach the integration surface in `API.md`.
+JWT login, Settings, organization/super-admin, knowledge base, call-type hooks, or Corella's own React UI. API keys are bound to the organization they were created in — they do not follow the owner's org switcher and still do not reach org/super-admin surfaces. See the integration surface in `API.md`.

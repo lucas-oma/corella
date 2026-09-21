@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cost import LLMUsageEvent
@@ -85,11 +85,16 @@ def _dense_daily(start: date, end: date, totals_by_day: dict[date, float]) -> li
 async def get_cost_summary(
     db: AsyncSession,
     period: CostPeriod = "30d",
+    organization_id: UUID | None = None,
 ) -> CostSummary:
-    """One aggregate read for the whole Admin Costs section — a handful of
-    grouped SQL aggregations against the LLMUsageEvent ledger, not
-    application-level looping over rows.
+    """One aggregate read for the Costs section. When organization_id is
+    set, scoped to that org; otherwise instance-wide (super-admin).
     """
+    org_clause = (
+        LLMUsageEvent.organization_id == organization_id
+        if organization_id is not None
+        else true()
+    )
     total_usd, priced_call_count, total_call_count, total_input_tokens, total_output_tokens = (
         await db.execute(
             select(
@@ -98,7 +103,7 @@ async def get_cost_summary(
                 func.count(LLMUsageEvent.id),
                 func.coalesce(func.sum(LLMUsageEvent.input_tokens), 0),
                 func.coalesce(func.sum(LLMUsageEvent.output_tokens), 0),
-            )
+            ).where(org_clause)
         )
     ).one()
     avg_cost_per_call = (total_usd / priced_call_count) if priced_call_count else None
@@ -113,6 +118,7 @@ async def get_cost_summary(
                 func.count(LLMUsageEvent.id),
             )
             .outerjoin(User, User.id == LLMUsageEvent.owner_id)
+            .where(org_clause)
             .group_by(LLMUsageEvent.owner_id, User.full_name)
             .order_by(by_user_totals.desc())
         )
@@ -131,6 +137,7 @@ async def get_cost_summary(
     by_provider_rows = (
         await db.execute(
             select(LLMUsageEvent.provider, by_provider_totals, func.count(LLMUsageEvent.id))
+            .where(org_clause)
             .group_by(LLMUsageEvent.provider)
             .order_by(by_provider_totals.desc())
         )
@@ -147,7 +154,7 @@ async def get_cost_summary(
     daily_rows = (
         await db.execute(
             select(day_col, daily_totals)
-            .where(LLMUsageEvent.created_at >= since)
+            .where(LLMUsageEvent.created_at >= since, org_clause)
             .group_by(day_col)
             .order_by(day_col)
         )
@@ -170,7 +177,8 @@ async def get_cost_summary(
                 select(day_col, daily_totals)
                 .where(
                     LLMUsageEvent.created_at
-                    >= datetime(proj_start.year, proj_start.month, proj_start.day, tzinfo=UTC)
+                    >= datetime(proj_start.year, proj_start.month, proj_start.day, tzinfo=UTC),
+                    org_clause,
                 )
                 .group_by(day_col)
                 .order_by(day_col)

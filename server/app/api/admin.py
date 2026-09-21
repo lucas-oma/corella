@@ -4,135 +4,114 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import AuthContext, require_org_admin, require_super_admin
 from app.core.db import get_db
-from app.core.security import decrypt_secret, encrypt_secret, hash_password
+from app.core.security import decrypt_secret, encrypt_secret
 from app.models.app_secret import AppSecret
 from app.models.call_type import CallType
-from app.models.group import Group
+from app.models.organization import Organization, OrganizationMembership, OrgRole
 from app.models.user import User
 from app.schemas.app_secret import AppSecretCreate, AppSecretRead, AppSecretUpdate
 from app.schemas.call_type import CallTypeCreate, CallTypeRead, CallTypeUpdate
 from app.schemas.cost import CostSummaryRead, DailyCostRead, ProviderCostBreakdownRead, UserCostBreakdownRead
-from app.schemas.group import GroupCreate, GroupRead
-from app.schemas.user import AdminUserCreate, AdminUserUpdate, UserRead
+from app.schemas.organization import OrganizationRead
 from app.services.admin.costs import get_cost_summary
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
-)
+router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
-@router.get("/users", response_model=list[UserRead])
-async def list_users(db: AsyncSession = Depends(get_db)) -> list[User]:
-    result = await db.scalars(select(User).order_by(User.created_at))
-    return list(result)
-
-
-@router.post("/users", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-async def create_user(payload: AdminUserCreate, db: AsyncSession = Depends(get_db)) -> User:
-    """Admin-managed account creation — works regardless of the
-    ALLOW_PUBLIC_REGISTRATION setting, and is the only way to create an
-    account (besides the env-seeded bootstrap admin) once that's off.
-    """
-    existing = await db.scalar(select(User).where(User.email == payload.email))
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Email is already registered"
+@router.get("/organizations", response_model=list[OrganizationRead])
+async def list_all_organizations(
+    _admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[OrganizationRead]:
+    rows = (
+        await db.execute(
+            select(Organization, OrganizationMembership.role)
+            .join(
+                OrganizationMembership,
+                (OrganizationMembership.organization_id == Organization.id)
+                & (OrganizationMembership.role == OrgRole.OWNER),
+            )
+            .order_by(Organization.created_at)
         )
-
-    if payload.group_id is not None and await db.get(Group, payload.group_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
-
-    user = User(
-        email=payload.email,
-        hashed_password=hash_password(payload.password),
-        full_name=payload.full_name,
-        role=payload.role,
-        group_id=payload.group_id,
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    return user
-
-
-@router.patch("/users/{user_id}", response_model=UserRead)
-async def update_user(
-    user_id: UUID, payload: AdminUserUpdate, db: AsyncSession = Depends(get_db)
-) -> User:
-    """Reassigns an *existing* account's role and/or group — POST .../users
-    is for creating new accounts. group_id=None is ambiguous with "leave it
-    alone" for a partial update, hence clear_group to say "actually unset
-    it" explicitly.
-    """
-    user = await db.get(User, user_id)
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-    if payload.role is not None:
-        user.role = payload.role
-    if payload.clear_group:
-        user.group_id = None
-    elif payload.group_id is not None:
-        if await db.get(Group, payload.group_id) is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
-        user.group_id = payload.group_id
-
-    await db.commit()
-    await db.refresh(user)
-    return user
-
-
-@router.get("/groups", response_model=list[GroupRead])
-async def list_groups(db: AsyncSession = Depends(get_db)) -> list[GroupRead]:
-    result = await db.execute(
-        select(Group, func.count(User.id))
-        .outerjoin(User, User.group_id == Group.id)
-        .group_by(Group.id)
-        .order_by(Group.created_at)
-    )
+    ).all()
     return [
-        GroupRead(id=group.id, name=group.name, created_at=group.created_at, member_count=count)
-        for group, count in result.all()
+        OrganizationRead(
+            id=org.id,
+            name=org.name,
+            is_instance_org=org.is_instance_org,
+            role=role,
+            created_at=org.created_at,
+        )
+        for org, role in rows
     ]
 
 
-@router.post("/groups", response_model=GroupRead, status_code=status.HTTP_201_CREATED)
-async def create_group(payload: GroupCreate, db: AsyncSession = Depends(get_db)) -> GroupRead:
-    group = Group(name=payload.name)
-    db.add(group)
+
+
+
+class SuperAdminFlag(BaseModel):
+    is_super_admin: bool
+
+
+@router.patch("/users/{user_id}/super-admin")
+async def set_super_admin(
+    user_id: UUID,
+    payload: SuperAdminFlag,
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if user.id == current_user.id and not payload.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Cannot remove your own super-admin flag",
+        )
+    user.is_super_admin = payload.is_super_admin
     await db.commit()
-    await db.refresh(group)
-    return GroupRead(id=group.id, name=group.name, created_at=group.created_at, member_count=0)
+    return {"id": str(user.id), "is_super_admin": user.is_super_admin}
 
 
-@router.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_group(group_id: UUID, db: AsyncSession = Depends(get_db)) -> None:
-    """Unassigns members (User.group_id -> NULL via ondelete=SET NULL) —
-    never deletes their accounts."""
-    group = await db.get(Group, group_id)
-    if group is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
-    await db.delete(group)
-    await db.commit()
+@router.get("/users")
+async def list_instance_users(
+    _admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    users = list(await db.scalars(select(User).order_by(User.created_at)))
+    return [
+        {
+            "id": str(u.id),
+            "email": u.email,
+            "full_name": u.full_name,
+            "is_super_admin": u.is_super_admin,
+        }
+        for u in users
+    ]
 
 
-async def _unset_other_defaults(db: AsyncSession, exclude_id: UUID | None) -> None:
-    """Enforces the single-default invariant (exactly one CallType with
-    is_default=True) in application code, in the same transaction as the
-    caller's own insert/update — not a DB constraint, since "exactly one
-    true, the rest false" isn't expressible as a simple column check.
-    """
+async def _unset_other_defaults(
+    db: AsyncSession, organization_id: UUID, exclude_id: UUID | None
+) -> None:
+    """Enforces the single-default invariant per org."""
     others = await db.scalars(
-        select(CallType).where(CallType.is_default.is_(True), CallType.id != exclude_id)
+        select(CallType).where(
+            CallType.organization_id == organization_id,
+            CallType.is_default.is_(True),
+            CallType.id != exclude_id,
+        )
         if exclude_id is not None
-        else select(CallType).where(CallType.is_default.is_(True))
+        else select(CallType).where(
+            CallType.organization_id == organization_id, CallType.is_default.is_(True)
+        )
     )
     for other in others:
         other.is_default = False
@@ -183,9 +162,11 @@ def _to_call_type_read(call_type: CallType) -> CallTypeRead:
 
 
 async def _require_unique_secret_name(
-    db: AsyncSession, name: str, exclude_id: UUID | None = None
+    db: AsyncSession, organization_id: UUID, name: str, exclude_id: UUID | None = None
 ) -> None:
-    query = select(AppSecret).where(AppSecret.name == name)
+    query = select(AppSecret).where(
+        AppSecret.organization_id == organization_id, AppSecret.name == name
+    )
     if exclude_id is not None:
         query = query.where(AppSecret.id != exclude_id)
     existing = await db.scalar(query)
@@ -197,15 +178,27 @@ async def _require_unique_secret_name(
 
 
 @router.get("/secrets", response_model=list[AppSecretRead])
-async def list_secrets(db: AsyncSession = Depends(get_db)) -> list[AppSecret]:
-    result = await db.scalars(select(AppSecret).order_by(AppSecret.name))
+async def list_secrets(
+    ctx: AuthContext = Depends(require_org_admin), db: AsyncSession = Depends(get_db)
+) -> list[AppSecret]:
+    result = await db.scalars(
+        select(AppSecret).where(AppSecret.organization_id == ctx.org_id).order_by(AppSecret.name)
+    )
     return list(result)
 
 
 @router.post("/secrets", response_model=AppSecretRead, status_code=status.HTTP_201_CREATED)
-async def create_secret(payload: AppSecretCreate, db: AsyncSession = Depends(get_db)) -> AppSecret:
-    await _require_unique_secret_name(db, payload.name)
-    secret = AppSecret(name=payload.name, value_encrypted=encrypt_secret(payload.value))
+async def create_secret(
+    payload: AppSecretCreate,
+    ctx: AuthContext = Depends(require_org_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AppSecret:
+    await _require_unique_secret_name(db, ctx.org_id, payload.name)
+    secret = AppSecret(
+        organization_id=ctx.org_id,
+        name=payload.name,
+        value_encrypted=encrypt_secret(payload.value),
+    )
     db.add(secret)
     await db.commit()
     await db.refresh(secret)
@@ -214,14 +207,17 @@ async def create_secret(payload: AppSecretCreate, db: AsyncSession = Depends(get
 
 @router.patch("/secrets/{secret_id}", response_model=AppSecretRead)
 async def update_secret(
-    secret_id: UUID, payload: AppSecretUpdate, db: AsyncSession = Depends(get_db)
+    secret_id: UUID,
+    payload: AppSecretUpdate,
+    ctx: AuthContext = Depends(require_org_admin),
+    db: AsyncSession = Depends(get_db),
 ) -> AppSecret:
     secret = await db.get(AppSecret, secret_id)
-    if secret is None:
+    if secret is None or secret.organization_id != ctx.org_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
 
     if "name" in payload.model_fields_set and payload.name is not None and payload.name != secret.name:
-        await _require_unique_secret_name(db, payload.name, exclude_id=secret.id)
+        await _require_unique_secret_name(db, ctx.org_id, payload.name, exclude_id=secret.id)
         secret.name = payload.name
     if "value" in payload.model_fields_set and payload.value is not None:
         secret.value_encrypted = encrypt_secret(payload.value)
@@ -232,27 +228,42 @@ async def update_secret(
 
 
 @router.delete("/secrets/{secret_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_secret(secret_id: UUID, db: AsyncSession = Depends(get_db)) -> None:
+async def delete_secret(
+    secret_id: UUID,
+    ctx: AuthContext = Depends(require_org_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
     secret = await db.get(AppSecret, secret_id)
-    if secret is None:
+    if secret is None or secret.organization_id != ctx.org_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
     await db.delete(secret)
     await db.commit()
 
 
 @router.get("/call-types", response_model=list[CallTypeRead])
-async def list_call_types(db: AsyncSession = Depends(get_db)) -> list[CallTypeRead]:
-    result = await db.scalars(select(CallType).order_by(CallType.created_at))
+async def list_call_types(
+    ctx: AuthContext = Depends(require_org_admin), db: AsyncSession = Depends(get_db)
+) -> list[CallTypeRead]:
+    result = await db.scalars(
+        select(CallType).where(CallType.organization_id == ctx.org_id).order_by(CallType.created_at)
+    )
     return [_to_call_type_read(ct) for ct in result]
 
 
 @router.post("/call-types", response_model=CallTypeRead, status_code=status.HTTP_201_CREATED)
-async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(get_db)) -> CallTypeRead:
-    existing = await db.scalar(select(CallType).where(CallType.slug == payload.slug))
+async def create_call_type(
+    payload: CallTypeCreate,
+    ctx: AuthContext = Depends(require_org_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CallTypeRead:
+    existing = await db.scalar(
+        select(CallType).where(CallType.organization_id == ctx.org_id, CallType.slug == payload.slug)
+    )
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A call type with this slug already exists")
 
     call_type = CallType(
+        organization_id=ctx.org_id,
         name=payload.name,
         slug=payload.slug,
         report_guidance=payload.report_guidance,
@@ -274,8 +285,8 @@ async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(g
     )
     db.add(call_type)
     if payload.is_default:
-        await db.flush()  # call_type needs its id before excluding it below
-        await _unset_other_defaults(db, call_type.id)
+        await db.flush()
+        await _unset_other_defaults(db, ctx.org_id, call_type.id)
     await db.commit()
     await db.refresh(call_type)
     return _to_call_type_read(call_type)
@@ -283,15 +294,22 @@ async def create_call_type(payload: CallTypeCreate, db: AsyncSession = Depends(g
 
 @router.patch("/call-types/{call_type_id}", response_model=CallTypeRead)
 async def update_call_type(
-    call_type_id: UUID, payload: CallTypeUpdate, db: AsyncSession = Depends(get_db)
+    call_type_id: UUID,
+    payload: CallTypeUpdate,
+    ctx: AuthContext = Depends(require_org_admin),
+    db: AsyncSession = Depends(get_db),
 ) -> CallTypeRead:
     call_type = await db.get(CallType, call_type_id)
-    if call_type is None:
+    if call_type is None or call_type.organization_id != ctx.org_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call type not found")
 
     fields = payload.model_dump(exclude_unset=True)
     if "slug" in fields and fields["slug"] != call_type.slug:
-        clash = await db.scalar(select(CallType).where(CallType.slug == fields["slug"]))
+        clash = await db.scalar(
+            select(CallType).where(
+                CallType.organization_id == ctx.org_id, CallType.slug == fields["slug"]
+            )
+        )
         if clash is not None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A call type with this slug already exists")
 
@@ -304,7 +322,7 @@ async def update_call_type(
         setattr(call_type, field, value)
 
     if fields.get("is_default"):
-        await _unset_other_defaults(db, call_type.id)
+        await _unset_other_defaults(db, ctx.org_id, call_type.id)
 
     await db.commit()
     await db.refresh(call_type)
@@ -312,14 +330,13 @@ async def update_call_type(
 
 
 @router.delete("/call-types/{call_type_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_call_type(call_type_id: UUID, db: AsyncSession = Depends(get_db)) -> None:
-    """Meetings that used this type get call_type_id SET NULL automatically
-    (the FK's ondelete rule, app/models/meeting.py) — never blocked or
-    cascaded. The one thing that IS blocked: deleting the current default,
-    since every new meeting needs a default to resolve to.
-    """
+async def delete_call_type(
+    call_type_id: UUID,
+    ctx: AuthContext = Depends(require_org_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
     call_type = await db.get(CallType, call_type_id)
-    if call_type is None:
+    if call_type is None or call_type.organization_id != ctx.org_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call type not found")
     if call_type.is_default:
         raise HTTPException(
@@ -333,14 +350,42 @@ async def delete_call_type(call_type_id: UUID, db: AsyncSession = Depends(get_db
 @router.get("/costs", response_model=CostSummaryRead)
 async def get_costs(
     period: Literal["7d", "30d", "month", "year"] = "30d",
+    ctx: AuthContext = Depends(require_org_admin),
     db: AsyncSession = Depends(get_db),
 ) -> CostSummaryRead:
-    """Aggregate LLM cost analytics for the Admin Costs section — total,
-    per-user, daily history (dense zero-filled series for `period`), and a
-    trailing-average next-7-days projection.
-    Built from the LLMUsageEvent ledger (app/services/admin/costs.py), not
-    the per-meeting running total, which has no per-event timestamps.
-    """
+    summary = await get_cost_summary(db, period=period, organization_id=ctx.org_id)
+    return CostSummaryRead(
+        total_usd=summary.total_usd,
+        priced_call_count=summary.priced_call_count,
+        total_call_count=summary.total_call_count,
+        avg_cost_per_call=summary.avg_cost_per_call,
+        total_input_tokens=summary.total_input_tokens,
+        total_output_tokens=summary.total_output_tokens,
+        by_user=[
+            UserCostBreakdownRead(
+                owner_id=u.owner_id,
+                owner_name=u.owner_name,
+                total_usd=u.total_usd,
+                call_count=u.call_count,
+            )
+            for u in summary.by_user
+        ],
+        by_provider=[
+            ProviderCostBreakdownRead(provider=p.provider, total_usd=p.total_usd, call_count=p.call_count)
+            for p in summary.by_provider
+        ],
+        daily=[DailyCostRead(day=d.day, total_usd=d.total_usd) for d in summary.daily],
+        projected_next_7_days_usd=summary.projected_next_7_days_usd,
+        period=summary.period,
+    )
+
+
+@router.get("/costs/instance", response_model=CostSummaryRead)
+async def get_instance_costs(
+    period: Literal["7d", "30d", "month", "year"] = "30d",
+    _admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CostSummaryRead:
     summary = await get_cost_summary(db, period=period)
     return CostSummaryRead(
         total_usd=summary.total_usd,

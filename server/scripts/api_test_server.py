@@ -23,7 +23,7 @@ host machine, not on the corella_default docker network:
     pre_call_url  = http://host.docker.internal:9199/pre
     post_call_url = http://host.docker.internal:9199/post
 
-Every request is logged to the console (method, path, the three
+Every request is logged to the console (method, path, the four
 mandatory headers pulled out specifically, and the body) and kept
 in-memory — GET /requests to inspect everything received so far as JSON,
 or DELETE /requests to clear it between test runs.
@@ -73,7 +73,12 @@ _LIVE_CLIENT_DIST = Path(__file__).resolve().parents[2] / "packages" / "corella-
 
 app = FastAPI(title="Corella API test server")
 
-_MANDATORY_HEADERS = ["x-corella-app-url", "x-corella-meeting-id", "x-corella-user-id"]
+_MANDATORY_HEADERS = [
+    "x-corella-app-url",
+    "x-corella-meeting-id",
+    "x-corella-user-id",
+    "x-corella-org-id",
+]
 _log: list[dict] = []
 
 

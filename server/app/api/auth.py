@@ -6,14 +6,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.api.organizations import build_user_read
 from app.core import storage
 from app.core.config import get_settings
 from app.core.db import get_db
 from app.core.security import create_access_token, hash_password, verify_password
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.models.voice_identity import VoiceIdentity
 from app.schemas.user import AuthConfig, ProfileUpdate, Token, UserCreate, UserLogin, UserRead
 from app.services.embeddings.qdrant_store import delete_speaker_embedding
+from app.services.organizations import create_organization, default_org_name
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -36,19 +38,17 @@ async def _user_read(db: AsyncSession, user: User) -> UserRead:
     """voice_enrolled isn't a User column — computed here rather than via
     an ORM relationship, since a user has at most one VoiceIdentity
     (linked_user_id=self) and this is the only place that needs it."""
-    has_voice = await db.scalar(
-        select(VoiceIdentity.id).where(VoiceIdentity.linked_user_id == user.id).limit(1)
-    )
-    return UserRead.model_validate(user, from_attributes=True).model_copy(
-        update={"voice_enrolled": has_voice is not None}
-    )
+    return await build_user_read(db, user)
 
 
 @router.get("/config", response_model=AuthConfig)
 async def auth_config() -> AuthConfig:
     """Public, unauthenticated — lets the frontend know whether to offer
     self-serve registration or point people at an admin instead."""
-    return AuthConfig(allow_public_registration=get_settings().allow_public_registration)
+    return AuthConfig(
+        allow_public_registration=get_settings().allow_public_registration,
+        max_orgs_per_user=get_settings().max_orgs_per_user,
+    )
 
 
 @router.post("/register", response_model=Token, status_code=status.HTTP_201_CREATED)
@@ -65,16 +65,17 @@ async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)) -> T
             status_code=status.HTTP_409_CONFLICT, detail="Email is already registered"
         )
 
-    # Self-serve registration always creates a regular member — admins are
-    # provisioned via ADMIN_EMAIL/ADMIN_PASSWORD (see app.core.bootstrap) or
-    # created by an existing admin through POST /api/admin/users.
     user = User(
         email=payload.email,
         hashed_password=hash_password(payload.password),
         full_name=payload.full_name,
-        role=UserRole.MEMBER,
+        is_super_admin=False,
     )
     db.add(user)
+    await db.flush()
+    await create_organization(
+        db, owner=user, name=default_org_name(payload.full_name), activate=True
+    )
     await db.commit()
     await db.refresh(user)
 

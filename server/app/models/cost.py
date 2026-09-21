@@ -55,6 +55,9 @@ class LLMUsageEvent(UUIDPrimaryKeyMixin, Base):
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), index=True
+    )
     provider: Mapped[str] = mapped_column(String(50))
     model: Mapped[str] = mapped_column(String(255))
     kind: Mapped[UsageKind] = mapped_column(pg_enum(UsageKind, "usage_event_kind"))

@@ -91,7 +91,13 @@ async def test_delete_api_key_removes_it_and_is_scoped_to_owner(db, make_user, a
 async def test_api_key_authenticates_rest_requests_as_its_owner(db, make_user, app_client):
     user = await make_user()
     full_key, prefix, key_hash = generate_api_key()
-    db.add(ApiKey(owner_id=user.id, name="Integration", key_prefix=prefix, key_hash=key_hash))
+    db.add(ApiKey(
+        owner_id=user.id,
+        organization_id=user.active_organization_id,
+        name="Integration",
+        key_prefix=prefix,
+        key_hash=key_hash,
+    ))
     await db.commit()
 
     response = await app_client.post(
@@ -105,8 +111,19 @@ async def test_api_key_authenticates_rest_requests_as_its_owner(db, make_user, a
 async def test_api_key_can_list_call_types(db, make_user, app_client):
     user = await make_user()
     full_key, prefix, key_hash = generate_api_key()
-    db.add(ApiKey(owner_id=user.id, name="Integration", key_prefix=prefix, key_hash=key_hash))
-    db.add(CallType(name="Sales", slug="sales-via-key", is_default=True))
+    db.add(ApiKey(
+        owner_id=user.id,
+        organization_id=user.active_organization_id,
+        name="Integration",
+        key_prefix=prefix,
+        key_hash=key_hash,
+    ))
+    db.add(CallType(
+        organization_id=user.active_organization_id,
+        name="Sales",
+        slug="sales-via-key",
+        is_default=True,
+    ))
     await db.commit()
 
     response = await app_client.get("/api/call-types", headers={"Authorization": f"Bearer {full_key}"})
@@ -130,7 +147,13 @@ async def test_unknown_api_key_is_rejected(app_client):
 async def test_api_key_last_used_at_updates_on_use(db, make_user, app_client):
     user = await make_user()
     full_key, prefix, key_hash = generate_api_key()
-    api_key = ApiKey(owner_id=user.id, name="Integration", key_prefix=prefix, key_hash=key_hash)
+    api_key = ApiKey(
+        owner_id=user.id,
+        organization_id=user.active_organization_id,
+        name="Integration",
+        key_prefix=prefix,
+        key_hash=key_hash,
+    )
     db.add(api_key)
     await db.commit()
     await db.refresh(api_key)
@@ -151,16 +174,29 @@ async def test_api_key_last_used_at_updates_on_use(db, make_user, app_client):
 
 @pytest.mark.asyncio
 async def test_meeting_api_key_name_reflects_the_streaming_integration(db, make_user):
-    """Meeting.api_key_name (app/models/meeting.py) is what the "Live via
-    API"/"Recorded via API" badge reads — None for a browser-recorded
-    meeting, the key's own label once one's attached."""
+    """Meeting.api_key_name (app/models/meeting.py) is what the "API: …"
+    badge reads — None for a browser-recorded meeting, the key's own
+    label once one's attached."""
     user = await make_user()
-    api_key = ApiKey(owner_id=user.id, name="Zapier", key_prefix="sk_live_zap…", key_hash="x" * 64)
+    api_key = ApiKey(
+        owner_id=user.id,
+        organization_id=user.active_organization_id,
+        name="Zapier",
+        key_prefix="sk_live_zap…",
+        key_hash="x" * 64,
+    )
     db.add(api_key)
     await db.commit()
 
-    browser_meeting = Meeting(owner_id=user.id, title="Browser call")
-    api_meeting = Meeting(owner_id=user.id, title="API call", api_key_id=api_key.id)
+    browser_meeting = Meeting(
+        owner_id=user.id, organization_id=user.active_organization_id, title="Browser call"
+    )
+    api_meeting = Meeting(
+        owner_id=user.id,
+        organization_id=user.active_organization_id,
+        title="API call",
+        api_key_id=api_key.id,
+    )
     db.add_all([browser_meeting, api_meeting])
     await db.commit()
 
@@ -268,3 +304,39 @@ async def test_enforce_max_duration_closes_once_elapsed(monkeypatch):
     await _enforce_max_duration_loop(still_running, _FakeSession(50_000), max_duration_ms=60_000)
     assert slept == [10.0]
     assert still_running.closed == (WS_CLOSE_DURATION_LIMIT, "API key max meeting duration reached")
+
+
+@pytest.mark.asyncio
+async def test_api_key_stays_bound_to_its_org_after_switcher(
+    app_client, db, make_user, auth_headers, monkeypatch
+):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "max_orgs_per_user", 2)
+    user = await make_user()
+    first_org = user.active_organization_id
+    created = await app_client.post(
+        "/api/settings/api-keys", json={"name": "Zapier"}, headers=auth_headers(user)
+    )
+    key = created.json()["key"]
+
+    second = await app_client.post(
+        "/api/organizations", json={"name": "Second Org"}, headers=auth_headers(user)
+    )
+    assert second.status_code == 201
+    await app_client.put(
+        "/api/organizations/current",
+        json={"organization_id": second.json()["id"]},
+        headers=auth_headers(user),
+    )
+
+    meeting = await app_client.post(
+        "/api/meetings",
+        json={"title": "Via key"},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert meeting.status_code == 201
+    row = await db.get(Meeting, meeting.json()["id"])
+    assert row is not None
+    assert row.organization_id == first_org
+    assert row.owner_id == user.id

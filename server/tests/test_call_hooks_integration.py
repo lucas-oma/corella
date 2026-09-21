@@ -92,10 +92,20 @@ def _report(**overrides) -> ReportResult:
 
 async def _make_meeting(db, make_user, **call_type_kwargs) -> Meeting:
     user = await make_user()
-    call_type = CallType(name="Integration", slug=f"integration-{uuid4()}", **call_type_kwargs)
+    call_type = CallType(
+        organization_id=user.active_organization_id,
+        name="Integration",
+        slug=f"integration-{uuid4()}",
+        **call_type_kwargs,
+    )
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="Real call", call_type_id=call_type.id)
+    meeting = Meeting(
+        owner_id=user.id,
+        organization_id=user.active_organization_id,
+        title="Real call",
+        call_type_id=call_type.id,
+    )
     db.add(meeting)
     await db.commit()
     # populate_existing=True, not a plain get() — the identity map already
@@ -128,6 +138,7 @@ async def test_pre_call_special_mode_fetches_real_context(db, make_user, receive
         "x-corella-app-url": True,
         "x-corella-meeting-id": True,
         "x-corella-user-id": True,
+        "x-corella-org-id": True,
     }
     assert received[0]["headers"]["x-corella-meeting-id"] == str(meeting.id)
     assert received[0]["headers"]["x-corella-user-id"] == str(meeting.owner_id)
@@ -163,8 +174,22 @@ async def test_create_meeting_respects_use_as_context_flag(db, make_user, auth_h
     fires in both cases."""
     user = await make_user()
 
-    on = CallType(name="On", slug="pre-context-on", pre_call_enabled=True, pre_call_url=f"{receiver}/pre", pre_call_use_as_context=True)
-    off = CallType(name="Off", slug="pre-context-off", pre_call_enabled=True, pre_call_url=f"{receiver}/pre", pre_call_use_as_context=False)
+    on = CallType(
+        organization_id=user.active_organization_id,
+        name="On",
+        slug="pre-context-on",
+        pre_call_enabled=True,
+        pre_call_url=f"{receiver}/pre",
+        pre_call_use_as_context=True,
+    )
+    off = CallType(
+        organization_id=user.active_organization_id,
+        name="Off",
+        slug="pre-context-off",
+        pre_call_enabled=True,
+        pre_call_url=f"{receiver}/pre",
+        pre_call_use_as_context=False,
+    )
     db.add_all([on, off])
     await db.commit()
 

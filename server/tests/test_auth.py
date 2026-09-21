@@ -21,7 +21,10 @@ async def test_register_then_login_round_trip(app_client):
     me = await app_client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
     assert me.json()["email"] == "newuser@example.com"
-    assert me.json()["role"] == "member"  # self-serve registration never grants admin
+    assert me.json()["is_super_admin"] is False
+    assert me.json()["organizations"]
+    assert me.json()["organizations"][0]["role"] == "owner"
+    assert me.json()["organizations"][0]["name"] == "New User Org"
 
 
 @pytest.mark.asyncio
@@ -70,3 +73,4 @@ async def test_auth_config_reflects_the_real_setting(app_client, monkeypatch):
     response = await app_client.get("/api/auth/config")
     assert response.status_code == 200
     assert response.json()["allow_public_registration"] is False
+    assert "max_orgs_per_user" in response.json()

@@ -8,12 +8,12 @@ import pytest
 
 from app.core.security import decrypt_secret
 from app.models.app_secret import AppSecret
-from app.models.user import UserRole
+from app.models.organization import Organization, OrgRole
 
 
 @pytest.mark.asyncio
 async def test_admin_can_create_list_update_and_delete_a_secret(app_client, db, make_user, auth_headers):
-    admin = await make_user(email="admin@example.com", role=UserRole.ADMIN)
+    admin = await make_user(email="admin@example.com")
     headers = auth_headers(admin)
 
     created = await app_client.post(
@@ -65,7 +65,7 @@ async def test_admin_can_create_list_update_and_delete_a_secret(app_client, db, 
 
 @pytest.mark.asyncio
 async def test_duplicate_secret_name_is_rejected(app_client, make_user, auth_headers):
-    admin = await make_user(email="admin@example.com", role=UserRole.ADMIN)
+    admin = await make_user(email="admin@example.com")
     headers = auth_headers(admin)
     first = await app_client.post(
         "/api/admin/secrets",
@@ -84,7 +84,7 @@ async def test_duplicate_secret_name_is_rejected(app_client, make_user, auth_hea
 
 @pytest.mark.asyncio
 async def test_invalid_secret_name_is_rejected(app_client, make_user, auth_headers):
-    admin = await make_user(email="admin@example.com", role=UserRole.ADMIN)
+    admin = await make_user(email="admin@example.com")
     response = await app_client.post(
         "/api/admin/secrets",
         json={"name": "not a name", "value": "x"},
@@ -95,7 +95,7 @@ async def test_invalid_secret_name_is_rejected(app_client, make_user, auth_heade
 
 @pytest.mark.asyncio
 async def test_empty_value_on_update_is_rejected(app_client, make_user, auth_headers):
-    admin = await make_user(email="admin@example.com", role=UserRole.ADMIN)
+    admin = await make_user(email="admin@example.com")
     headers = auth_headers(admin)
     created = await app_client.post(
         "/api/admin/secrets",
@@ -111,7 +111,11 @@ async def test_empty_value_on_update_is_rejected(app_client, make_user, auth_hea
 
 
 @pytest.mark.asyncio
-async def test_member_cannot_manage_secrets(app_client, make_user, auth_headers):
-    member = await make_user(email="member@example.com")
+async def test_member_cannot_manage_secrets(app_client, db, make_user, auth_headers):
+    owner = await make_user(email="owner@example.com")
+    organization = await db.get(Organization, owner.active_organization_id)
+    member = await make_user(
+        email="member@example.com", org=organization, org_role=OrgRole.MEMBER
+    )
     response = await app_client.get("/api/admin/secrets", headers=auth_headers(member))
     assert response.status_code == 403

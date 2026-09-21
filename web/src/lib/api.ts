@@ -93,17 +93,62 @@ export interface Token {
   token_type: string;
 }
 
+export type OrgRole = "owner" | "admin" | "member";
+
+export interface OrgMembership {
+  id: string;
+  name: string;
+  role: OrgRole;
+  is_instance_org: boolean;
+}
+
 export interface User {
   id: string;
   email: string;
   full_name: string;
-  role: "admin" | "member";
-  group_id: string | null;
+  is_super_admin: boolean;
+  active_organization_id: string | null;
+  organizations: OrgMembership[];
+  group_ids: string[];
   voice_enrolled: boolean;
 }
 
 export interface AuthConfig {
   allow_public_registration: boolean;
+  max_orgs_per_user: number;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  is_instance_org: boolean;
+  role: OrgRole;
+  created_at: string;
+}
+
+export interface OrgMember {
+  id: string;
+  email: string;
+  full_name: string;
+  role: OrgRole;
+  group_ids: string[];
+  is_super_admin: boolean;
+}
+
+export interface OrgInvite {
+  id: string;
+  email: string;
+  role: OrgRole;
+  expires_at: string;
+  created_at: string;
+  token?: string | null;
+}
+
+export interface InvitePreview {
+  organization_name: string;
+  email: string;
+  role: OrgRole;
+  expires_at: string;
 }
 
 /** The lightweight, public shape — every authenticated user needs this to
@@ -184,8 +229,7 @@ export interface Meeting {
   owner_name: string;
   // The integration's own admin-chosen label (Settings -> API keys) if
   // this meeting is/was actually streamed via an API key rather than the
-  // browser — null otherwise. Drives the "Live via API"/"Recorded via
-  // API" badge.
+  // browser — null otherwise. Drives the "API: …" badge.
   api_key_name: string | null;
 }
 
@@ -315,18 +359,11 @@ export interface Group {
   member_count: number;
 }
 
-export interface AdminUserCreate {
+export interface MemberCreate {
   email: string;
   password: string;
   full_name: string;
-  role: User["role"];
-  group_id: string | null;
-}
-
-export interface AdminUserUpdate {
-  role?: User["role"];
-  group_id?: string | null;
-  clear_group?: boolean;
+  role: OrgRole;
 }
 
 export interface UserCostBreakdown {
@@ -401,9 +438,12 @@ export const api = {
   removeVoiceEnrollment: () => request<User>("/api/auth/me/voice", { method: "DELETE" }),
   listMeetings: () => request<Meeting[]>("/api/meetings"),
   listGroupMeetings: () => request<GroupMeeting[]>("/api/meetings/group"),
+  listOrgMeetings: () => request<GroupMeeting[]>("/api/meetings/org"),
   listAllMeetings: () => request<GroupMeeting[]>("/api/meetings/all"),
   searchMeetings: (query: string) =>
     request<MeetingSearchResult[]>(`/api/meetings/search?q=${encodeURIComponent(query)}`),
+  searchOrgMeetings: (query: string) =>
+    request<MeetingSearchResult[]>(`/api/meetings/search/org?q=${encodeURIComponent(query)}`),
   searchAllMeetings: (query: string) =>
     request<MeetingSearchResult[]>(`/api/meetings/search/all?q=${encodeURIComponent(query)}`),
   createMeeting: (title: string, callTypeId: string | null = null) =>
@@ -465,17 +505,10 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ status }),
     }),
-  adminListUsers: () => request<User[]>("/api/admin/users"),
-  adminCreateUser: (payload: AdminUserCreate) =>
-    request<User>("/api/admin/users", { method: "POST", body: JSON.stringify(payload) }),
-  adminUpdateUser: (id: string, payload: AdminUserUpdate) =>
-    request<User>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
-  adminListGroups: () => request<Group[]>("/api/admin/groups"),
-  adminCreateGroup: (name: string) =>
-    request<Group>("/api/admin/groups", { method: "POST", body: JSON.stringify({ name }) }),
-  adminDeleteGroup: (id: string) => request<void>(`/api/admin/groups/${id}`, { method: "DELETE" }),
   adminGetCostSummary: (period: CostPeriod = "30d") =>
     request<CostSummary>(`/api/admin/costs?period=${period}`),
+  adminGetInstanceCostSummary: (period: CostPeriod = "30d") =>
+    request<CostSummary>(`/api/admin/costs/instance?period=${period}`),
   getCallTypes: () => request<CallTypeOption[]>("/api/call-types"),
   adminListCallTypes: () => request<CallTypeConfig[]>("/api/admin/call-types"),
   adminCreateCallType: (payload: Partial<CallTypeConfig> & { name: string; slug: string }) =>
@@ -489,4 +522,78 @@ export const api = {
   adminUpdateSecret: (id: string, payload: { name?: string; value?: string }) =>
     request<AppSecret>(`/api/admin/secrets/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   adminDeleteSecret: (id: string) => request<void>(`/api/admin/secrets/${id}`, { method: "DELETE" }),
+  listOrganizations: () => request<Organization[]>("/api/organizations"),
+  createOrganization: (name: string) =>
+    request<Organization>("/api/organizations", { method: "POST", body: JSON.stringify({ name }) }),
+  switchOrganization: (organizationId: string) =>
+    request<Organization>("/api/organizations/current", {
+      method: "PUT",
+      body: JSON.stringify({ organization_id: organizationId }),
+    }),
+  renameOrganization: (orgId: string, name: string) =>
+    request<Organization>(`/api/organizations/${orgId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    }),
+  deleteOrganization: (orgId: string) =>
+    request<void>(`/api/organizations/${orgId}`, { method: "DELETE" }),
+  listOrgMembers: (orgId: string) => request<OrgMember[]>(`/api/organizations/${orgId}/members`),
+  createOrgMember: (orgId: string, payload: MemberCreate) =>
+    request<OrgMember>(`/api/organizations/${orgId}/members`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateOrgMember: (orgId: string, userId: string, role: OrgRole) =>
+    request<OrgMember>(`/api/organizations/${orgId}/members/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+  removeOrgMember: (orgId: string, userId: string) =>
+    request<void>(`/api/organizations/${orgId}/members/${userId}`, { method: "DELETE" }),
+  transferOwnership: (orgId: string, userId: string) =>
+    request<OrgMember>(`/api/organizations/${orgId}/transfer`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId }),
+    }),
+  leaveOrganization: (orgId: string) =>
+    request<void>(`/api/organizations/${orgId}/leave`, { method: "POST" }),
+  listOrgInvites: (orgId: string) => request<OrgInvite[]>(`/api/organizations/${orgId}/invites`),
+  createOrgInvite: (orgId: string, payload: { email: string; role: OrgRole }) =>
+    request<OrgInvite>(`/api/organizations/${orgId}/invites`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  resendOrgInvite: (orgId: string, inviteId: string) =>
+    request<OrgInvite>(`/api/organizations/${orgId}/invites/${inviteId}/resend`, { method: "POST" }),
+  revokeOrgInvite: (orgId: string, inviteId: string) =>
+    request<void>(`/api/organizations/${orgId}/invites/${inviteId}`, { method: "DELETE" }),
+  previewInvite: (token: string) => request<InvitePreview>(`/api/invites/${token}`),
+  acceptInvite: (token: string, payload: { password?: string; full_name?: string } = {}) =>
+    request<Token>(`/api/invites/${token}/accept`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listOrgGroups: (orgId: string) => request<Group[]>(`/api/organizations/${orgId}/groups`),
+  createOrgGroup: (orgId: string, name: string) =>
+    request<Group>(`/api/organizations/${orgId}/groups`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  deleteOrgGroup: (orgId: string, groupId: string) =>
+    request<void>(`/api/organizations/${orgId}/groups/${groupId}`, { method: "DELETE" }),
+  setOrgGroupMembers: (orgId: string, groupId: string, userIds: string[]) =>
+    request<void>(`/api/organizations/${orgId}/groups/${groupId}/members`, {
+      method: "PUT",
+      body: JSON.stringify({ user_ids: userIds }),
+    }),
+  adminListOrganizations: () => request<Organization[]>("/api/admin/organizations"),
+  adminListUsers: () =>
+    request<{ id: string; email: string; full_name: string; is_super_admin: boolean }[]>(
+      "/api/admin/users",
+    ),
+  adminSetSuperAdmin: (userId: string, isSuperAdmin: boolean) =>
+    request<{ id: string; is_super_admin: boolean }>(`/api/admin/users/${userId}/super-admin`, {
+      method: "PATCH",
+      body: JSON.stringify({ is_super_admin: isSuperAdmin }),
+    }),
 };

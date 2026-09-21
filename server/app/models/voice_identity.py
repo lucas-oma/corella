@@ -24,13 +24,10 @@ class VoiceIdentity(UUIDPrimaryKeyMixin, Base):
       anonymous recurring voice whose owner isn't a Corella account at
       all, named from what it said in a call. linked_user_id stays null.
 
-    group_id=NULL is a deliberate, meaningful state — it means "private,
-    scoped to one ungrouped user's own self-recognition only," not
-    "shared with nobody in particular." Recognition search
-    (search_speaker_embeddings) always scopes by this same group_id, so a
-    private identity is never visible outside the one account it belongs
-    to, matching the same group-scoping precedent Phase H already
-    established for KB sharing.
+    Recognition search (search_speaker_embeddings) is org-scoped so a
+    multi-group user is still recognizable company-wide. group_id is
+    optional leftover from the pre-org group pool; search filters on
+    organization_id.
     """
 
     __tablename__ = "voice_identities"
@@ -38,6 +35,9 @@ class VoiceIdentity(UUIDPrimaryKeyMixin, Base):
     # No separate embedding_ref column — this row's own id doubles as the
     # point id in the Qdrant speaker_embeddings collection (one identity,
     # exactly one embedding, no need for a redundant indirection).
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
     group_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("groups.id", ondelete="SET NULL"), index=True
     )

@@ -86,6 +86,14 @@ def generate_api_key() -> tuple[str, str, str]:
     return full_key, display_prefix, hash_api_key(full_key)
 
 
+def hash_invite_token(token: str) -> str:
+    """sha256 of a copy-link invite token — same rationale as API keys:
+    the token is high-entropy random, shown once, never stored in the
+    clear.
+    """
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 def hash_api_key(key: str) -> str:
     """Plain sha256, not bcrypt/passlib — `key` is already a high-entropy
     random token we generated (secrets.token_urlsafe), not a low-entropy

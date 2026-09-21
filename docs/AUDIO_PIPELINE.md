@@ -124,7 +124,7 @@ healthy).
 | Instant recognition hint (in-process, api-side — **not** a Celery task since Phase W1) | `app/ws/live_session.py` — `_run_quick_label_hint`, called directly from `_commit_segment` |
 | Deepgram-native diarization (in-process, api-side, Phase W3) | `app/ws/live_session.py` — `_open_deepgram_stream`'s `on_result`, `_group_words_by_speaker`, `_get_or_create_deepgram_speaker` |
 | Worker/hint → live WS event bridge | `app/services/diarization/events.py`, `live_session.py:_poll_diarization_updates` — same bridge for all three mechanisms; each pushes the identical `diarization_update` wire shape |
-| Cross-meeting/group voice identity | `app/models/voice_identity.py`, `app/services/embeddings/qdrant_store.py` (`speaker_embeddings` collection) — **not** reachable from the Deepgram-native path (see [Known open issues](#known-open-issues)) |
+| Org-scoped voice identity | `app/models/voice_identity.py`, `app/services/embeddings/qdrant_store.py` (`speaker_embeddings` collection) — **not** reachable from the Deepgram-native path (see [Known open issues](#known-open-issues)) |
 | Audio mixing/windowing/WAV I/O | `app/services/audio/mixing.py` |
 | Debugging tools | `server/scripts/verify_reconcile_diarization.py` (current); `server/scripts/diarize_debug.py`/`verify_production_diarize.py` (Phase V-era, per-utterance design — see [Debugging tools](#debugging-tools)) |
 
@@ -256,7 +256,7 @@ after a real production case — see
 [The debugging history](#the-debugging-history)'s Phase W2 entry). Two
 exemptions bypass the floor entirely: the very first voice
 ever registered on a channel (nothing to compare it against yet), and any
-voice recognized against the durable cross-meeting library (Phase O) — a
+voice recognized against the durable org-wide library (Phase O) — a
 resolved identity is real information regardless of how little it's said
 so far. A segment matched to a still-provisional entry is held in
 `PendingSegment` (Redis, same list shape the old design's `PendingEmbedding`
@@ -385,7 +385,7 @@ simpler mechanism, entirely local to that one WebSocket connection:
   tick — verified live: this is exactly how Corella's own testing first
   observed the fallback path re-engage, not a hypothetical.
 - **Known, stated limitation**: because Deepgram's speaker index isn't a
-  durable identity, this path never reaches the cross-meeting/group voice
+  durable identity, this path never reaches the org-scoped voice
   registry (Phase O) — an enrolled user's own voice, or a name spotted
   live from what someone says, is only ever recognized on the
   pyannote-embedding path. A session on Deepgram gets instant "Speaker
@@ -799,7 +799,7 @@ starting points, not settled — see [Known open issues](#known-open-issues).
   (see [Deepgram-native diarization](#deepgram-native-diarization)) *does*
   split a single Deepgram-finalized utterance into multiple segments when
   its own per-word speaker index changes mid-utterance, verified live.
-- **A Deepgram-diarized channel never reaches the cross-meeting/group
+- **A Deepgram-diarized channel never reaches the org-scoped
   voice-identity registry** (Phase O) — Deepgram's per-word speaker index
   is local to that one WebSocket connection, not a durable identity, so an
   enrolled user's own voice or a name spotted live from what someone says

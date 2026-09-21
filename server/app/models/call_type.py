@@ -1,4 +1,7 @@
-from sqlalchemy import Boolean, String, Text
+import uuid
+
+from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -16,13 +19,19 @@ class CallType(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "call_types"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "slug", name="uq_call_types_org_slug"),
+    )
 
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
     name: Mapped[str] = mapped_column(String(255))
     # Stable, admin-facing-but-machine-safe key — lowercase-hyphenated.
     # Not used for lookups anywhere in code (Meeting references a row by
     # id, not slug); kept mainly so a migration/export has a stable
     # identifier independent of a display-name rename.
-    slug: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    slug: Mapped[str] = mapped_column(String(255), index=True)
     report_guidance: Mapped[str | None] = mapped_column(Text)
     # Exactly one row should have this true at a time — enforced in
     # application code (app/api/admin.py), not a DB constraint: unsetting

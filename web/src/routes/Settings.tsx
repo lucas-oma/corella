@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import AppShell from "@/components/AppShell";
+import PageHeader from "@/components/PageHeader";
 import {
   ApiError,
   api,
@@ -513,12 +514,7 @@ export default function Settings() {
 
   return (
     <AppShell>
-      <div className="mb-8">
-        <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">Settings</h1>
-        <p className="mt-1 text-sm text-ink-muted">
-          Copilot providers and knowledge base.
-        </p>
-      </div>
+      <PageHeader title="Settings" subtitle="Copilot providers and knowledge base." />
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
 
@@ -879,9 +875,10 @@ export default function Settings() {
             <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">API keys</h2>
             <p className="mt-1 text-xs text-ink-subtle">
               Let an external system create/read meetings and stream a live recording as your account —
-              see <code className="text-[11px]">API.md</code> for the full reference. Each key has a max
-              live-session length (default {DEFAULT_KEY_DURATION_MINUTES} min) so a hung integration can't
-              record forever.
+              see <code className="text-[11px]">API.md</code> for the full reference. Keys are bound to
+              the organization you&apos;re in when you create them and don&apos;t follow the switcher.
+              Each key has a max live-session length (default {DEFAULT_KEY_DURATION_MINUTES} min) so a
+              hung integration can&apos;t record forever.
             </p>
           </div>
         </div>

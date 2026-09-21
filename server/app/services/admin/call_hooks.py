@@ -90,7 +90,9 @@ def redact_text(text: str | None, secret_values: list[str]) -> str | None:
     return redacted[:_MAX_LOG_CHARS]
 
 
-async def _secret_values_for_headers(db: AsyncSession, encrypted: str | None) -> list[str]:
+async def _secret_values_for_headers(
+    db: AsyncSession, encrypted: str | None, organization_id: UUID
+) -> list[str]:
     """Decrypt just the AppSecret values referenced by a header template,
     so dispatch can redact them wherever they appear in the persisted log.
     """
@@ -108,7 +110,12 @@ async def _secret_values_for_headers(db: AsyncSession, encrypted: str | None) ->
             names.update(_SECRET_REF.findall(value))
     if not names:
         return []
-    rows = await db.scalars(select(AppSecret).where(AppSecret.name.in_(names)))
+    rows = await db.scalars(
+        select(AppSecret).where(
+            AppSecret.name.in_(names),
+            AppSecret.organization_id == organization_id,
+        )
+    )
     values: list[str] = []
     for secret in rows:
         try:
@@ -182,7 +189,9 @@ async def record_hook_queue_failure(db: AsyncSession, meeting: Meeting, phase: s
     )
 
 
-async def resolve_custom_headers(db: AsyncSession, encrypted: str | None) -> dict[str, str] | None:
+async def resolve_custom_headers(
+    db: AsyncSession, encrypted: str | None, organization_id: UUID
+) -> dict[str, str] | None:
     """Decrypt stored header JSON and replace {{secret.NAME}} tokens with
     the matching AppSecret value. Returns an empty dict when nothing is
     configured. Returns None (caller should abort the hook) when the blob
@@ -208,7 +217,12 @@ async def resolve_custom_headers(db: AsyncSession, encrypted: str | None) -> dic
 
     values: dict[str, str] = {}
     if names:
-        rows = await db.scalars(select(AppSecret).where(AppSecret.name.in_(names)))
+        rows = await db.scalars(
+        select(AppSecret).where(
+            AppSecret.name.in_(names),
+            AppSecret.organization_id == organization_id,
+        )
+    )
         for secret in rows:
             try:
                 values[secret.name] = decrypt_secret(secret.value_encrypted)
@@ -227,18 +241,20 @@ async def resolve_custom_headers(db: AsyncSession, encrypted: str | None) -> dic
     return resolved
 
 
-def _mandatory_headers(meeting_id: UUID, owner_id: UUID) -> dict[str, str]:
-    """The three headers every pre/post call-type request carries,
-    non-negotiable — applied *after* the admin's own decrypted custom
-    headers are merged in (see dispatch_pre_call/dispatch_post_call), so
-    a custom header that happens to reuse one of these names still can't
-    shadow it.
+def _mandatory_headers(meeting_id: UUID, owner_id: UUID, organization_id: UUID | None = None) -> dict[str, str]:
+    """The headers every pre/post call-type request carries, non-negotiable
+    — applied *after* the admin's own decrypted custom headers are merged
+    in, so a custom header that happens to reuse one of these names still
+    can't shadow it.
     """
-    return {
+    headers = {
         "X-Corella-App-Url": get_settings().public_app_url,
         "X-Corella-Meeting-Id": str(meeting_id),
         "X-Corella-User-Id": str(owner_id),
     }
+    if organization_id is not None:
+        headers["X-Corella-Org-Id"] = str(organization_id)
+    return headers
 
 
 def _json_value(value) -> str:
@@ -393,9 +409,13 @@ async def dispatch_pre_call(db: AsyncSession, meeting: Meeting) -> str | None:
     settings = get_settings()
     method = call_type.pre_call_method or "GET"
     url = call_type.pre_call_url
-    secrets = await _secret_values_for_headers(db, call_type.pre_call_headers_encrypted)
+    secrets = await _secret_values_for_headers(
+        db, call_type.pre_call_headers_encrypted, meeting.organization_id
+    )
 
-    custom = await resolve_custom_headers(db, call_type.pre_call_headers_encrypted)
+    custom = await resolve_custom_headers(
+        db, call_type.pre_call_headers_encrypted, meeting.organization_id
+    )
     if custom is None:
         logger.warning("Pre-call for meeting %s: headers could not be resolved", meeting.id)
         await persist_hook_log(
@@ -409,7 +429,7 @@ async def dispatch_pre_call(db: AsyncSession, meeting: Meeting) -> str | None:
             secret_values=secrets,
         )
         return None
-    headers = {**custom, **_mandatory_headers(meeting.id, meeting.owner_id)}
+    headers = {**custom, **_mandatory_headers(meeting.id, meeting.owner_id, meeting.organization_id)}
 
     body: bytes | None = None
     body_text: str | None = None
@@ -520,7 +540,9 @@ async def dispatch_post_call(db: AsyncSession, meeting: Meeting, report: ReportR
     settings = get_settings()
     method = call_type.post_call_method or "POST"
     url = call_type.post_call_url
-    secrets = await _secret_values_for_headers(db, call_type.post_call_headers_encrypted)
+    secrets = await _secret_values_for_headers(
+        db, call_type.post_call_headers_encrypted, meeting.organization_id
+    )
 
     try:
         if call_type.post_call_send_full_payload:
@@ -541,7 +563,9 @@ async def dispatch_post_call(db: AsyncSession, meeting: Meeting, report: ReportR
         )
         return
 
-    custom = await resolve_custom_headers(db, call_type.post_call_headers_encrypted)
+    custom = await resolve_custom_headers(
+        db, call_type.post_call_headers_encrypted, meeting.organization_id
+    )
     if custom is None:
         logger.warning("Post-call for meeting %s: headers could not be resolved", meeting.id)
         await persist_hook_log(
@@ -556,7 +580,7 @@ async def dispatch_post_call(db: AsyncSession, meeting: Meeting, report: ReportR
             secret_values=secrets,
         )
         return
-    headers = {"Content-Type": "application/json", **custom, **_mandatory_headers(meeting.id, meeting.owner_id)}
+    headers = {"Content-Type": "application/json", **custom, **_mandatory_headers(meeting.id, meeting.owner_id, meeting.organization_id)}
 
     started = time.monotonic()
     try:

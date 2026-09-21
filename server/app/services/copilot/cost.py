@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import func, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cost import LLMUsageEvent, UsageKind
@@ -51,10 +51,12 @@ async def add_meeting_cost(
             .where(Meeting.id == meeting_id)
             .values(estimated_cost_usd=func.coalesce(Meeting.estimated_cost_usd, 0) + cost_usd)
         )
+    org_id = await db.scalar(select(Meeting.organization_id).where(Meeting.id == meeting_id))
     db.add(
         LLMUsageEvent(
             meeting_id=meeting_id,
             owner_id=owner_id,
+            organization_id=org_id,
             provider=provider.value if isinstance(provider, LLMProvider) else provider,
             model=model,
             kind=kind,

@@ -39,8 +39,8 @@ class MeetingRead(BaseModel):
     owner_name: str
     # The integration's own admin-chosen label (app/models/api_key.py) if
     # this meeting is/was actually streamed via an API key, not the
-    # browser — None otherwise. Used for the "Live via API"/"Recorded via
-    # API" badge (Dashboard, MeetingDetail).
+    # browser — None otherwise. Used for the "API: …" badge (Dashboard,
+    # MeetingDetail).
     api_key_name: str | None
 
 

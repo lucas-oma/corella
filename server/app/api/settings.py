@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import AuthContext, get_auth_context, get_current_user
 from app.core.config import Settings, get_settings
 from app.core.db import get_db
 from app.core.security import encrypt_secret, generate_api_key
@@ -181,15 +181,13 @@ async def delete_stt_credential(
 
 @router.get("/api-keys", response_model=list[ApiKeyRead])
 async def list_api_keys(
-    current_user: User = Depends(get_current_user),
+    ctx: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> list[ApiKey]:
-    """Never includes the key itself — only key_hash is stored at all
-    (app/models/api_key.py), and even key_prefix is just enough to tell
-    rows apart, not enough to reconstruct the real key.
-    """
     result = await db.scalars(
-        select(ApiKey).where(ApiKey.owner_id == current_user.id).order_by(ApiKey.created_at)
+        select(ApiKey)
+        .where(ApiKey.owner_id == ctx.user.id, ApiKey.organization_id == ctx.org_id)
+        .order_by(ApiKey.created_at)
     )
     return list(result)
 
@@ -197,17 +195,13 @@ async def list_api_keys(
 @router.post("/api-keys", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)
 async def create_api_key(
     payload: ApiKeyCreate,
-    current_user: User = Depends(get_current_user),
+    ctx: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> ApiKeyCreated:
-    """The only response that ever carries the real key — shown to the
-    user exactly once here; every later read is key_prefix only. See
-    app.core.security.generate_api_key for why this is safe to do without
-    ever persisting the plaintext.
-    """
     full_key, display_prefix, key_hash = generate_api_key()
     api_key = ApiKey(
-        owner_id=current_user.id,
+        owner_id=ctx.user.id,
+        organization_id=ctx.org_id,
         name=payload.name,
         key_prefix=display_prefix,
         key_hash=key_hash,
@@ -231,11 +225,11 @@ async def create_api_key(
 async def update_api_key(
     key_id: UUID,
     payload: ApiKeyUpdate,
-    current_user: User = Depends(get_current_user),
+    ctx: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> ApiKey:
     api_key = await db.get(ApiKey, key_id)
-    if api_key is None or api_key.owner_id != current_user.id:
+    if api_key is None or api_key.owner_id != ctx.user.id or api_key.organization_id != ctx.org_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found")
     api_key.max_duration_minutes = payload.max_duration_minutes
     await db.commit()
@@ -246,11 +240,11 @@ async def update_api_key(
 @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_api_key(
     key_id: UUID,
-    current_user: User = Depends(get_current_user),
+    ctx: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     api_key = await db.get(ApiKey, key_id)
-    if api_key is None or api_key.owner_id != current_user.id:
+    if api_key is None or api_key.owner_id != ctx.user.id or api_key.organization_id != ctx.org_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found")
     await db.delete(api_key)
     await db.commit()

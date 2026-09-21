@@ -1,0 +1,668 @@
+{
+  "$schema": "https://cdn.hopjs.net/npm/@dicebear/schema@1.4.0/dist/definition.min.json",
+  "$comment": "Blob birds tuned for 32px: shared body bounds, oversized ink features. Silhouettes archived as corella-bird.silhouette.json.",
+  "meta": {
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    },
+    "creator": { "name": "Corella" },
+    "source": { "name": "Corella Bird" }
+  },
+  "canvas": {
+    "width": 128,
+    "height": 128,
+    "elements": [
+      {
+        "type": "element",
+        "name": "rect",
+        "attributes": {
+          "width": "128",
+          "height": "128",
+          "fill": { "type": "color", "name": "background" }
+        }
+      },
+      { "type": "component", "name": "facing" }
+    ]
+  },
+  "attributes": {
+    "fill": "none",
+    "shape-rendering": "geometricPrecision"
+  },
+  "colors": {
+    "background": {
+      "values": ["#FAFAF9", "#FFFFFF", "#F3F0EA", "#E4E4E1"]
+    },
+    "body": {
+      "values": [
+        "#8B8F99",
+        "#9AA3B0",
+        "#8A8478",
+        "#B8B0A4",
+        "#C5CAD3",
+        "#C9C4BA",
+        "#D8D3CA",
+        "#E4E4E1"
+      ],
+      "notEqualTo": ["background"]
+    },
+    "bloom": {
+      "values": ["#FAFAF9", "#F3F0EA", "#EDE8E0", "#D8DCE4"],
+      "notEqualTo": ["body"]
+    },
+    "beak": {
+      "values": ["#12141A", "#0B1B33", "#5B5F6B", "#A89880"],
+      "notEqualTo": ["body"]
+    },
+    "eye": { "values": ["#12141A"] }
+  },
+  "components": {
+    "facing": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "right": {
+          "elements": [
+            { "type": "component", "name": "tail" },
+            { "type": "component", "name": "legs" },
+            { "type": "component", "name": "body" },
+            { "type": "component", "name": "wing" },
+            { "type": "component", "name": "crest" },
+            { "type": "component", "name": "beak" },
+            { "type": "component", "name": "eye" }
+          ]
+        },
+        "left": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "g",
+              "attributes": { "transform": "translate(128 0) scale(-1 1)" },
+              "children": [
+                { "type": "component", "name": "tail" },
+                { "type": "component", "name": "legs" },
+                { "type": "component", "name": "body" },
+                { "type": "component", "name": "wing" },
+                { "type": "component", "name": "crest" },
+                { "type": "component", "name": "beak" },
+                { "type": "component", "name": "eye" }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "body": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "circle": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M62 19C90 16 108 38 105 58C107 82 84 97 64 96C42 97 22 76 25 54C24 36 38 21 62 19Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "ellipse",
+              "attributes": {
+                "cx": "54",
+                "cy": "50",
+                "rx": "22",
+                "ry": "20",
+                "fill": { "type": "color", "name": "bloom" },
+                "fill-opacity": "0.45"
+              }
+            },
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M62 19C90 16 108 38 105 58C107 82 84 97 64 96C42 97 22 76 25 54C24 36 38 21 62 19Z",
+                "fill": "none",
+                "stroke": "#12141A",
+                "stroke-width": "4",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "squat": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M64 22C92 18 110 42 107 62C108 84 86 97 62 96C36 95 20 78 23 58C22 40 40 24 64 22Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "ellipse",
+              "attributes": {
+                "cx": "52",
+                "cy": "54",
+                "rx": "24",
+                "ry": "16",
+                "fill": { "type": "color", "name": "bloom" },
+                "fill-opacity": "0.42"
+              }
+            },
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M64 22C92 18 110 42 107 62C108 84 86 97 62 96C36 95 20 78 23 58C22 40 40 24 64 22Z",
+                "fill": "none",
+                "stroke": "#12141A",
+                "stroke-width": "4",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "tall": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M66 15C88 14 106 38 103 60C104 84 84 97 64 96C40 95 24 76 27 52C26 30 44 15 66 15Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "ellipse",
+              "attributes": {
+                "cx": "54",
+                "cy": "46",
+                "rx": "16",
+                "ry": "22",
+                "fill": { "type": "color", "name": "bloom" },
+                "fill-opacity": "0.42"
+              }
+            },
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M66 15C88 14 106 38 103 60C104 84 84 97 64 96C40 95 24 76 27 52C26 30 44 15 66 15Z",
+                "fill": "none",
+                "stroke": "#12141A",
+                "stroke-width": "4",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "lumpy": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M34 60C26 38 50 16 76 20C102 24 112 48 106 70C98 94 72 98 48 94C30 88 30 72 34 60Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "ellipse",
+              "attributes": {
+                "cx": "58",
+                "cy": "50",
+                "rx": "20",
+                "ry": "18",
+                "fill": { "type": "color", "name": "bloom" },
+                "fill-opacity": "0.42"
+              }
+            },
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M34 60C26 38 50 16 76 20C102 24 112 48 106 70C98 94 72 98 48 94C30 88 30 72 34 60Z",
+                "fill": "none",
+                "stroke": "#12141A",
+                "stroke-width": "4",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "drop": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M64 15C92 18 110 42 106 64C102 88 82 97 62 96C40 95 22 80 25 56C26 32 40 13 64 15Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "ellipse",
+              "attributes": {
+                "cx": "52",
+                "cy": "46",
+                "rx": "18",
+                "ry": "18",
+                "fill": { "type": "color", "name": "bloom" },
+                "fill-opacity": "0.42"
+              }
+            },
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M64 15C92 18 110 42 106 64C102 88 82 97 62 96C40 95 22 80 25 56C26 32 40 13 64 15Z",
+                "fill": "none",
+                "stroke": "#12141A",
+                "stroke-width": "4",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "legs": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "stilts": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M50 88L48 116M40 116H58M78 88L80 116M72 116H90",
+                "stroke": "#12141A",
+                "stroke-width": "6",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        },
+        "splay": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M50 88L28 114M18 114H38M78 88L100 114M90 114H110",
+                "stroke": "#12141A",
+                "stroke-width": "6",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        },
+        "kick": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M50 88L48 114M40 114H62M76 88L96 104L114 86",
+                "stroke": "#12141A",
+                "stroke-width": "6",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        },
+        "lean": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M48 88L26 112M16 112H36M70 88L52 114M44 114H62",
+                "stroke": "#12141A",
+                "stroke-width": "6",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        },
+        "cross": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M48 88L82 114M74 114H90M80 88L46 114M38 114H54",
+                "stroke": "#12141A",
+                "stroke-width": "6",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "beak": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "huge": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M94 42L122 58L94 74Z",
+                "fill": { "type": "color", "name": "beak" },
+                "stroke": "#12141A",
+                "stroke-width": "3.2",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "hook": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M94 40C116 28 126 48 116 78C110 62 100 56 94 58Z",
+                "fill": { "type": "color", "name": "beak" },
+                "stroke": "#12141A",
+                "stroke-width": "3.2",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "open": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M94 38L122 48L94 52L122 72L94 76Z",
+                "fill": { "type": "color", "name": "beak" },
+                "stroke": "#12141A",
+                "stroke-width": "3.2",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "wedge": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M96 46L118 58L96 70Z",
+                "fill": { "type": "color", "name": "beak" },
+                "stroke": "#12141A",
+                "stroke-width": "3.2",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "eye": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "dot": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "circle",
+              "attributes": {
+                "cx": "80",
+                "cy": "52",
+                "r": "9",
+                "fill": { "type": "color", "name": "eye" }
+              }
+            }
+          ]
+        },
+        "two": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "circle",
+              "attributes": {
+                "cx": "64",
+                "cy": "52",
+                "r": "8",
+                "fill": { "type": "color", "name": "eye" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "circle",
+              "attributes": {
+                "cx": "84",
+                "cy": "52",
+                "r": "8",
+                "fill": { "type": "color", "name": "eye" }
+              }
+            }
+          ]
+        },
+        "ring": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "circle",
+              "attributes": {
+                "cx": "80",
+                "cy": "52",
+                "r": "9",
+                "fill": "none",
+                "stroke": { "type": "color", "name": "eye" },
+                "stroke-width": "4"
+              }
+            },
+            {
+              "type": "element",
+              "name": "circle",
+              "attributes": {
+                "cx": "80",
+                "cy": "52",
+                "r": "3.2",
+                "fill": { "type": "color", "name": "eye" }
+              }
+            }
+          ]
+        },
+        "sleepy": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M66 56Q80 44 94 56",
+                "stroke": { "type": "color", "name": "eye" },
+                "stroke-width": "5.5",
+                "stroke-linecap": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "crest": {
+      "width": 128,
+      "height": 128,
+      "probability": 78,
+      "variants": {
+        "mohawk": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M64 24L46 8M64 24L64 6M64 24L82 8",
+                "stroke": "#12141A",
+                "stroke-width": "5.5",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "swirl": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M64 24C48 10 72 4 92 16",
+                "stroke": "#12141A",
+                "stroke-width": "5.5",
+                "stroke-linecap": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        },
+        "flop": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M68 22C90 6 110 18 112 36",
+                "stroke": "#12141A",
+                "stroke-width": "5.5",
+                "stroke-linecap": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        },
+        "tuft": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M64 24L50 6M64 24L68 4M64 24L82 10",
+                "stroke": "#12141A",
+                "stroke-width": "5.5",
+                "stroke-linecap": "round"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "wing": {
+      "width": 128,
+      "height": 128,
+      "probability": 50,
+      "variants": {
+        "leaf": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M32 54C24 68 32 88 50 84C58 68 52 56 32 54Z",
+                "fill": { "type": "color", "name": "bloom" },
+                "stroke": "#12141A",
+                "stroke-width": "3",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "scribble": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M30 58Q44 70 32 84M38 54Q56 70 40 88M48 60Q60 72 50 82",
+                "stroke": "#12141A",
+                "stroke-width": "3.2",
+                "stroke-linecap": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "tail": {
+      "width": 128,
+      "height": 128,
+      "probability": 55,
+      "variants": {
+        "stub": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M28 58L8 48L10 74Z",
+                "fill": { "type": "color", "name": "body" },
+                "stroke": "#12141A",
+                "stroke-width": "3",
+                "stroke-linejoin": "round"
+              }
+            }
+          ]
+        },
+        "swirl": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M28 60C10 44 0 58 10 76C20 62 24 62 28 66",
+                "stroke": "#12141A",
+                "stroke-width": "5",
+                "stroke-linecap": "round",
+                "fill": "none"
+              }
+            }
+          ]
+        },
+        "feathers": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M28 52L6 40M28 62L4 62M28 72L8 86",
+                "stroke": "#12141A",
+                "stroke-width": "4.5",
+                "stroke-linecap": "round"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

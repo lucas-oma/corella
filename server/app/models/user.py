@@ -1,7 +1,6 @@
-import enum
 import uuid
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import Boolean, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,25 +10,20 @@ from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.provider_credential import LLMProvider
 
 
-class UserRole(str, enum.Enum):
-    ADMIN = "admin"
-    MEMBER = "member"
-
-
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "users"
 
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     full_name: Mapped[str] = mapped_column(String(255))
-    role: Mapped[UserRole] = mapped_column(
-        pg_enum(UserRole, "user_role"), default=UserRole.MEMBER
+    # Instance operator — not an org role. Bootstrap ADMIN_EMAIL, and
+    # anyone a super-admin promotes. Org power lives on
+    # OrganizationMembership.
+    is_super_admin: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
     )
-    # Admin-assigned, nullable — an ungrouped user (the default) is fully
-    # isolated, same as before groups existed at all. One group per user,
-    # not many-to-many (app/models/group.py).
-    group_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("groups.id", ondelete="SET NULL")
+    active_organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL")
     )
 
     # Explicit per-user overrides of the otherwise-automatic provider/model

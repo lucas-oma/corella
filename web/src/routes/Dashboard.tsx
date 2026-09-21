@@ -3,9 +3,11 @@ import { Link, useNavigate } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
 import CallTypeModal from "@/components/CallTypeModal";
+import PageHeader from "@/components/PageHeader";
 import { ApiError, api, type GroupMeeting, type Meeting, type MeetingSearchResult } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
+import { isOrgAdmin } from "@/lib/org";
 
 const DASHBOARD_POLL_INTERVAL_MS = 4000;
 
@@ -34,9 +36,9 @@ const STATUS_CLASS: Record<Meeting["status"], string> = {
  * label once it's finished. */
 function ApiKeyBadge({ name, live }: { name: string; live: boolean }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-sm border border-status-info/30 px-2 py-0.5 text-xs text-status-info">
-      {live && <span className="h-1.5 w-1.5 rounded-full bg-status-info animate-pulse" />}
-      {live ? "Live via API" : "Recorded via API"} · {name}
+    <span className="inline-flex max-w-full items-center gap-1.5 rounded-sm border border-status-info/30 px-2 py-0.5 text-xs text-status-info">
+      {live && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-info animate-pulse" />}
+      <span className="truncate">API: {name}</span>
     </span>
   );
 }
@@ -66,11 +68,12 @@ export default function Dashboard() {
   const [groupFilter, setGroupFilter] = useState("");
   // Which action the call-type popup is currently gating — set by clicking
   // "Record live" or "Upload recording", cleared on cancel/confirm. Call
-  // types are admin-managed (Admin.tsx) now, not a fixed list, so there's
-  // no static dropdown in the header anymore — the choice happens right
-  // when it's needed instead.
+  // types are org-admin-managed (Organization.tsx) now, not a fixed list,
+  // so there's no static dropdown in the header anymore — the choice
+  // happens right when it's needed instead.
   const [pendingAction, setPendingAction] = useState<"live" | "upload" | null>(null);
-  const isAdmin = user?.role === "admin";
+  const isAdmin = isOrgAdmin(user);
+  const inGroup = Boolean(user?.group_ids?.length);
 
   // Not semantic — an instant client-side filter over what's already
   // fetched, deliberately: unlike Mine/All (real search over transcript
@@ -92,6 +95,16 @@ export default function Dashboard() {
     api.listMeetings().then(setMeetings);
   }, []);
 
+  // Tab labels show counts, so Group/All have to load even if the user
+  // never opens those tabs — otherwise they'd sit at "(0)" forever.
+  useEffect(() => {
+    if (inGroup) api.listGroupMeetings().then(setGroupMeetings);
+  }, [inGroup]);
+
+  useEffect(() => {
+    if (isAdmin) api.listOrgMeetings().then(setAllMeetings);
+  }, [isAdmin]);
+
   // Own list only re-fetches automatically while something in it is
   // still `recording` — same conditional-poll shape as KnowledgeBase.tsx
   // uses for its own pending/processing documents. Without this, a
@@ -107,18 +120,6 @@ export default function Dashboard() {
     return () => clearTimeout(timer);
   }, [meetings]);
 
-  // Only fetched once the user actually switches to it — someone who never
-  // opens the Group/All tab (the vast majority for "All," since it's
-  // admin-only) never needs the request at all.
-  useEffect(() => {
-    if (view === "group" && groupMeetings === null) {
-      api.listGroupMeetings().then(setGroupMeetings);
-    }
-    if (view === "all" && allMeetings === null) {
-      api.listAllMeetings().then(setAllMeetings);
-    }
-  }, [view, groupMeetings, allMeetings]);
-
   // Same conditional poll as the own-list one above, for whichever of
   // Group/All is the currently-active tab — a teammate's (or, on All,
   // anyone's) meeting recording live via an API integration should
@@ -129,7 +130,7 @@ export default function Dashboard() {
       return () => clearTimeout(timer);
     }
     if (view === "all" && allMeetings?.some((m) => m.status === "recording")) {
-      const timer = setTimeout(() => api.listAllMeetings().then(setAllMeetings), DASHBOARD_POLL_INTERVAL_MS);
+      const timer = setTimeout(() => api.listOrgMeetings().then(setAllMeetings), DASHBOARD_POLL_INTERVAL_MS);
       return () => clearTimeout(timer);
     }
   }, [view, groupMeetings, allMeetings]);
@@ -146,7 +147,7 @@ export default function Dashboard() {
     }
     let cancelled = false;
     setSearching(true);
-    const search = view === "all" ? api.searchAllMeetings : api.searchMeetings;
+    const search = view === "all" ? api.searchOrgMeetings : api.searchMeetings;
     const timer = setTimeout(() => {
       search(trimmed)
         .then((results) => {
@@ -235,6 +236,8 @@ export default function Dashboard() {
     try {
       await api.deleteMeeting(meetingId);
       setMeetings((prev) => prev?.filter((m) => m.id !== meetingId) ?? null);
+      setGroupMeetings((prev) => prev?.filter((m) => m.id !== meetingId) ?? null);
+      setAllMeetings((prev) => prev?.filter((m) => m.id !== meetingId) ?? null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't delete meeting");
     } finally {
@@ -243,42 +246,40 @@ export default function Dashboard() {
   }
 
   return (
-    <AppShell>
-      <div className="mb-8 flex items-center justify-between">
-        <div>
-          <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">Meetings</h1>
-          <p className="mt-1 text-sm text-ink-muted">
-            Your recorded calls, transcripts, and coaching reports.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setPendingAction("live")} disabled={starting} className="btn-primary">
-            {starting ? "Starting…" : "Record live"}
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            // "audio/*" alone isn't enough — the OS file picker filters by
-            // MIME type first, and several accepted extensions (.caf
-            // especially) aren't reliably mapped to an audio/* type in
-            // every OS's file-type database, so the picker hides them even
-            // though the backend (_ALLOWED_AUDIO_EXTENSIONS in
-            // api/meetings.py) happily accepts them. Listing the exact
-            // extensions alongside the wildcard covers both cases — a
-            // browser matches on *either*.
-            accept="audio/*,.mp3,.wav,.m4a,.mp4,.webm,.ogg,.oga,.flac,.aac,.opus,.caf"
-            className="hidden"
-            onChange={onFileSelected}
-          />
-          <button
-            onClick={() => setPendingAction("upload")}
-            disabled={uploading}
-            className="btn-secondary"
-          >
-            {uploading ? "Uploading…" : "Upload recording"}
-          </button>
-        </div>
-      </div>
+    <AppShell fill>
+      <PageHeader
+        title="Meetings"
+        subtitle="Your recorded calls, transcripts, and coaching reports."
+        actions={
+          <>
+            <button onClick={() => setPendingAction("live")} disabled={starting} className="btn-primary">
+              {starting ? "Starting…" : "Record live"}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              // "audio/*" alone isn't enough — the OS file picker filters by
+              // MIME type first, and several accepted extensions (.caf
+              // especially) aren't reliably mapped to an audio/* type in
+              // every OS's file-type database, so the picker hides them even
+              // though the backend (_ALLOWED_AUDIO_EXTENSIONS in
+              // api/meetings.py) happily accepts them. Listing the exact
+              // extensions alongside the wildcard covers both cases — a
+              // browser matches on *either*.
+              accept="audio/*,.mp3,.wav,.m4a,.mp4,.webm,.ogg,.oga,.flac,.aac,.opus,.caf"
+              className="hidden"
+              onChange={onFileSelected}
+            />
+            <button
+              onClick={() => setPendingAction("upload")}
+              disabled={uploading}
+              className="btn-secondary"
+            >
+              {uploading ? "Uploading…" : "Upload recording"}
+            </button>
+          </>
+        }
+      />
 
       <CallTypeModal
         open={pendingAction !== null}
@@ -286,28 +287,37 @@ export default function Dashboard() {
         onConfirm={onCallTypeChosen}
       />
 
-      {(user?.group_id || isAdmin) && (
-        <div className="mb-6 flex gap-1 border-b border-border dark:border-border-dark">
-          {(["mine", ...(user?.group_id ? (["group"] as const) : []), ...(isAdmin ? (["all"] as const) : [])] as const).map(
-            (tab) => (
-              <button
-                key={tab}
-                onClick={() => setView(tab)}
-                className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
-                  view === tab
-                    ? "border-accent text-ink dark:border-ink-inverted dark:text-ink-inverted"
-                    : "border-transparent text-ink-muted hover:text-ink dark:hover:text-ink-inverted"
-                }`}
-              >
-                {tab === "mine" ? "My meetings" : tab === "group" ? "Group" : "All meetings"}
-              </button>
-            ),
+      {(inGroup || isAdmin) && (
+        <div className="mb-6 flex shrink-0 gap-1 border-b border-border dark:border-border-dark">
+          {(["mine", ...(inGroup ? (["group"] as const) : []), ...(isAdmin ? (["all"] as const) : [])] as const).map(
+            (tab) => {
+              const count =
+                tab === "mine"
+                  ? (meetings?.length ?? 0)
+                  : tab === "group"
+                    ? (groupMeetings?.length ?? 0)
+                    : (allMeetings?.length ?? 0);
+              const label = tab === "mine" ? "My meetings" : tab === "group" ? "Group" : "All meetings";
+              return (
+                <button
+                  key={tab}
+                  onClick={() => setView(tab)}
+                  className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
+                    view === tab
+                      ? "border-accent text-ink dark:border-ink-inverted dark:text-ink-inverted"
+                      : "border-transparent text-ink-muted hover:text-ink dark:hover:text-ink-inverted"
+                  }`}
+                >
+                  {label} ({count})
+                </button>
+              );
+            },
           )}
         </div>
       )}
 
       {(view === "mine" || view === "all") && (
-        <div className="relative mb-6">
+        <div className="relative mb-6 shrink-0">
           <input
             type="search"
             value={query}
@@ -328,7 +338,7 @@ export default function Dashboard() {
       )}
 
       {view === "group" && (
-        <div className="relative mb-6">
+        <div className="relative mb-6 shrink-0">
           <input
             type="search"
             value={groupFilter}
@@ -339,7 +349,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
+      {error && <p className="mb-4 shrink-0 text-sm text-status-danger">{error}</p>}
 
       {view === "group" ? (
         <>
@@ -358,7 +368,7 @@ export default function Dashboard() {
             </div>
           )}
           {filteredGroupMeetings && filteredGroupMeetings.length > 0 && (
-            <ul className="card max-h-[70vh] divide-y divide-border overflow-y-auto dark:divide-border-dark">
+            <ul className="card min-h-0 flex-1 divide-y divide-border overflow-y-auto dark:divide-border-dark">
               {filteredGroupMeetings.map((meeting) => (
                 <li key={meeting.id}>
                   <Link
@@ -373,7 +383,7 @@ export default function Dashboard() {
                         {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
                       </p>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 items-center justify-end gap-2">
                       {meeting.api_key_name && (
                         <ApiKeyBadge name={meeting.api_key_name} live={meeting.status === "recording"} />
                       )}
@@ -395,7 +405,7 @@ export default function Dashboard() {
             </div>
           )}
           {searchResults.length > 0 && (
-            <ul className="card max-h-[70vh] divide-y divide-border overflow-y-auto dark:divide-border-dark">
+            <ul className="card min-h-0 flex-1 divide-y divide-border overflow-y-auto dark:divide-border-dark">
               {searchResults.map((result) => (
                 <li key={result.meeting_id}>
                   <Link
@@ -426,11 +436,11 @@ export default function Dashboard() {
           {allMeetings === null && <p className="text-sm text-ink-muted">Loading…</p>}
           {allMeetings?.length === 0 && (
             <div className="card p-10 text-center">
-              <p className="text-sm text-ink-muted">No meetings yet, across any account.</p>
+              <p className="text-sm text-ink-muted">No meetings yet in this organization.</p>
             </div>
           )}
           {allMeetings && allMeetings.length > 0 && (
-            <ul className="card max-h-[70vh] divide-y divide-border overflow-y-auto dark:divide-border-dark">
+            <ul className="card min-h-0 flex-1 divide-y divide-border overflow-y-auto dark:divide-border-dark">
               {allMeetings.map((meeting) => (
                 <li key={meeting.id}>
                   <Link
@@ -445,7 +455,7 @@ export default function Dashboard() {
                         {meeting.owner_name} · {new Date(meeting.created_at).toLocaleString()}
                       </p>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 items-center justify-end gap-2">
                       {meeting.api_key_name && (
                         <ApiKeyBadge name={meeting.api_key_name} live={meeting.status === "recording"} />
                       )}
@@ -472,7 +482,7 @@ export default function Dashboard() {
           )}
 
           {meetings && meetings.length > 0 && (
-            <ul className="card max-h-[70vh] divide-y divide-border overflow-y-auto dark:divide-border-dark">
+            <ul className="card min-h-0 flex-1 divide-y divide-border overflow-y-auto dark:divide-border-dark">
               {meetings.map((meeting) => (
                 <li key={meeting.id}>
                   <Link
@@ -487,7 +497,7 @@ export default function Dashboard() {
                         {new Date(meeting.created_at).toLocaleString()}
                       </p>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex min-w-0 items-center justify-end gap-3">
                       {meeting.api_key_name && (
                         <ApiKeyBadge name={meeting.api_key_name} live={meeting.status === "recording"} />
                       )}

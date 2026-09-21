@@ -14,8 +14,8 @@ from app.services.llm.base import LLMResponse
 from app.services.llm.resolve import ResolvedProvider
 
 
-async def _meeting_with_segments(db, owner_id, segments: list[tuple[Channel, int, int, str]]) -> Meeting:
-    meeting = Meeting(owner_id=owner_id, title="Test call")
+async def _meeting_with_segments(db, owner_id, organization_id, segments: list[tuple[Channel, int, int, str]]) -> Meeting:
+    meeting = Meeting(owner_id=owner_id, organization_id=organization_id, title="Test call")
     db.add(meeting)
     await db.flush()
     for channel, start_ms, end_ms, text in segments:
@@ -38,6 +38,7 @@ async def test_run_cycle_persists_insight_anchored_to_last_segment(db, make_user
     meeting = await _meeting_with_segments(
         db,
         user.id,
+        user.active_organization_id,
         [
             (Channel.THEM, 0, 1000, "What's your pricing?"),
             (Channel.ME, 1000, 2500, "Let me check on that."),
@@ -75,7 +76,9 @@ async def test_run_cycle_persists_score_only_cycle(db, make_user, monkeypatch):
     """No suggestion, no blockers — still persisted, so the score-over-time
     view isn't sparse just because there was nothing else to flag."""
     user = await make_user()
-    meeting = await _meeting_with_segments(db, user.id, [(Channel.ME, 0, 800, "Hey, how's it going?")])
+    meeting = await _meeting_with_segments(
+        db, user.id, user.active_organization_id, [(Channel.ME, 0, 800, "Hey, how's it going?")]
+    )
 
     async def fake_complete(provider, model, messages, api_key, base_url, max_tokens=1024):
         return LLMResponse(

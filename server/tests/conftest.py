@@ -50,7 +50,10 @@ from alembic.config import Config  # noqa: E402
 from app.core.db import _async_database_url, get_db  # noqa: E402
 from app.core.security import create_access_token, hash_password  # noqa: E402
 from app.main import create_app  # noqa: E402
-from app.models.user import User, UserRole  # noqa: E402
+from app.models.group import GroupMembership  # noqa: E402
+from app.models.organization import Organization, OrgRole  # noqa: E402
+from app.models.user import User  # noqa: E402
+from app.services.organizations import add_membership, create_organization, default_org_name  # noqa: E402
 
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
@@ -72,8 +75,12 @@ _TABLES = [
     "provider_credentials",
     "kb_documents",
     "call_profiles",
+    "organization_invites",
+    "group_memberships",
+    "organization_memberships",
     "users",
     "groups",
+    "organizations",
 ]
 
 
@@ -129,27 +136,71 @@ async def app_client(_engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
 
 
 @pytest_asyncio.fixture
+async def make_org(db: AsyncSession):
+    """Factory: make_org(owner, name=...) -> Organization. Seeds default
+    call types and owner membership, same as signup/bootstrap."""
+
+    async def _make(
+        owner: User,
+        name: str | None = None,
+        *,
+        is_instance_org: bool = False,
+        activate: bool = True,
+    ) -> Organization:
+        org = await create_organization(
+            db,
+            owner=owner,
+            name=name or default_org_name(owner.full_name),
+            is_instance_org=is_instance_org,
+            activate=activate,
+        )
+        await db.commit()
+        await db.refresh(org)
+        await db.refresh(owner)
+        return org
+
+    return _make
+
+
+@pytest_asyncio.fixture
 async def make_user(db: AsyncSession):
-    """Factory: make_user(email=..., role=..., group_id=...) -> User, with a
-    known password ("testpass123") so callers that need to log in via the
-    real API can. Returns the persisted User with owner/call_type-style
-    relationships available (not needed here, but consistent)."""
+    """Factory: make_user(...) -> User with a known password ("testpass123").
+
+    By default the user owns a freshly created organization. Pass `org=`
+    (and optional `org_role`) to join an existing one instead. `group_ids`
+    are org-scoped GroupMembership rows.
+    """
 
     async def _make(
         email: str = "user@example.com",
         password: str = "testpass123",
         full_name: str = "Test User",
-        role: UserRole = UserRole.MEMBER,
-        group_id: UUID | None = None,
+        *,
+        org: Organization | None = None,
+        org_role: OrgRole = OrgRole.MEMBER,
+        is_super_admin: bool = False,
+        group_ids: list[UUID] | None = None,
+        create_org: bool = True,
     ) -> User:
         user = User(
             email=email,
             hashed_password=hash_password(password),
             full_name=full_name,
-            role=role,
-            group_id=group_id,
+            is_super_admin=is_super_admin,
         )
         db.add(user)
+        await db.flush()
+        if org is not None:
+            await add_membership(
+                db, user=user, organization_id=org.id, role=org_role, activate=True
+            )
+        elif create_org:
+            await create_organization(
+                db, owner=user, name=default_org_name(full_name), activate=True
+            )
+        if group_ids:
+            for group_id in group_ids:
+                db.add(GroupMembership(user_id=user.id, group_id=group_id))
         await db.commit()
         await db.refresh(user)
         return user
