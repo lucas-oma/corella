@@ -92,8 +92,8 @@ worker = [
     "pypdf==6.16.1",
 ]
 dev = [
-    "pytest==8.3.4",
-    "pytest-asyncio==0.25.2",
+    "pytest==9.0.3",
+    "pytest-asyncio==1.4.0",
     "ruff==0.8.6",
 ]
 
