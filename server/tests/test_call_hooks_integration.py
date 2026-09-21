@@ -217,7 +217,7 @@ async def test_pre_call_post_with_body_template(db, make_user, receiver):
         pre_call_enabled=True,
         pre_call_url=f"{receiver}/pre",
         pre_call_method="POST",
-        pre_call_body_template='{"lookup_name": "{{owner_name}}", "meeting": "{{meeting_id}}"}',
+        pre_call_body_template='{"lookup_name": "{{corella.owner_name}}", "meeting": "{{corella.meeting_id}}"}',
     )
 
     await dispatch_pre_call(db, meeting)
@@ -283,7 +283,7 @@ async def test_post_call_regular_mode_sends_only_templated_fields(db, make_user,
         post_call_enabled=True,
         post_call_url=f"{receiver}/post",
         post_call_send_full_payload=False,
-        post_call_body_template='{"id": "{{meeting_id}}", "summary": "{{summary}}"}',
+        post_call_body_template='{"id": "{{corella.meeting_id}}", "summary": "{{corella.summary}}"}',
     )
 
     await dispatch_post_call(db, meeting, _report(summary="Custom template real test."))

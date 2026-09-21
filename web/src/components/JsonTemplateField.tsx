@@ -14,11 +14,11 @@ export function beautifyJson(raw: string): string {
 
 const SECRET_VAR = /\{\{secret\.[A-Za-z][A-Za-z0-9_]*\}\}/;
 const TOKEN =
-  /(\{\{secret\.[A-Za-z][A-Za-z0-9_]*\}\})|(\{\{[A-Za-z][A-Za-z0-9_]*\}\})|("(?:\\.|[^"\\])*")/g;
+  /(\{\{secret\.[A-Za-z][A-Za-z0-9_]*\}\})|(\{\{[A-Za-z][A-Za-z0-9_.]*\}\})|("(?:\\.|[^"\\])*")/g;
 
 function highlightVars(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const re = /(\{\{secret\.[A-Za-z][A-Za-z0-9_]*\}\})|(\{\{[A-Za-z][A-Za-z0-9_]*\}\})/g;
+  const re = /(\{\{secret\.[A-Za-z][A-Za-z0-9_]*\}\})|(\{\{[A-Za-z][A-Za-z0-9_.]*\}\})/g;
   let last = 0;
   let i = 0;
   let match: RegExpExecArray | null;
@@ -51,8 +51,8 @@ function isKeyString(source: string, afterIndex: number): boolean {
   return /^\s*:/.test(source.slice(afterIndex));
 }
 
-/** Color {{secret.NAME}} (amber) and other {{placeholders}} (blue) so they
- * stand out from the surrounding JSON. Keys stay muted. */
+/** Color {{secret.NAME}} (amber) and {{corella.*}} / other {{placeholders}}
+ * (blue) so they stand out from the surrounding JSON. Keys stay muted. */
 export function highlightJsonTemplate(source: string): ReactNode {
   if (!source) return null;
   const nodes: ReactNode[] = [];
