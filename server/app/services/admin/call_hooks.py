@@ -312,6 +312,7 @@ async def _build_copilot_insights(db: AsyncSession, meeting_id: UUID) -> list[di
             "suggestion": i.suggestion,
             "blockers": i.blockers,
             "coach_score": i.coach_score,
+            "sentiment": i.sentiment,
         }
         for i in insights
     ]

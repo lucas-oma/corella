@@ -1020,6 +1020,8 @@ async def _run_copilot_and_send(websocket: WebSocket, session: LiveSession) -> N
                 "blockers": result.blockers,
                 "action_items": result.action_items,
                 "coach_score": result.coach_score,
+                "sentiment": result.sentiment,
+                "speaker_share": result.speaker_share,
             }
         )
     except Exception:
@@ -1141,6 +1143,7 @@ async def _commit_segment(
             "text": text,
             "speaker_label": speaker.display_label,
             "linked_user_id": str(speaker.linked_user_id) if speaker.linked_user_id else None,
+            "speaker_id": str(speaker.id),
         }
         await asyncio.get_running_loop().run_in_executor(
             None,
@@ -1251,6 +1254,7 @@ async def _run_quick_label_hint(
             "text": segment.text,
             "speaker_label": speaker.display_label,
             "linked_user_id": str(speaker.linked_user_id) if speaker.linked_user_id else None,
+            "speaker_id": str(speaker.id),
         }
 
     await loop.run_in_executor(

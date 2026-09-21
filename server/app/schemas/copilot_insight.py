@@ -11,3 +11,4 @@ class CopilotInsightRead(BaseModel):
     suggestion: str | None
     blockers: list[str]
     coach_score: int | None
+    sentiment: str | None

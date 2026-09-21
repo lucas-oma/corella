@@ -81,12 +81,10 @@ def speaker_share(
     owner_id: UUID,
     capture_mode: CaptureMode,
 ) -> list[dict[str, str | int]] | None:
-    """Open-mic / upload talk share by display name. None for meeting_tab
-    (Me/Them channel ratio is the honest metric there) or no speech.
-    Percents are rounded to integers and forced to sum to 100.
+    """Talk share by display name (Me / real names / Speaker 1…N). None
+    when there is no speech with a duration. Percents are rounded to
+    integers and forced to sum to 100.
     """
-    if capture_mode == CaptureMode.MEETING_TAB:
-        return None
     labels = display_labels(segments, owner_id=owner_id, capture_mode=capture_mode)
     ms_by_label: dict[str, int] = {}
     order: list[str] = []

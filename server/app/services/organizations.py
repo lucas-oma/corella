@@ -37,25 +37,29 @@ DEFAULT_CALL_TYPES: tuple[tuple[str, str, str, bool], ...] = (
         "sales",
         "Sales call",
         "This is a sales call. Focus the summary and key_topics on the prospect's pain points, "
-        "objections raised, budget/timeline signals, and next steps or deal stage. sentiment should "
-        "reflect how receptive the prospect seemed. Prioritize quotes about pricing, timeline, or "
-        "objections for notable_quotes.",
+        "objections raised, budget/timeline signals, and next steps or deal stage. sentiment must "
+        "be one of Hostile, Tense, Frustrated, Skeptical, Neutral, Engaged, Positive, Enthusiastic "
+        "and should reflect how receptive the prospect seemed (typically Skeptical, Engaged, "
+        "Positive, or Enthusiastic). Prioritize quotes about pricing, timeline, or objections for "
+        "notable_quotes.",
         False,
     ),
     (
         "support",
         "Support call",
         "This is a customer support call. Focus the summary and key_topics on the issue reported, "
-        "whether it was resolved, and any escalation risk. sentiment should reflect the customer's "
-        "frustration or satisfaction level. Prioritize quotes describing the problem or the "
-        "resolution for notable_quotes.",
+        "whether it was resolved, and any escalation risk. sentiment must be one of Hostile, Tense, "
+        "Frustrated, Skeptical, Neutral, Engaged, Positive, Enthusiastic and should reflect the "
+        "customer's frustration or satisfaction (typically Frustrated, Tense, Neutral, or Positive). "
+        "Prioritize quotes describing the problem or the resolution for notable_quotes.",
         False,
     ),
     (
         "interview",
         "Interview",
         "This is a job interview. Focus the summary and key_topics on the candidate's strengths, "
-        "gaps, and fit signals relative to what was asked. sentiment should reflect how the "
+        "gaps, and fit signals relative to what was asked. sentiment must be one of Hostile, Tense, "
+        "Frustrated, Skeptical, Neutral, Engaged, Positive, Enthusiastic and should reflect how the "
         "conversation went overall. Prioritize quotes that reveal candidate strengths or concerns "
         "for notable_quotes.",
         False,
@@ -64,8 +68,9 @@ DEFAULT_CALL_TYPES: tuple[tuple[str, str, str, bool], ...] = (
         "one_on_one",
         "1:1",
         "This is a one-on-one check-in. Focus the summary and key_topics on blockers raised, growth "
-        "or career topics, and commitments made by either person. sentiment should reflect the "
-        "overall tone of the conversation. Prioritize quotes about blockers or commitments for "
+        "or career topics, and commitments made by either person. sentiment must be one of Hostile, "
+        "Tense, Frustrated, Skeptical, Neutral, Engaged, Positive, Enthusiastic and should reflect "
+        "the overall tone of the conversation. Prioritize quotes about blockers or commitments for "
         "notable_quotes.",
         False,
     ),

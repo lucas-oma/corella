@@ -396,6 +396,7 @@ def _segment_payload(segment: TranscriptSegment, speaker_label: str) -> dict:
         "text": segment.text,
         "speaker_label": speaker_label,
         "linked_user_id": str(segment.linked_user_id) if segment.linked_user_id else None,
+        "speaker_id": str(segment.speaker_id) if segment.speaker_id else None,
     }
 
 
@@ -1009,6 +1010,7 @@ async def _identify_speaker_name_async(meeting_id: str, speaker_id: str, embeddi
                 "text": s.text,
                 "speaker_label": display_name,
                 "linked_user_id": None,
+                "speaker_id": str(s.speaker_id) if s.speaker_id else None,
             }
             for s in segments
         ]

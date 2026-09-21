@@ -66,17 +66,21 @@ def test_meeting_tab_unlabeled_mic_is_me():
     assert text == "Me: Can you hear me?\nSpeaker 1: Yes.\nAna: Also Ana."
 
 
-def test_speaker_share_none_on_meeting_tab():
+def test_speaker_share_on_meeting_tab():
     owner = uuid4()
     share = speaker_share(
         [
             _Seg("Hi.", channel=Channel.ME, start_ms=0, end_ms=1000),
-            _Seg("Hello.", channel=Channel.THEM, start_ms=1000, end_ms=2000),
+            _Seg("Hello.", channel=Channel.THEM, start_ms=1000, end_ms=3000),
         ],
         owner_id=owner,
         capture_mode=CaptureMode.MEETING_TAB,
     )
-    assert share is None
+    assert share == [
+        {"label": "Me", "pct": 33},
+        {"label": "Speaker 1", "pct": 67},
+    ]
+    assert sum(row["pct"] for row in share) == 100
 
 
 def test_speaker_share_open_mic_by_display_name():
