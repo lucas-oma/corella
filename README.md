@@ -11,16 +11,17 @@ A self-hosted meeting assistant: it records a call from your browser (or takes a
 - **Live in-browser recording** — captures your mic and, optionally, a shared browser tab's audio, transcribing both sides as the call happens.
 - **Upload-based transcription** — drop in an existing recording (most common audio formats, incl. `.caf`) for the same pipeline, offline.
 - **Speaker separation, live** — more than one voice on your own mic (an in-person meeting around one laptop) or on the shared tab audio gets split into "Speaker 1"/"Speaker 2" / "Them 1"/"Them 2" mid-call, not just after the fact.
-- **Cross-meeting voice recognition** — enroll your voice once and Corella recognizes you (and, within a group, your teammates) across future calls; unrecognized speakers get identified live from what they say ("Hi, this is Lucas") via your configured LLM.
+- **Cross-meeting voice recognition** — enroll your voice once and Corella recognizes you (and teammates in the same organization) across future calls; unrecognized speakers get identified live from what they say ("Hi, this is Lucas") via your configured LLM.
 - **Pluggable speech-to-text** — local `faster-whisper` by default (zero config), or Deepgram if you connect an API key — per-user, per-provider model overrides available in Settings.
 - **Pluggable copilot LLM** — Anthropic, OpenAI, Gemini (bring your own key), or a self-hosted Ollama instance — live suggestions, blockers, action items, and a live coach score during the call.
 - **Post-call reports** — auto-generated the moment a call finishes: title, summary, key topics, sentiment, notable quotes, action items, talk ratio, and a coach score, tuned by call type (sales/support/interview/1:1/meeting).
 - **Knowledge base** — upload your own documents; the live copilot retrieves relevant snippets via semantic search.
-- **Semantic search** — across your own meeting history, across your group's shared reports, or (as an admin) system-wide.
-- **Groups** — a shared knowledge base (admins upload and maintain it, assigned per group) and shared voice recognition across teammates, with report-only (not raw transcript) visibility into a group-mate's calls.
-- **Admin console** — user/group management, and a cost-analytics dashboard (per-user spend, daily trend, a trailing-average 7-day projection) built from a real per-call LLM usage ledger.
-- **Admin live debug panel** — while recording your own call as an admin, toggle a technical event stream (VAD flushes, STT/LLM request+response timing, diarization dispatch) for in-the-moment debugging.
-- **Per-call cost estimate** — a best-effort running total per meeting, from real token usage (LLM calls) and real audio duration (Deepgram STT) where the provider reports it, with a by-provider breakdown in the admin dashboard.
+- **Semantic search** — across your own meeting history, across your group's shared reports, or (as an org owner/admin) everything in the active organization.
+- **Organizations** — the isolation boundary. Open signup creates `{Name} Org` with you as owner; closed mode uses one instance org. Groups nest inside an org. Owner/admin/member are org roles; `super_admin` is an instance flag.
+- **Groups** — org-scoped subcategories. A shared knowledge base (org owner/admin upload and maintain it, assigned per group) and report-only (not raw transcript) visibility into a group-mate's calls. Voice recognition is org-wide so multi-group users aren't stuck.
+- **Organization settings** — members, invites, groups, secrets, call types, and org spend. **Super admin** is a separate instance console (org list, super-admin flags, instance-wide costs).
+- **Org-admin live debug panel** — while recording your own call as an org owner/admin or super admin, toggle a technical event stream (VAD flushes, STT/LLM request+response timing, diarization dispatch) for in-the-moment debugging.
+- **Per-call cost estimate** — a best-effort running total per meeting, from real token usage (LLM calls) and real audio duration (Deepgram STT) where the provider reports it, with a by-provider breakdown on the organization cost dashboard.
 - **API access** — API keys (Settings) for creating/reading meetings and streaming a live recording from another system, plus per-call-type hooks that fire before a call starts (pull in external context) and after it finishes (push the full result out) — see [`API.md`](API.md). A website can use [`packages/corella-live`](packages/corella-live) instead of speaking the WebSocket protocol by hand.
 
 ## Architecture
@@ -35,9 +36,9 @@ flowchart TB
     Worker --> Qdrant[("qdrant\nvector search\n(knowledge base +\nmeeting search)")]
 ```
 
-- **api** — FastAPI. Auth, meeting/KB/admin CRUD, WebSocket audio ingestion and live event push (transcript, copilot, diarization updates, admin debug events). Runs `faster-whisper` directly for live transcription (torch-free, light enough for this process), and also loads pyannote.audio's speaker-*embedding* model directly (not gated, unlike the full diarization pipeline below) for the instant "does this match an already-confirmed voice" check on the hot live-recognition path — no worker round-trip for that. When a session's STT is Deepgram, its own native diarization (word-level speaker index) drives live same-room/same-tab speaker splitting entirely in this process too, with zero worker involvement while that stream stays healthy. Everything else torch-dependent (the full `diarize()` pipeline, offline transcription's diarize step) stays worker-only.
+- **api** — FastAPI. Auth, meeting/KB/org/admin CRUD, WebSocket audio ingestion and live event push (transcript, copilot, diarization updates, admin debug events). Runs `faster-whisper` directly for live transcription (torch-free, light enough for this process), and also loads pyannote.audio's speaker-*embedding* model directly (not gated, unlike the full diarization pipeline below) for the instant "does this match an already-confirmed voice" check on the hot live-recognition path — no worker round-trip for that. When a session's STT is Deepgram, its own native diarization (word-level speaker index) drives live same-room/same-tab speaker splitting entirely in this process too, with zero worker involvement while that stream stays healthy. Everything else torch-dependent (the full `diarize()` pipeline, offline transcription's diarize step) stays worker-only.
 - **worker** — Celery. Runs the heavier/blocking jobs: offline transcription + diarization for uploads, the periodic full-`diarize()`-pipeline reconciliation pass live sessions use when their STT isn't Deepgram (or as a fallback if a Deepgram stream drops), voice-identity matching, knowledge-base/meeting-search embedding, report generation, and voice enrollment — so none of it blocks the API process or the live WebSocket loop.
-- **postgres** — structured data: users, groups, meetings, transcript segments, speakers, voice identities, action items, provider/STT credentials, per-call LLM usage ledger.
+- **postgres** — structured data: users, organizations, memberships, invites, groups, meetings, transcript segments, speakers, voice identities, action items, provider/STT credentials, per-call LLM usage ledger.
 - **qdrant** — vector search, three collections: knowledge-base document chunks, meeting-transcript chunks (search), and speaker voice embeddings (cross-meeting recognition).
 - **redis** — Celery broker/result backend, plus pub/sub for bridging worker-side events (diarization, live labels) back to the right live WebSocket connection.
 - **web** — React/TypeScript SPA, built static and served by nginx.
@@ -61,7 +62,7 @@ The copilot LLM and the speech-to-text engine are each pluggable per user: a per
 corella/
   server/
     app/
-      api/          REST routers — auth, meetings, kb, settings, admin
+      api/          REST routers — auth, meetings, kb, settings, organizations, admin
       ws/            WebSocket live-session handler
       core/          config, security (JWT + secret encryption), db sessions
       models/        SQLAlchemy models
@@ -81,7 +82,7 @@ corella/
     alembic/          DB migrations
   web/
     src/
-      routes/         one file per screen (Dashboard, MeetingDetail, LiveSession, Settings, Admin, …)
+      routes/         one file per screen (Dashboard, Organization, Invite, Super admin, …)
       components/      shared UI (AppShell, …)
       lib/             typed API client, live-session WS client, auth context
     public/
@@ -126,7 +127,7 @@ Migrations run automatically on `api` startup. `postgres`/`redis`/`qdrant` don't
 See [`.env.example`](.env.example) for the full, documented list. Highlights:
 
 - **Core**: `JWT_SECRET` (required), `CORS_ORIGINS`, `ENVIRONMENT`, `PUBLIC_APP_URL` (identifies this instance in pre/post call-type API hooks — see [API access](#api-access)).
-- **Access control**: `ALLOW_PUBLIC_REGISTRATION`, `ADMIN_EMAIL`/`ADMIN_PASSWORD` (bootstrap admin, see [Access control](#access-control) below).
+- **Access control**: `ALLOW_PUBLIC_REGISTRATION`, `MAX_ORGS_PER_USER`, `INVITE_EXPIRE_DAYS`, `ADMIN_EMAIL`/`ADMIN_PASSWORD` (bootstrap super_admin, see [Access control](#access-control) below).
 - **Data stores**: `DATABASE_URL`, `REDIS_URL`, `QDRANT_URL` — defaults match `docker-compose.yml`'s service names, only change these if you're pointing at externally-hosted stores.
 - **Speech**: `HF_TOKEN` (diarization, see below), `WHISPER_MODEL`/`WHISPER_COMPUTE_TYPE`, optional `DEEPGRAM_API_KEY`/`DEFAULT_MODEL_DEEPGRAM`.
 - **Storage**: `AUDIO_STORAGE_PATH`/`MAX_AUDIO_UPLOAD_MB`, `KB_STORAGE_PATH`/`MAX_KB_UPLOAD_MB`, `EMBEDDING_MODEL`.
@@ -157,15 +158,26 @@ Speech-to-text uses whichever engine is currently resolved for the recording use
 
 ## Access control
 
-By default anyone can create their own account (`ALLOW_PUBLIC_REGISTRATION=true`). For an admin-managed instance:
+Two deployment modes (`ALLOW_PUBLIC_REGISTRATION`, plus `MAX_ORGS_PER_USER`, default `1`):
 
-1. Set `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env` — that account is created automatically on first startup with the `admin` role.
-2. Set `ALLOW_PUBLIC_REGISTRATION=false` to close self-serve sign-up.
-3. Sign in as the admin and manage users/groups from the **Admin** page in the UI (or `POST /api/admin/users` / `/docs` directly).
+- **Open** (`true`): signup creates `{full_name} Org` and the user is its **owner**. They may create more orgs up to `MAX_ORGS_PER_USER` (counts **owned** orgs, not memberships) and invite others.
+- **Closed** (`false`): no self-serve signup and no self-serve org create. Set `ADMIN_EMAIL` / `ADMIN_PASSWORD` — that account is created on first startup as `super_admin` and **owner** of one instance org (`is_instance_org`). Admin-created or invited users join that org as **members** and do not get a personal org.
 
-`ADMIN_EMAIL`/`ADMIN_PASSWORD` only ever *create* the account — changing them later and restarting won't touch an existing admin's password.
+Flipping the flag later does not merge or split orgs; it only changes whether new signups and org-creates are allowed. `ADMIN_EMAIL`/`ADMIN_PASSWORD` only ever *create* the bootstrap account — changing them later and restarting won't touch an existing password.
 
-Admins additionally get read-only access to every user's full transcript/audio (not just group-mates' reports) via a dedicated "All meetings" view, and a cost-analytics dashboard aggregated across the whole instance. Every write path (delete, report generation, action-item edits) stays strictly owner-only regardless of role.
+Roles are two enums, never one:
+
+- `User.is_super_admin` — instance operator. Bootstrap account, and anyone a super admin promotes. Powers: Super admin console, cross-org support read (`GET /api/meetings/all` and `/search/all`), promote/demote super admins. Not implied by creating an org.
+- `OrganizationMembership.role` — `owner` | `admin` | `member`.
+  - **Owner** (exactly one): invite/remove (cannot be removed/demoted by others), groups, KB, call types, secrets, org costs, promote/demote admin↔member, transfer ownership, delete org (never the instance/default org, and never the last remaining org).
+  - **Admin**: same day-to-day as owner except cannot demote/remove/replace the owner, cannot transfer, cannot delete the org.
+  - **Member**: own meetings plus group-shared surfaces (report-only for groupmates).
+
+The web app picks the **active org** (`PUT /api/organizations/current`); every browser request runs in that org. API keys do not switch — each key is bound to one org at creation.
+
+Invites are copy-link tokens (`INVITE_EXPIRE_DAYS`, default 7). Accepting works even when public registration is closed. A new email creates an account and joins that org (no auto-created personal org); an existing account adds a membership.
+
+Writes (delete meeting, report, action-item edits) stay **owner-only**. Org owner/admin get today's instance-admin powers **inside the active org** (org-wide meeting list, full read, KB upload/delete, call types, secrets, org cost dashboard).
 
 ## API access
 
@@ -173,9 +185,9 @@ Corella can be integrated with an external system in three ways — full referen
 
 The three types:
 
-1. **API keys** (Settings → API keys) — a long-lived credential that acts as its owner, for creating/reading meetings and streaming a live recording without a browser login. Each key has a max live-session duration (default 60 minutes) so a hung integration can't record forever.
+1. **API keys** (Settings → API keys) — a long-lived credential that acts as its owner **in the organization it was created in**. Switching orgs in the UI does not move the key. Each key has a max live-session duration (default 60 minutes) so a hung integration can't record forever.
 2. **Live streaming** — the same WebSocket protocol the browser app uses to record is reachable by API key too; no separate streaming endpoint exists.
-3. **Pre/post call-type hooks** (Admin → Call types) — an admin can configure an external API call to fire before a call of a given type starts (optionally feeding the response back into the live copilot's context, alongside the knowledge base) and/or after it finishes (optionally sending the full transcript/report/coaching timeline out to another system). Every such request carries three fixed headers (`X-Corella-App-Url`, `X-Corella-Meeting-Id`, `X-Corella-User-Id`) that can't be overridden by custom header config.
+3. **Pre/post call-type hooks** (Organization → Call types) — an org owner/admin can configure an external API call to fire before a call of a given type starts (optionally feeding the response back into the live copilot's context, alongside the knowledge base) and/or after it finishes (optionally sending the full transcript/report/coaching timeline out to another system). Every such request carries four fixed headers (`X-Corella-App-Url`, `X-Corella-Meeting-Id`, `X-Corella-User-Id`, `X-Corella-Org-Id`) that can't be overridden by custom header config.
 
 ## Design & branding
 
@@ -213,7 +225,7 @@ A backend `pytest` suite (`server/tests/`) covers the highest-value logic — pe
 
 ## Status
 
-Actively developed. Done so far: auth and admin-managed accounts with groups, upload and live in-browser recording with speaker-labeled transcripts, pluggable LLM copilot (live suggestions/blockers/action items/coach score) and pluggable STT (local or Deepgram), knowledge-base ingestion and semantic meeting search, auto-generated post-call reports (summary/topics/sentiment/quotes/coach score) tuned by call type, cross-meeting voice recognition with live LLM name-spotting, live same-room and same-tab speaker separation, an admin console (users/groups/cost analytics) plus a live debug panel, and per-call cost tracking against a real usage ledger.
+Actively developed. Done so far: organizations with owner/admin/member plus instance super_admin, copy-link invites, auth (open signup creates `{Name} Org`; closed mode uses one instance org), upload and live in-browser recording with speaker-labeled transcripts, pluggable LLM copilot (live suggestions/blockers/action items/coach score) and pluggable STT (local or Deepgram), knowledge-base ingestion and semantic meeting search, auto-generated post-call reports (summary/topics/sentiment/quotes/coach score) tuned by org-scoped call type, org-scoped voice recognition with live LLM name-spotting, live same-room and same-tab speaker separation, organization settings (people/groups/invites/secrets/call types/costs) plus a super-admin console, and per-call cost tracking against a real usage ledger.
 
 Not yet built: post-call "polish" re-transcription with a larger model.
 

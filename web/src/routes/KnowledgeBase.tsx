@@ -5,6 +5,7 @@ import KBUploadModal from "@/components/KBUploadModal";
 import { ApiError, api, type Group, type KBDocument } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
+import { isOrgAdmin } from "@/lib/org";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -35,16 +36,16 @@ export default function KnowledgeBase() {
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const isAdmin = user?.role === "admin";
+  const isAdmin = isOrgAdmin(user);
 
   useEffect(() => {
     api.listKBDocuments().then(setDocuments);
   }, []);
 
   useEffect(() => {
-    if (!isAdmin) return;
-    api.adminListGroups().then(setGroups).catch(() => setGroups([]));
-  }, [isAdmin]);
+    if (!isAdmin || !user?.active_organization_id) return;
+    api.listOrgGroups(user.active_organization_id).then(setGroups).catch(() => setGroups([]));
+  }, [isAdmin, user?.active_organization_id]);
 
   useEffect(() => {
     if (!documents?.some((d) => d.status === "pending" || d.status === "processing")) return;

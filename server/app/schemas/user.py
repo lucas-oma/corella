@@ -2,39 +2,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr
 
-from app.models.user import UserRole
+from app.models.organization import OrgRole
 
 
-class UserCreate(BaseModel):
-    email: EmailStr
-    password: str
-    full_name: str
-
-
-class AdminUserCreate(UserCreate):
-    role: UserRole = UserRole.MEMBER
-    group_id: UUID | None = None
-
-
-class AdminUserUpdate(BaseModel):
-    """Partial update — only fields actually sent are changed. Reassigning
-    an existing account's group/role, not creating one (POST .../users)."""
-
-    role: UserRole | None = None
-    group_id: UUID | None = None
-    clear_group: bool = False  # group_id=None alone is ambiguous with "don't change" — this disambiguates
-
-
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class ProfileUpdate(BaseModel):
-    """Self-service — PATCH /api/auth/me. Distinct from AdminUserUpdate,
-    which reassigns role/group on someone *else's* account."""
-
-    full_name: str
+class OrgMembershipRead(BaseModel):
+    id: UUID
+    name: str
+    role: OrgRole
+    is_instance_org: bool
 
 
 class UserRead(BaseModel):
@@ -43,13 +18,37 @@ class UserRead(BaseModel):
     id: UUID
     email: EmailStr
     full_name: str
-    role: UserRole
-    group_id: UUID | None
-    # Not a column — always computed in the route (does a VoiceIdentity row
-    # with linked_user_id=self exist) rather than via an ORM relationship,
-    # so this schema still round-trips a plain User object via
-    # from_attributes everywhere except the one route that fills it in.
+    is_super_admin: bool
+    active_organization_id: UUID | None
+    organizations: list[OrgMembershipRead] = []
+    group_ids: list[UUID] = []
     voice_enrolled: bool = False
+
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: str
+
+
+class MemberCreate(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: str
+    role: OrgRole = OrgRole.MEMBER
+
+
+class MemberUpdate(BaseModel):
+    role: OrgRole | None = None
+
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class ProfileUpdate(BaseModel):
+    full_name: str
 
 
 class Token(BaseModel):
@@ -59,3 +58,4 @@ class Token(BaseModel):
 
 class AuthConfig(BaseModel):
     allow_public_registration: bool
+    max_orgs_per_user: int

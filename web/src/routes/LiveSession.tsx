@@ -15,6 +15,7 @@ import {
 } from "@/lib/live";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
+import { isOrgAdmin } from "@/lib/org";
 
 type ConnectionState = "connecting" | "connected" | "error";
 
@@ -324,7 +325,7 @@ export default function LiveSession() {
             Share tab audio
           </button>
         )}
-        {user?.role === "admin" && connection === "connected" && (
+        {isOrgAdmin(user) && connection === "connected" && (
           <button
             onClick={onToggleDebug}
             className={`btn-secondary ${themActive ? "" : "ml-auto"}`}

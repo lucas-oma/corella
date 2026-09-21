@@ -19,7 +19,8 @@ from app.core.security import decode_access_token, hash_api_key
 from app.models.api_key import ApiKey
 from app.models.cost import UsageKind
 from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
-from app.models.user import User, UserRole
+from app.models.organization import OrganizationMembership, OrgRole
+from app.models.user import User
 from app.services import recording_lock
 from app.services.access import searchable_kb_keywords
 from app.services.asr import deepgram
@@ -37,6 +38,7 @@ from app.services.diarization.cluster import SIMILARITY_THRESHOLD, best_match, p
 from app.services.diarization.embedding import embed_utterance
 from app.services.diarization.labels import SPEAKER_LABEL_FORMAT
 from app.services.llm.resolve import ResolvedProvider, resolve_provider
+from app.services.organizations import resolve_active_membership
 from app.services.vad.vad import UtteranceDetector
 from app.workers.celery_app import celery_app
 
@@ -441,6 +443,15 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         if meeting is None or meeting.owner_id != user.id:
             await websocket.close(code=4404, reason="Meeting not found")
             return
+        if api_key_row is not None:
+            if api_key_row.organization_id != meeting.organization_id:
+                await websocket.close(code=4404, reason="Meeting not found")
+                return
+        else:
+            resolved = await resolve_active_membership(db, user)
+            if resolved is None or resolved[0].id != meeting.organization_id:
+                await websocket.close(code=4404, reason="Meeting not found")
+                return
         if meeting.status != MeetingStatus.RECORDING:
             await websocket.close(code=4409, reason="Meeting is not in a recording state")
             return
@@ -464,7 +475,16 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
         await db.commit()
         provider = await resolve_provider(db, user.id)
         stt = await resolve_stt_provider(db, user.id)
-        kb_keywords = await searchable_kb_keywords(db, user.id)
+        kb_keywords = await searchable_kb_keywords(db, user.id, meeting.organization_id)
+        membership = await db.scalar(
+            select(OrganizationMembership).where(
+                OrganizationMembership.user_id == user.id,
+                OrganizationMembership.organization_id == meeting.organization_id,
+            )
+        )
+        is_admin = user.is_super_admin or (
+            membership is not None and membership.role in (OrgRole.OWNER, OrgRole.ADMIN)
+        )
 
     # Load the local model *before* saying "ready" regardless of which STT
     # engine is preferred — better a few extra seconds of "Connecting…" on
@@ -476,7 +496,7 @@ async def live_session_ws(websocket: WebSocket, meeting_id: UUID) -> None:
     await asyncio.get_running_loop().run_in_executor(None, warm_up)
 
     session = LiveSession(
-        meeting_id, user.id, provider, stt, is_admin=user.role == UserRole.ADMIN, kb_keywords=kb_keywords
+        meeting_id, user.id, provider, stt, is_admin=is_admin, kb_keywords=kb_keywords
     )
 
     if stt.provider == "deepgram":

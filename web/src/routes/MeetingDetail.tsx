@@ -12,6 +12,7 @@ import {
   type TranscriptSegment,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { isOrgAdmin } from "@/lib/org";
 import { useConfirm } from "@/lib/confirm";
 
 const POLL_INTERVAL_MS = 3000;
@@ -314,11 +315,10 @@ export default function MeetingDetail() {
   // this too (GET /{id} itself 404s for anyone else), this is just what
   // the UI shows once it *has* been let in.
   const isOwner = meeting ? meeting.owner_id === user?.id : true;
-  // An admin gets full read-only access system-wide (audio + transcript,
-  // not just the report) — but never the write controls below, which stay
-  // strictly isOwner. Server-enforced too (GET .../audio and .../transcript
-  // 404 for anyone else, admin included, on write routes).
-  const isAdmin = user?.role === "admin";
+  // Org owner/admin (and instance super_admin) get full read-only access
+  // (audio + transcript, not just the report) — but never the write
+  // controls below, which stay strictly isOwner. Server-enforced too.
+  const isAdmin = isOrgAdmin(user) || Boolean(user?.is_super_admin);
   const canViewFull = isOwner || isAdmin;
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
   const [insights, setInsights] = useState<CopilotInsight[] | null>(null);

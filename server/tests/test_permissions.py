@@ -1,33 +1,39 @@
-"""The access-boundary rules this project spent multiple phases getting
-right (Phase H group visibility, Phase J admin read access): group
-visibility is report-only, admin gets full system-wide read access but
-zero write override, an ungrouped user gets neither. Locking these in for
-real rather than relying on memory of the manual curl verification these
-were originally checked with.
+"""Access-boundary rules: group visibility is report-only inside an org,
+org owner/admin get full read of that org, super-admin is the only
+cross-org path, writes stay owner-only.
 """
 
 import tempfile
 
 import pytest
 
-from app.models.group import Group
+from app.models.group import Group, GroupMembership
 from app.models.meeting import ActionItem, Channel, Meeting, MeetingStatus, TranscriptSegment
-from app.models.user import UserRole
+from app.models.organization import Organization, OrgRole
 
 
 async def _setup(db, make_user):
-    """Alice (grouped) owns a ready meeting with real transcript/action-item
-    rows and a real (tiny, temp-file-backed) audio file; Bob shares Alice's
-    group; Carol is ungrouped; an admin has no group at all. Returns a dict
-    of everything a test needs."""
-    group = Group(name="Test Group")
+    """Alice (grouped) owns a ready meeting; Bob shares Alice's group;
+    Carol is in the same org but ungrouped; Dana is org admin; a
+    super-admin lives in a different org; an outsider is in yet another.
+    """
+    alice = await make_user(email="alice@example.com")
+    organization = await db.get(Organization, alice.active_organization_id)
+    assert organization is not None
+
+    group = Group(name="Test Group", organization_id=organization.id)
     db.add(group)
+    await db.flush()
+    db.add(GroupMembership(user_id=alice.id, group_id=group.id))
     await db.commit()
 
-    alice = await make_user(email="alice@example.com", group_id=group.id)
-    bob = await make_user(email="bob@example.com", group_id=group.id)
-    carol = await make_user(email="carol@example.com")
-    admin = await make_user(email="admin@example.com", role=UserRole.ADMIN)
+    bob = await make_user(
+        email="bob@example.com", org=organization, org_role=OrgRole.MEMBER, group_ids=[group.id]
+    )
+    carol = await make_user(email="carol@example.com", org=organization, org_role=OrgRole.MEMBER)
+    admin = await make_user(email="admin@example.com", org=organization, org_role=OrgRole.ADMIN)
+    super_admin = await make_user(email="super@example.com", is_super_admin=True)
+    outsider = await make_user(email="outsider@example.com")
 
     audio_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     audio_file.write(b"not-real-audio-bytes-but-a-real-file")
@@ -35,6 +41,7 @@ async def _setup(db, make_user):
 
     meeting = Meeting(
         owner_id=alice.id,
+        organization_id=organization.id,
         title="Alice's meeting",
         status=MeetingStatus.READY,
         audio_path=audio_file.name,
@@ -55,6 +62,8 @@ async def _setup(db, make_user):
         "bob": bob,
         "carol": carol,
         "admin": admin,
+        "super_admin": super_admin,
+        "outsider": outsider,
         "meeting_id": str(meeting.id),
         "item_id": str(item.id),
     }
@@ -81,7 +90,6 @@ async def test_group_mate_gets_report_only_not_raw_content(app_client, db, make_
     assert (
         await app_client.get(f"/api/meetings/{ctx['meeting_id']}/action-items", headers=headers)
     ).status_code == 200
-    # The actual boundary: report-shaped reads are 200, raw content is 404.
     assert (
         await app_client.get(f"/api/meetings/{ctx['meeting_id']}/transcript", headers=headers)
     ).status_code == 404
@@ -107,7 +115,7 @@ async def test_group_mate_every_write_path_404s(app_client, db, make_user, auth_
 
 
 @pytest.mark.asyncio
-async def test_ungrouped_user_gets_nothing(app_client, db, make_user, auth_headers):
+async def test_ungrouped_org_member_gets_nothing(app_client, db, make_user, auth_headers):
     ctx = await _setup(db, make_user)
     headers = auth_headers(ctx["carol"])
 
@@ -119,9 +127,18 @@ async def test_ungrouped_user_gets_nothing(app_client, db, make_user, auth_heade
 
 
 @pytest.mark.asyncio
-async def test_admin_gets_full_read_access_system_wide(app_client, db, make_user, auth_headers):
-    """Admin has no group relation to Alice at all — proving this is a
-    real system-wide override, not group visibility in disguise."""
+async def test_other_org_cannot_see_meeting(app_client, db, make_user, auth_headers):
+    ctx = await _setup(db, make_user)
+    headers = auth_headers(ctx["outsider"])
+
+    assert (await app_client.get(f"/api/meetings/{ctx['meeting_id']}", headers=headers)).status_code == 404
+    assert (
+        await app_client.get(f"/api/meetings/{ctx['meeting_id']}/transcript", headers=headers)
+    ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_org_admin_gets_full_read_in_this_org(app_client, db, make_user, auth_headers):
     ctx = await _setup(db, make_user)
     headers = auth_headers(ctx["admin"])
 
@@ -133,7 +150,7 @@ async def test_admin_gets_full_read_access_system_wide(app_client, db, make_user
 
 
 @pytest.mark.asyncio
-async def test_admin_write_attempts_still_404_read_only_is_enforced(app_client, db, make_user, auth_headers):
+async def test_org_admin_write_attempts_still_404(app_client, db, make_user, auth_headers):
     ctx = await _setup(db, make_user)
     headers = auth_headers(ctx["admin"])
 
@@ -151,12 +168,38 @@ async def test_admin_write_attempts_still_404_read_only_is_enforced(app_client, 
 
 
 @pytest.mark.asyncio
-async def test_all_meetings_listing_is_admin_only(app_client, db, make_user, auth_headers):
+async def test_super_admin_can_read_across_orgs(app_client, db, make_user, auth_headers):
+    ctx = await _setup(db, make_user)
+    headers = auth_headers(ctx["super_admin"])
+
+    assert (await app_client.get(f"/api/meetings/{ctx['meeting_id']}", headers=headers)).status_code == 200
+    assert (
+        await app_client.get(f"/api/meetings/{ctx['meeting_id']}/transcript", headers=headers)
+    ).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_org_all_listing_is_org_admin_only(app_client, db, make_user, auth_headers):
     ctx = await _setup(db, make_user)
 
-    admin_response = await app_client.get("/api/meetings/all", headers=auth_headers(ctx["admin"]))
+    admin_response = await app_client.get("/api/meetings/org", headers=auth_headers(ctx["admin"]))
     assert admin_response.status_code == 200
     assert any(m["id"] == ctx["meeting_id"] for m in admin_response.json())
 
-    non_admin_response = await app_client.get("/api/meetings/all", headers=auth_headers(ctx["bob"]))
-    assert non_admin_response.status_code == 403
+    member_response = await app_client.get("/api/meetings/org", headers=auth_headers(ctx["bob"]))
+    assert member_response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_instance_all_listing_is_super_admin_only(app_client, db, make_user, auth_headers):
+    ctx = await _setup(db, make_user)
+
+    super_response = await app_client.get("/api/meetings/all", headers=auth_headers(ctx["super_admin"]))
+    assert super_response.status_code == 200
+    assert any(m["id"] == ctx["meeting_id"] for m in super_response.json())
+
+    org_admin_response = await app_client.get("/api/meetings/all", headers=auth_headers(ctx["admin"]))
+    assert org_admin_response.status_code == 403
+
+    member_response = await app_client.get("/api/meetings/all", headers=auth_headers(ctx["bob"]))
+    assert member_response.status_code == 403

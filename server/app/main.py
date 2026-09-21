@@ -5,11 +5,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 
-from app.api import admin, auth, call_types, kb, meetings
+from app.api import admin, auth, call_types, kb, meetings, organizations
 from app.api import settings as settings_api
 from app.core.bootstrap import seed_admin_user
 from app.core.config import get_settings
+from app.core.db import SessionLocal
+from app.models.organization import Organization
 from app.ws import live_session
 
 # Without this, the root logger defaults to WARNING with no handler at all —
@@ -45,9 +48,26 @@ async def _warm_up_embedding_model() -> None:
         logger.exception("Embedding model pre-warm failed at api startup")
 
 
+async def _backfill_qdrant_org_payloads() -> None:
+    """One-shot stamp of organization_id onto pre-org Qdrant points."""
+    try:
+        from app.services.embeddings.qdrant_store import backfill_missing_organization_id
+
+        async with SessionLocal() as db:
+            org = await db.scalar(select(Organization).where(Organization.is_instance_org.is_(True)))
+            if org is None:
+                return
+            await asyncio.get_running_loop().run_in_executor(
+                None, backfill_missing_organization_id, org.id
+            )
+    except Exception:
+        logger.exception("Qdrant organization_id backfill failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await seed_admin_user()
+    await _backfill_qdrant_org_payloads()
     await _warm_up_embedding_model()
     yield
 
@@ -66,6 +86,8 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(auth.router)
+    app.include_router(organizations.router)
+    app.include_router(organizations.invites_router)
     app.include_router(admin.router)
     app.include_router(call_types.router)
     app.include_router(meetings.router)

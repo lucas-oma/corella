@@ -116,19 +116,23 @@ Not yet promoted to a shared class, but used consistently as an inline pattern a
 
 ### Navigation
 
-Active vs. inactive nav items follow one rule: active gets a filled `accent` pill (`bg-accent text-accent-foreground`), inactive gets muted text with a subtle hover background (`hover:bg-black/[0.03] dark:hover:bg-white/[0.04]`). See `AppShell.tsx`.
+Primary nav is Meetings, Knowledge base, and Settings. Active vs. inactive follow one rule: active gets a filled `accent` pill (`bg-accent text-accent-foreground`), inactive gets muted text with a subtle hover background (`hover:bg-black/[0.03] dark:hover:bg-white/[0.04]`). See `AppShell.tsx`.
+
+Organization, Super admin, and Sign out live in the account menu on the right. The trigger is the Corella-bird avatar plus a disclosure chevron (hover/open fill, not a static image). The active org name sits to its left, separated by a 1px `border` rule.
 
 ## Iconography
 
-No icon library is installed. If a screen genuinely needs icons, keep them stroke-based and single-color (`currentColor`, inheriting `ink`/`accent` — never a multi-color icon set), and raise it as a real decision (which library, why) rather than adding one ad hoc for a single use.
+No general icon library. If a screen genuinely needs icons, keep them stroke-based and single-color (`currentColor`, inheriting `ink`/`accent` — never a multi-color icon set), and raise it as a real decision (which library, why) rather than adding one ad hoc for a single use.
+
+Account avatars are the exception: a custom DiceBear style (`web/src/lib/corella-bird.json`) of round blob birds (stick legs, oversized beaks/crests), always seeded on the user's **email**. Fill colors stay in the product palette — stone, paper, and dusty slate — so the ink eyes stay visible. Navy is reserved for beaks and the outline. An earlier editorial silhouette version is archived at `web/src/lib/corella-bird.silhouette.json`. Generation lives in `web/src/lib/avatar.ts` — don't copy those hex values into components.
 
 ## Critical actions
 
 Any action that **destroys data, revokes access, overwrites irreplaceable state, or ends a session** must go through `useConfirm()` / `ConfirmDialog` (`web/src/lib/confirm.tsx`) before it runs. Never fire on the first click. Never use `window.confirm`.
 
-Covered today: deletes, remove/revoke (voice sample, API keys), sign out, stop recording, regenerate/overwrite an existing report, privilege changes (role, remove from group). The same rule applies to password change and account delete if those UIs are added later.
+Covered today: deletes, remove/revoke (voice sample, API keys, invites), sign out, stop recording, regenerate/overwrite an existing report, privilege changes (org role, remove member, transfer ownership, leave/delete org). The same rule applies to password change and account delete if those UIs are added later.
 
-Not covered: reversible saves the user just typed (name, prefs, a new API key), first-time create/generate, toggles, moving a user between groups.
+Not covered: reversible saves the user just typed (name, prefs, a new API key), first-time create/generate, toggles, assigning a user to another group in the same org.
 
 ```tsx
 const confirm = useConfirm();

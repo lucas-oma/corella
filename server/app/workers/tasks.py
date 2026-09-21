@@ -278,7 +278,12 @@ def process_kb_document(document_id: str) -> None:
 
             embeddings = embed_texts(chunks)
             upsert_chunks(
-                document.id, document.owner_id, chunks, embeddings, group_id=document.group_id
+                document.id,
+                document.owner_id,
+                chunks,
+                embeddings,
+                group_id=document.group_id,
+                organization_id=document.organization_id,
             )
 
             document.chunk_count = len(chunks)
@@ -326,20 +331,21 @@ def _merge_adjacent_same_speaker(turns: list) -> list[tuple[float, float, str]]:
 
 
 def _recognize_voice_identity(
-    db, embedding, owner_group_id: UUID | None, owner_id: UUID
+    db, embedding, organization_id: UUID | None, owner_id: UUID
 ) -> VoiceIdentity | None:
-    """Checks the durable, cross-meeting library (Phase O) before this
-    meeting's own online clustering ever creates a fresh anonymous
-    cluster — the meeting owner's own enrolled identity and their group's
-    shared pool are searched together (see search_speaker_embeddings'
-    docstring for why one combined call is enough). None if nobody's ever
-    enrolled/been recognized as this voice.
+    """Checks the durable, cross-meeting library before this meeting's
+    own online clustering ever creates a fresh anonymous cluster — the
+    meeting owner's enrolled identity and the rest of the org's voice
+    pool are searched together. None if nobody's ever enrolled/been
+    recognized as this voice.
     """
+    if organization_id is None:
+        return None
     matches = search_speaker_embeddings(
         embedding.tolist(),
         SIMILARITY_THRESHOLD,
-        group_id=owner_group_id,
         linked_user_id=owner_id,
+        organization_id=organization_id,
         top_k=1,
     )
     if not matches:
@@ -535,7 +541,9 @@ def reconcile_diarization(meeting_id: str, channel_value: str, window_pcm_b64: s
                     # noise, regardless of how little it's said so far) or
                     # has to clear the guest floor below before it earns a
                     # real label.
-                    identity = _recognize_voice_identity(db, embedding, meeting.owner.group_id, meeting.owner_id)
+                    identity = _recognize_voice_identity(
+                        db, embedding, meeting.organization_id, meeting.owner_id
+                    )
                     is_first_ever = len(clusters) == 0
                     if identity is not None or is_first_ever:
                         speaker, needs_naming = _promote_new_speaker(db, meeting, channel, embedding, identity)
@@ -609,7 +617,9 @@ def reconcile_diarization(meeting_id: str, channel_value: str, window_pcm_b64: s
                     if not meets_guest_floor(cluster, total_weight_ms, settings):
                         continue
                     embedding_arr = np.array(cluster.centroid)
-                    identity = _recognize_voice_identity(db, embedding_arr, meeting.owner.group_id, meeting.owner_id)
+                    identity = _recognize_voice_identity(
+                        db, embedding_arr, meeting.organization_id, meeting.owner_id
+                    )
                     speaker, needs_naming = _promote_new_speaker(db, meeting, channel, embedding_arr, identity)
                     cluster.speaker_id = str(speaker.id)
                     if needs_naming:
@@ -737,7 +747,9 @@ def index_meeting_search(meeting_id: str) -> None:
 
         try:
             embeddings = embed_texts([text for text, _start, _end in chunks])
-            upsert_meeting_chunks(meeting.id, meeting.owner_id, chunks, embeddings)
+            upsert_meeting_chunks(
+                meeting.id, meeting.owner_id, chunks, embeddings, organization_id=meeting.organization_id
+            )
         except Exception:
             logger.exception("index_meeting_search failed for meeting %s", meeting_id)
 
@@ -773,15 +785,24 @@ def enroll_voice(user_id: str) -> None:
 
         identity = db.scalar(select(VoiceIdentity).where(VoiceIdentity.linked_user_id == user.id))
         if identity is None:
-            identity = VoiceIdentity(linked_user_id=user.id)
+            if user.active_organization_id is None:
+                return
+            identity = VoiceIdentity(
+                linked_user_id=user.id, organization_id=user.active_organization_id
+            )
             db.add(identity)
-        identity.group_id = user.group_id
         identity.display_name = user.full_name
+        if identity.organization_id is None and user.active_organization_id is not None:
+            identity.organization_id = user.active_organization_id
         db.flush()  # assign identity.id before it's used as the Qdrant point id
 
         try:
             upsert_speaker_embedding(
-                identity.id, identity.group_id, identity.linked_user_id, embedding.tolist()
+                identity.id,
+                identity.group_id,
+                identity.linked_user_id,
+                embedding.tolist(),
+                organization_id=identity.organization_id,
             )
         except Exception:
             logger.exception("enroll_voice: Qdrant upsert failed for user %s", user_id)
@@ -791,19 +812,21 @@ def enroll_voice(user_id: str) -> None:
         db.commit()
 
 
-async def _disambiguate_display_name(db, base_name: str, group_id: UUID | None) -> str:
+async def _disambiguate_display_name(db, base_name: str, organization_id: UUID | None) -> str:
     """"Lucas" / "Lucas (2)" / ... — scoped the same way recognition
-    itself is scoped (per group, or per-owner when group_id is None), not
-    instance-wide: two people named "Lucas" who never share a meeting or
-    group never need disambiguating from each other. Suffixes are assigned
-    once, at creation, and never reshuffled later — a third "Lucas"
-    showing up doesn't change the second one's already-assigned "(2)".
+    itself is scoped (per organization), not instance-wide: two people
+    named "Lucas" in different orgs never need disambiguating from each
+    other. Suffixes are assigned once, at creation, and never reshuffled
+    later — a third "Lucas" showing up doesn't change the second one's
+    already-assigned "(2)".
     Async — called only from _identify_speaker_name_async's AsyncSession;
     enroll_voice's sync path never needs disambiguation (an enrolled
     account's own name isn't deduplicated against anything)."""
     existing = set(
         await db.scalars(
-            select(VoiceIdentity.display_name).where(VoiceIdentity.group_id == group_id)
+            select(VoiceIdentity.display_name).where(
+                VoiceIdentity.organization_id == organization_id
+            )
         )
     )
     if base_name not in existing:
@@ -941,16 +964,18 @@ async def _identify_speaker_name_async(meeting_id: str, speaker_id: str, embeddi
         if not name:
             return
 
-        owner_group_id = (await db.get(User, meeting.owner_id)).group_id
-        display_name = await _disambiguate_display_name(db, name, owner_group_id)
+        owner_org_id = meeting.organization_id
+        display_name = await _disambiguate_display_name(db, name, owner_org_id)
 
-        identity = VoiceIdentity(group_id=owner_group_id, display_name=display_name)
+        identity = VoiceIdentity(
+            organization_id=owner_org_id, display_name=display_name
+        )
         db.add(identity)
         await db.flush()  # assign identity.id before it's used as the Qdrant point id / linked below
 
         embedding = json.loads(embedding_json)
         try:
-            upsert_speaker_embedding(identity.id, owner_group_id, None, embedding)
+            upsert_speaker_embedding(identity.id, None, None, embedding, organization_id=owner_org_id)
         except Exception:
             logger.exception("identify_speaker_name: Qdrant upsert failed for speaker %s", speaker_id)
             await db.rollback()

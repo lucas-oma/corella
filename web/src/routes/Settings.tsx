@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import AppShell from "@/components/AppShell";
+import UserAvatar from "@/components/UserAvatar";
 import {
   ApiError,
   api,
@@ -152,6 +153,7 @@ export default function Settings() {
   const [keyNameNeeded, setKeyNameNeeded] = useState(false);
 
   const [fullName, setFullName] = useState("");
+  const [avatarSeed, setAvatarSeed] = useState("");
   const [savingName, setSavingName] = useState(false);
   const [recording, setRecording] = useState(false);
   const [enrolling, setEnrolling] = useState(false);
@@ -277,7 +279,10 @@ export default function Settings() {
   }, []);
 
   useEffect(() => {
-    if (user) setFullName(user.full_name);
+    if (user) {
+      setFullName(user.full_name);
+      setAvatarSeed((prev) => prev || user.email);
+    }
   }, [user]);
 
   async function onSaveName() {
@@ -521,6 +526,32 @@ export default function Settings() {
       </div>
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
+
+      {/* TEMP: avatar seed playground — remove once the bird style is locked. */}
+      <section className="card mb-6 p-6">
+        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Avatar tester</h2>
+        <p className="mt-1 text-sm text-ink-muted">Temporary. Type a seed (email) and the bird updates.</p>
+        <div className="mt-5 flex items-center gap-4">
+          <UserAvatar
+            email={avatarSeed || "preview"}
+            size={72}
+            className="h-[72px] w-[72px] shrink-0 rounded border border-border dark:border-border-dark"
+          />
+          <div className="min-w-0 flex-1">
+            <label className="label" htmlFor="avatar-seed">
+              Seed
+            </label>
+            <input
+              id="avatar-seed"
+              type="text"
+              value={avatarSeed}
+              onChange={(e) => setAvatarSeed(e.target.value)}
+              placeholder="email@example.com"
+              className="field text-sm"
+            />
+          </div>
+        </div>
+      </section>
 
       <section className="card p-6">
         <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Profile</h2>
@@ -879,9 +910,10 @@ export default function Settings() {
             <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">API keys</h2>
             <p className="mt-1 text-xs text-ink-subtle">
               Let an external system create/read meetings and stream a live recording as your account —
-              see <code className="text-[11px]">API.md</code> for the full reference. Each key has a max
-              live-session length (default {DEFAULT_KEY_DURATION_MINUTES} min) so a hung integration can't
-              record forever.
+              see <code className="text-[11px]">API.md</code> for the full reference. Keys are bound to
+              the organization you&apos;re in when you create them and don&apos;t follow the switcher.
+              Each key has a max live-session length (default {DEFAULT_KEY_DURATION_MINUTES} min) so a
+              hung integration can&apos;t record forever.
             </p>
           </div>
         </div>

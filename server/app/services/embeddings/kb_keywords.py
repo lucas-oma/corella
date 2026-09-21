@@ -4,6 +4,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cost import LLMUsageEvent, UsageKind
+from app.models.user import User
 from app.services.copilot.json_parse import as_str_list, parse_json_response
 from app.services.llm.base import LLMError, LLMMessage, complete
 from app.services.llm.pricing import estimate_cost_usd
@@ -62,10 +63,12 @@ async def extract_keywords_via_llm(db: AsyncSession, owner_id: UUID, text: str) 
     cost = estimate_cost_usd(
         provider.provider, provider.model, response.input_tokens, response.output_tokens
     )
+    user = await db.get(User, owner_id)
     db.add(
         LLMUsageEvent(
             meeting_id=None,
             owner_id=owner_id,
+            organization_id=user.active_organization_id if user is not None else None,
             provider=provider.provider.value,
             model=provider.model,
             kind=UsageKind.KB_EXTRACTION,

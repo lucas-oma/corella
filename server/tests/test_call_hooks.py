@@ -89,7 +89,7 @@ class _FakeAsyncClient:
 @pytest.mark.asyncio
 async def test_basic_placeholders_substitute(db, make_user):
     user = await make_user()
-    meeting = Meeting(owner_id=user.id, title="Discovery call", status=MeetingStatus.READY)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="Discovery call", status=MeetingStatus.READY)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -108,7 +108,7 @@ async def test_quotes_apostrophes_and_newlines_stay_valid_json(db, make_user):
     double quote, an apostrophe, and a newline must round-trip through
     json.loads back to the exact original string."""
     user = await make_user()
-    meeting = Meeting(owner_id=user.id, title="Discovery call", status=MeetingStatus.READY)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="Discovery call", status=MeetingStatus.READY)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -123,7 +123,7 @@ async def test_quotes_apostrophes_and_newlines_stay_valid_json(db, make_user):
 @pytest.mark.asyncio
 async def test_array_and_number_placeholders_render_as_real_json_types(db, make_user):
     user = await make_user()
-    meeting = Meeting(owner_id=user.id, title="Discovery call", status=MeetingStatus.READY)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="Discovery call", status=MeetingStatus.READY)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -144,7 +144,7 @@ async def test_transcript_placeholder_includes_real_segments(db, make_user):
     from app.models.meeting import TranscriptSegment
 
     user = await make_user()
-    meeting = Meeting(owner_id=user.id, title="Discovery call", status=MeetingStatus.READY)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="Discovery call", status=MeetingStatus.READY)
     db.add(meeting)
     await db.commit()
     db.add(
@@ -166,11 +166,11 @@ async def test_call_type_placeholder_resolves_to_the_real_name(db, make_user):
     from app.models.call_type import CallType
 
     user = await make_user()
-    call_type = CallType(name="Sales call", slug="sales")
+    call_type = CallType(organization_id=user.active_organization_id, name="Sales call", slug="sales-placeholder")
     db.add(call_type)
     await db.commit()
 
-    meeting = Meeting(owner_id=user.id, title="A call", status=MeetingStatus.READY, call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", status=MeetingStatus.READY, call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -187,7 +187,7 @@ async def test_full_payload_includes_every_field(db, make_user):
     from app.models.meeting import CopilotInsight, TranscriptSegment
 
     user = await make_user()
-    meeting = Meeting(owner_id=user.id, title="Discovery call", status=MeetingStatus.READY, duration_seconds=120)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="Discovery call", status=MeetingStatus.READY, duration_seconds=120)
     db.add(meeting)
     await db.commit()
     db.add(TranscriptSegment(meeting_id=meeting.id, channel=Channel.ME, start_ms=0, end_ms=500, text="Hi."))
@@ -219,7 +219,7 @@ async def test_full_payload_includes_every_field(db, make_user):
 @pytest.mark.asyncio
 async def test_full_payload_placeholder_expands_inline(db, make_user):
     user = await make_user()
-    meeting = Meeting(owner_id=user.id, title="Discovery call", status=MeetingStatus.READY)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="Discovery call", status=MeetingStatus.READY)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -236,11 +236,12 @@ async def test_dispatch_pre_call_returns_response_text(db, make_user, monkeypatc
 
     user = await make_user()
     call_type = CallType(
+        organization_id=user.active_organization_id,
         name="Sales", slug="sales-pre", pre_call_enabled=True, pre_call_url="https://example.com/lookup"
     )
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -261,9 +262,10 @@ def test_render_pre_call_template_substitutes_meeting_level_fields():
 
     from app.models.call_type import CallType
 
-    call_type = CallType(name="Sales", slug="sales-pre-body")
+    call_type = CallType(organization_id=uuid4(), name="Sales", slug="sales-pre-body")
     meeting = Meeting(
         owner_id=uuid4(),
+        organization_id=uuid4(),
         title="Discovery call",
         status=MeetingStatus.RECORDING,
         call_type=call_type,
@@ -285,6 +287,7 @@ async def test_dispatch_pre_call_sends_rendered_body_template(db, make_user, mon
 
     user = await make_user()
     call_type = CallType(
+        organization_id=user.active_organization_id,
         name="Sales",
         slug="sales-pre-body-dispatch",
         pre_call_enabled=True,
@@ -294,7 +297,7 @@ async def test_dispatch_pre_call_sends_rendered_body_template(db, make_user, mon
     )
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -312,10 +315,10 @@ async def test_dispatch_pre_call_swallows_request_errors(db, make_user, monkeypa
     from app.models.call_type import CallType
 
     user = await make_user()
-    call_type = CallType(name="Sales", slug="sales-err", pre_call_enabled=True, pre_call_url="https://example.com/down")
+    call_type = CallType(organization_id=user.active_organization_id, name="Sales", slug="sales-err", pre_call_enabled=True, pre_call_url="https://example.com/down")
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -329,11 +332,12 @@ async def test_dispatch_pre_call_swallows_request_errors(db, make_user, monkeypa
 @pytest.mark.asyncio
 async def test_mandatory_headers_cannot_be_overridden_by_custom_headers(db, make_user, monkeypatch):
     """The non-negotiable guarantee: even a custom header that reuses one
-    of the three mandatory names loses — the real value always wins."""
+    of the four mandatory names loses — the real value always wins."""
     from app.models.call_type import CallType
 
     user = await make_user()
     call_type = CallType(
+        organization_id=user.active_organization_id,
         name="Sales",
         slug="sales-headers",
         pre_call_enabled=True,
@@ -342,7 +346,7 @@ async def test_mandatory_headers_cannot_be_overridden_by_custom_headers(db, make
     )
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -355,6 +359,7 @@ async def test_mandatory_headers_cannot_be_overridden_by_custom_headers(db, make
     assert sent_headers["X-Corella-Meeting-Id"] == str(meeting.id)  # not "spoofed"
     assert sent_headers["X-Corella-App-Url"] == get_settings().public_app_url
     assert sent_headers["X-Corella-User-Id"] == str(user.id)
+    assert sent_headers["X-Corella-Org-Id"] == str(user.active_organization_id)
     assert sent_headers["X-Custom"] == "1"  # the admin's own header still gets through
 
 
@@ -363,8 +368,9 @@ async def test_secret_placeholders_in_headers_are_interpolated(db, make_user, mo
     from app.models.call_type import CallType
 
     user = await make_user()
-    db.add(AppSecret(name="WEBHOOK_SECRET", value_encrypted=encrypt_secret("the-real-token")))
+    db.add(AppSecret(organization_id=user.active_organization_id, name="WEBHOOK_SECRET", value_encrypted=encrypt_secret("the-real-token")))
     call_type = CallType(
+        organization_id=user.active_organization_id,
         name="Sales",
         slug="sales-secret-headers",
         pre_call_enabled=True,
@@ -375,7 +381,7 @@ async def test_secret_placeholders_in_headers_are_interpolated(db, make_user, mo
     )
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -396,6 +402,7 @@ async def test_missing_secret_aborts_pre_call(db, make_user, monkeypatch):
 
     user = await make_user()
     call_type = CallType(
+        organization_id=user.active_organization_id,
         name="Sales",
         slug="sales-missing-secret",
         pre_call_enabled=True,
@@ -406,7 +413,7 @@ async def test_missing_secret_aborts_pre_call(db, make_user, monkeypatch):
     )
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -427,8 +434,9 @@ async def test_dispatch_pre_call_persists_redacted_success_log(db, make_user, mo
     from app.models.hook_log import HookLog
 
     user = await make_user()
-    db.add(AppSecret(name="WEBHOOK_SECRET", value_encrypted=encrypt_secret("the-real-token")))
+    db.add(AppSecret(organization_id=user.active_organization_id, name="WEBHOOK_SECRET", value_encrypted=encrypt_secret("the-real-token")))
     call_type = CallType(
+        organization_id=user.active_organization_id,
         name="Sales",
         slug="sales-hook-log",
         pre_call_enabled=True,
@@ -445,7 +453,7 @@ async def test_dispatch_pre_call_persists_redacted_success_log(db, make_user, mo
     )
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id, populate_existing=True)
@@ -480,11 +488,12 @@ async def test_dispatch_pre_call_persists_error_log(db, make_user, monkeypatch):
 
     user = await make_user()
     call_type = CallType(
+        organization_id=user.active_organization_id,
         name="Sales", slug="sales-hook-log-err", pre_call_enabled=True, pre_call_url="https://example.com/down"
     )
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id, populate_existing=True)
@@ -511,6 +520,7 @@ async def test_missing_secret_is_logged_and_does_not_fire(db, make_user, monkeyp
 
     user = await make_user()
     call_type = CallType(
+        organization_id=user.active_organization_id,
         name="Sales",
         slug="sales-missing-secret-log",
         pre_call_enabled=True,
@@ -519,7 +529,7 @@ async def test_missing_secret_is_logged_and_does_not_fire(db, make_user, monkeyp
     )
     db.add(call_type)
     await db.commit()
-    meeting = Meeting(owner_id=user.id, title="A call", call_type_id=call_type.id)
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call", call_type_id=call_type.id)
     db.add(meeting)
     await db.commit()
     meeting = await db.get(Meeting, meeting.id, populate_existing=True)
@@ -538,12 +548,22 @@ async def test_missing_secret_is_logged_and_does_not_fire(db, make_user, monkeyp
 @pytest.mark.asyncio
 async def test_hook_logs_endpoint_is_admin_only(app_client, db, make_user, auth_headers, monkeypatch):
     from app.models.call_type import CallType
-    from app.models.user import UserRole
+    from app.models.organization import Organization, OrgRole
 
-    admin = await make_user(email="admin-hooks@example.com", role=UserRole.ADMIN)
     owner = await make_user(email="owner-hooks@example.com")
+    organization = await db.get(Organization, owner.active_organization_id)
+    admin = await make_user(
+        email="admin-hooks@example.com", org=organization, org_role=OrgRole.ADMIN
+    )
+    member = await make_user(
+        email="member-hooks@example.com", org=organization, org_role=OrgRole.MEMBER
+    )
     call_type = CallType(
-        name="Sales", slug="sales-hook-logs-api", pre_call_enabled=True, pre_call_url="https://example.com/lookup"
+        organization_id=owner.active_organization_id,
+        name="Sales",
+        slug="sales-hook-logs-api",
+        pre_call_enabled=True,
+        pre_call_url="https://example.com/lookup",
     )
     db.add(call_type)
     await db.commit()
@@ -559,8 +579,11 @@ async def test_hook_logs_endpoint_is_admin_only(app_client, db, make_user, auth_
     assert created.status_code == 201
     meeting_id = created.json()["id"]
 
-    member_resp = await app_client.get(f"/api/meetings/{meeting_id}/hook-logs", headers=auth_headers(owner))
+    member_resp = await app_client.get(f"/api/meetings/{meeting_id}/hook-logs", headers=auth_headers(member))
     assert member_resp.status_code == 403
+
+    owner_resp = await app_client.get(f"/api/meetings/{meeting_id}/hook-logs", headers=auth_headers(owner))
+    assert owner_resp.status_code == 200
 
     admin_resp = await app_client.get(f"/api/meetings/{meeting_id}/hook-logs", headers=auth_headers(admin))
     assert admin_resp.status_code == 200
@@ -586,6 +609,7 @@ async def test_async_pre_call_is_queued_not_awaited(app_client, db, make_user, a
 
     user = await make_user()
     call_type = CallType(
+        organization_id=user.active_organization_id,
         name="Sales",
         slug="sales-async-pre",
         pre_call_enabled=True,

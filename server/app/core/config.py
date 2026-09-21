@@ -22,14 +22,19 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24  # 24h
 
     # When False, self-serve registration (POST /api/auth/register) is
-    # disabled and new accounts can only be created by an admin (via
-    # POST /api/admin/users). Defaults to open so a fresh single-user
-    # instance works out of the box; flip off for admin-managed teams.
+    # disabled and new accounts can only be created by an org admin (via
+    # invite or POST member create). Defaults to open so a fresh
+    # single-user instance works out of the box; flip off for a
+    # self-hosted single-company install.
     allow_public_registration: bool = True
+    # Cap on organizations a user may *create* (own), not memberships
+    # they were invited into.
+    max_orgs_per_user: int = 1
+    invite_expire_days: int = 7
 
-    # Bootstrap admin account, created on startup if it doesn't already
-    # exist. Required to have any admin at all once public registration is
-    # turned off (accounts are no longer promoted to admin automatically).
+    # Bootstrap super-admin account, created on startup if it doesn't
+    # already exist. Required to have any instance operator at all once
+    # public registration is turned off.
     admin_email: str | None = None
     admin_password: str | None = None
     admin_full_name: str = "Admin"
@@ -58,7 +63,8 @@ class Settings(BaseSettings):
     # call_hooks.py). public_app_url identifies *this* Corella instance to
     # whatever external system a hook calls out to — sent as the
     # X-Corella-App-Url header on every pre/post call-type request,
-    # alongside X-Corella-Meeting-Id and X-Corella-User-Id, unconditionally
+    # alongside X-Corella-Meeting-Id, X-Corella-User-Id, and
+    # X-Corella-Org-Id, unconditionally
     # (see call_hooks.py:_mandatory_headers). Distinct from the frontend's
     # build-time PUBLIC_API_URL (which API the browser talks to) — this is
     # a backend runtime setting with the opposite direction: what URL

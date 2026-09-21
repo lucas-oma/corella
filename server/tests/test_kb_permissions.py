@@ -1,17 +1,18 @@
-"""Admin-only KB writes, and group-assigned visibility for members."""
+"""Org-admin KB writes, and group-assigned visibility for members."""
 
 import pytest
 
 from app.core.config import get_settings
 from app.models.group import Group
 from app.models.kb_document import KBDocument, KBDocumentStatus
-from app.models.user import UserRole
+from app.models.organization import Organization, OrgRole
 from app.services.access import searchable_kb_keywords
 
 
-def _ready_doc(owner_id, *, group_id=None, keywords=None) -> KBDocument:
+def _ready_doc(owner_id, organization_id, *, group_id=None, keywords=None) -> KBDocument:
     return KBDocument(
         owner_id=owner_id,
+        organization_id=organization_id,
         group_id=group_id,
         filename="notes.md",
         content_type="text/markdown",
@@ -23,7 +24,11 @@ def _ready_doc(owner_id, *, group_id=None, keywords=None) -> KBDocument:
 
 @pytest.mark.asyncio
 async def test_member_cannot_upload_or_delete(app_client, db, make_user, auth_headers):
-    member = await make_user(email="member@example.com")
+    owner = await make_user(email="owner@example.com")
+    organization = await db.get(Organization, owner.active_organization_id)
+    member = await make_user(
+        email="member@example.com", org=organization, org_role=OrgRole.MEMBER
+    )
     headers = auth_headers(member)
 
     upload = await app_client.post(
@@ -33,7 +38,7 @@ async def test_member_cannot_upload_or_delete(app_client, db, make_user, auth_he
     )
     assert upload.status_code == 403
 
-    doc = _ready_doc(member.id)
+    doc = _ready_doc(member.id, organization.id)
     db.add(doc)
     await db.commit()
 
@@ -42,18 +47,24 @@ async def test_member_cannot_upload_or_delete(app_client, db, make_user, auth_he
 
 
 @pytest.mark.asyncio
-async def test_admin_upload_for_group_is_listed_for_members(
+async def test_org_admin_upload_for_group_is_listed_for_members(
     app_client, db, make_user, auth_headers, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(get_settings(), "kb_storage_path", str(tmp_path))
     monkeypatch.setattr("app.api.kb.celery_app.send_task", lambda *a, **k: None)
 
-    group = Group(name="Acme")
+    admin = await make_user(email="admin@example.com")
+    organization = await db.get(Organization, admin.active_organization_id)
+    group = Group(name="Acme", organization_id=organization.id)
     db.add(group)
     await db.commit()
 
-    admin = await make_user(email="admin@example.com", role=UserRole.ADMIN)
-    member = await make_user(email="in-group@example.com", group_id=group.id)
+    member = await make_user(
+        email="in-group@example.com",
+        org=organization,
+        org_role=OrgRole.MEMBER,
+        group_ids=[group.id],
+    )
     outsider = await make_user(email="out@example.com")
 
     created = await app_client.post(
@@ -80,10 +91,13 @@ async def test_admin_upload_for_group_is_listed_for_members(
 
 
 @pytest.mark.asyncio
-async def test_admin_can_delete_any_document(app_client, db, make_user, auth_headers):
-    owner = await make_user(email="owner@example.com")
-    admin = await make_user(email="admin@example.com", role=UserRole.ADMIN)
-    doc = _ready_doc(owner.id)
+async def test_org_admin_can_delete_any_document_in_org(app_client, db, make_user, auth_headers):
+    admin = await make_user(email="admin@example.com")
+    organization = await db.get(Organization, admin.active_organization_id)
+    owner = await make_user(
+        email="owner@example.com", org=organization, org_role=OrgRole.MEMBER
+    )
+    doc = _ready_doc(owner.id, organization.id)
     db.add(doc)
     await db.commit()
 
@@ -99,15 +113,21 @@ async def test_admin_can_delete_any_document(app_client, db, make_user, auth_hea
 
 @pytest.mark.asyncio
 async def test_group_assigned_keywords_visible_to_members(db, make_user):
-    group = Group(name="Acme")
+    admin = await make_user(email="admin@example.com")
+    organization = await db.get(Organization, admin.active_organization_id)
+    group = Group(name="Acme", organization_id=organization.id)
     db.add(group)
     await db.commit()
 
-    admin = await make_user(email="admin@example.com", role=UserRole.ADMIN)
-    member = await make_user(email="in-group@example.com", group_id=group.id)
-    db.add(_ready_doc(admin.id, group_id=group.id, keywords=["Playbook"]))
+    member = await make_user(
+        email="in-group@example.com",
+        org=organization,
+        org_role=OrgRole.MEMBER,
+        group_ids=[group.id],
+    )
+    db.add(_ready_doc(admin.id, organization.id, group_id=group.id, keywords=["Playbook"]))
     await db.commit()
 
-    assert await searchable_kb_keywords(db, member.id) == ["Playbook"]
-    # Admin isn't in the group — their own meetings shouldn't inherit it.
-    assert await searchable_kb_keywords(db, admin.id) == []
+    assert await searchable_kb_keywords(db, member.id, organization.id) == ["Playbook"]
+    # Org owner/admin sees every doc in the org.
+    assert await searchable_kb_keywords(db, admin.id, organization.id) == ["Playbook"]

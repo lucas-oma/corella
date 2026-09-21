@@ -52,6 +52,7 @@ def upsert_chunks(
     chunks: list[str],
     embeddings: list[list[float]],
     group_id: UUID | None = None,
+    organization_id: UUID | None = None,
 ) -> None:
     ensure_kb_collection()
     points = [
@@ -61,6 +62,7 @@ def upsert_chunks(
             payload={
                 "owner_id": str(owner_id),
                 "group_id": str(group_id) if group_id else None,
+                "organization_id": str(organization_id) if organization_id else None,
                 "document_id": str(document_id),
                 "chunk_index": i,
                 "text": chunk,
@@ -76,19 +78,32 @@ def search_kb(
     query_embedding: list[float],
     top_k: int = 5,
     group_id: UUID | None = None,
+    group_ids: list[UUID] | None = None,
+    organization_id: UUID | None = None,
 ) -> list[str]:
-    """Top-k most relevant KB chunk texts. Matches *either* a payload
-    `group_id` (admin-assigned shared KB) *or* a legacy `owner_id` in
-    `owner_ids` (pre-group-column chunks). Empty if the collection
-    doesn't exist yet — a normal state, not an error.
+    """Top-k most relevant KB chunk texts. Always org-scoped when
+    organization_id is provided. Matches a payload `group_id` in the
+    caller's groups *or* a legacy `owner_id` in `owner_ids`.
     """
+    if organization_id is None:
+        return []
     client = _client()
     if not client.collection_exists(KB_COLLECTION):
         return []
+    must: list[qmodels.FieldCondition] = [
+        qmodels.FieldCondition(
+            key="organization_id", match=qmodels.MatchValue(value=str(organization_id))
+        )
+    ]
     should: list[qmodels.FieldCondition] = []
+    ids = list(group_ids or [])
     if group_id is not None:
+        ids.append(group_id)
+    if ids:
         should.append(
-            qmodels.FieldCondition(key="group_id", match=qmodels.MatchValue(value=str(group_id)))
+            qmodels.FieldCondition(
+                key="group_id", match=qmodels.MatchAny(any=[str(gid) for gid in ids])
+            )
         )
     if owner_ids:
         should.append(
@@ -101,7 +116,7 @@ def search_kb(
     result = client.query_points(
         collection_name=KB_COLLECTION,
         query=query_embedding,
-        query_filter=qmodels.Filter(should=should),
+        query_filter=qmodels.Filter(must=must or None, should=should or None),
         limit=top_k,
     )
     return [point.payload["text"] for point in result.points if point.payload]
@@ -158,6 +173,7 @@ def upsert_meeting_chunks(
     owner_id: UUID,
     chunks: list[tuple[str, int, int]],
     embeddings: list[list[float]],
+    organization_id: UUID | None = None,
 ) -> None:
     """`chunks` is (text, start_ms, end_ms) — start_ms is what lets a search
     result deep-link straight to the moment it was said, not just the
@@ -169,6 +185,7 @@ def upsert_meeting_chunks(
             vector=embedding,
             payload={
                 "owner_id": str(owner_id),
+                "organization_id": str(organization_id) if organization_id else None,
                 "meeting_id": str(meeting_id),
                 "chunk_index": i,
                 "text": text,
@@ -190,29 +207,33 @@ _MIN_RELEVANCE_SCORE = 0.2
 
 
 def search_meetings(
-    owner_id: UUID | None, query_embedding: list[float], top_k: int = 10
+    owner_id: UUID | None,
+    query_embedding: list[float],
+    top_k: int = 10,
+    organization_id: UUID | None = None,
+    unscoped: bool = False,
 ) -> list[dict]:
-    """Top-k most relevant transcript chunks, across all matching meetings —
-    one row per matching *chunk*, not deduplicated by meeting; the caller
-    (the search API route) collapses to one (best) hit per meeting. Empty
-    if the collection doesn't exist yet (no meeting has finished indexing)
-    — normal, not an error.
-
-    owner_id=None searches system-wide, with no owner filter at all — used
-    only by the admin-only "All meetings" search
-    (GET /api/meetings/search/all); every other caller passes the
-    searching user's own id, unchanged from before this existed.
+    """Top-k most relevant transcript chunks. `unscoped=True` is super-admin
+    instance-wide search only. Every other caller must pass organization_id
+    so a missing org payload never matches every tenant.
     """
     client = _client()
     if not client.collection_exists(MEETING_COLLECTION):
         return []
-    query_filter = None
-    if owner_id is not None:
-        query_filter = qmodels.Filter(
-            must=[
-                qmodels.FieldCondition(key="owner_id", match=qmodels.MatchValue(value=str(owner_id)))
-            ]
+    must: list[qmodels.FieldCondition] = []
+    if not unscoped:
+        if organization_id is None:
+            return []
+        must.append(
+            qmodels.FieldCondition(
+                key="organization_id", match=qmodels.MatchValue(value=str(organization_id))
+            )
         )
+    if owner_id is not None:
+        must.append(
+            qmodels.FieldCondition(key="owner_id", match=qmodels.MatchValue(value=str(owner_id)))
+        )
+    query_filter = qmodels.Filter(must=must) if must else None
     result = client.query_points(
         collection_name=MEETING_COLLECTION,
         query=query_embedding,
@@ -281,6 +302,7 @@ def upsert_speaker_embedding(
     group_id: UUID | None,
     linked_user_id: UUID | None,
     embedding: list[float],
+    organization_id: UUID | None = None,
 ) -> None:
     """One point per VoiceIdentity — the identity's own id doubles as the
     point id (see app/models/voice_identity.py), so a re-enrollment just
@@ -294,6 +316,7 @@ def upsert_speaker_embedding(
                 id=str(voice_identity_id),
                 vector=embedding,
                 payload={
+                    "organization_id": str(organization_id) if organization_id else None,
                     "group_id": str(group_id) if group_id else None,
                     "linked_user_id": str(linked_user_id) if linked_user_id else None,
                 },
@@ -307,39 +330,35 @@ def search_speaker_embeddings(
     score_threshold: float,
     group_id: UUID | None = None,
     linked_user_id: UUID | None = None,
+    organization_id: UUID | None = None,
     top_k: int = 1,
 ) -> list[dict]:
     """Best match against the durable cross-meeting voice library, scoped
-    to whichever of group_id/linked_user_id is provided, combined with OR
-    (`should`) rather than two separate calls — the meeting owner's own
-    enrolled identity and their group's shared pool are searched in one
-    pass, and cosine similarity to the *true* speaker naturally dominates
-    over any other candidate, so top-1 already behaves like the intended
-    "check my own identity first, then the group" priority without a
-    second round-trip (see app/workers/tasks.py:reconcile_diarization).
-    Empty if the collection doesn't exist yet (nobody's ever enrolled or
-    been recognized) — normal, not an error.
+    to the organization (and optionally the owner's own enrolled identity).
     """
+    if organization_id is None:
+        return []
     client = _client()
     if not client.collection_exists(SPEAKER_COLLECTION):
         return []
-    conditions = []
-    if group_id is not None:
-        conditions.append(
-            qmodels.FieldCondition(key="group_id", match=qmodels.MatchValue(value=str(group_id)))
+    must: list[qmodels.FieldCondition] = [
+        qmodels.FieldCondition(
+            key="organization_id", match=qmodels.MatchValue(value=str(organization_id))
         )
+    ]
+    should: list[qmodels.FieldCondition] = []
     if linked_user_id is not None:
-        conditions.append(
+        should.append(
             qmodels.FieldCondition(
                 key="linked_user_id", match=qmodels.MatchValue(value=str(linked_user_id))
             )
         )
-    if not conditions:
+    if not must and not should:
         return []
     result = client.query_points(
         collection_name=SPEAKER_COLLECTION,
         query=embedding,
-        query_filter=qmodels.Filter(should=conditions),
+        query_filter=qmodels.Filter(must=must or None, should=should or None),
         limit=top_k,
         score_threshold=score_threshold,
     )
@@ -356,3 +375,35 @@ def delete_speaker_embedding(voice_identity_id: UUID) -> None:
         collection_name=SPEAKER_COLLECTION,
         points_selector=qmodels.PointIdsList(points=[str(voice_identity_id)]),
     )
+
+
+def backfill_missing_organization_id(organization_id: UUID) -> None:
+    """Stamp organization_id onto points that predate the org model.
+
+    Searches already require a matching organization_id, so missing
+    payloads never leak across tenants; this just recovers recall for
+    existing installs. No-op when Qdrant is empty or unreachable.
+    """
+    oid = str(organization_id)
+    client = _client()
+    for collection in (KB_COLLECTION, MEETING_COLLECTION, SPEAKER_COLLECTION):
+        if not client.collection_exists(collection):
+            continue
+        offset = None
+        while True:
+            records, offset = client.scroll(
+                collection_name=collection,
+                limit=128,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            ids = [row.id for row in records if not (row.payload or {}).get("organization_id")]
+            if ids:
+                client.set_payload(
+                    collection_name=collection,
+                    payload={"organization_id": oid},
+                    points=ids,
+                )
+            if offset is None:
+                break

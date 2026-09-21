@@ -6,15 +6,15 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import AuthContext, get_auth_context, require_org_admin
 from app.core import storage
 from app.core.db import get_db
 from app.models.group import Group
 from app.models.kb_document import KBDocument, KBDocumentStatus
-from app.models.user import User
 from app.schemas.kb import KBDocumentRead
 from app.services.access import kb_visible_clause
 from app.services.embeddings.qdrant_store import delete_document_chunks
+from app.services.organizations import group_ids_for_user
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -37,16 +37,20 @@ def _looks_like_kb_document(filename: str | None, content_type: str | None) -> b
 
 @router.get("/documents", response_model=list[KBDocumentRead])
 async def list_kb_documents(
-    current_user: User = Depends(get_current_user),
+    ctx: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> list[KBDocument]:
-    """Members see their group's assigned documents (plus any unassigned
-    docs they uploaded). Admins see every document so they can maintain
-    every group's knowledge base.
-    """
+    group_ids = await group_ids_for_user(db, ctx.user.id, ctx.org_id)
     result = await db.scalars(
         select(KBDocument)
-        .where(kb_visible_clause(current_user, admin_sees_all=True))
+        .where(
+            kb_visible_clause(
+                ctx.user,
+                ctx.org_id,
+                group_ids=group_ids,
+                org_admin=ctx.is_org_admin,
+            )
+        )
         .order_by(KBDocument.created_at.desc())
     )
     return list(result)
@@ -56,12 +60,9 @@ async def list_kb_documents(
 async def upload_kb_document(
     file: UploadFile,
     group_id: UUID | None = Form(default=None),
-    current_user: User = Depends(require_admin),
+    ctx: AuthContext = Depends(require_org_admin),
     db: AsyncSession = Depends(get_db),
 ) -> KBDocument:
-    """Admin-only. `group_id` assigns the document to that group's shared
-    pool (copilot + member list). Omit it for an unassigned document.
-    """
     if not _looks_like_kb_document(file.filename, file.content_type):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -72,11 +73,12 @@ async def upload_kb_document(
     group: Group | None = None
     if group_id is not None:
         group = await db.get(Group, group_id)
-        if group is None:
+        if group is None or group.organization_id != ctx.org_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
 
     document = KBDocument(
-        owner_id=current_user.id,
+        owner_id=ctx.user.id,
+        organization_id=ctx.org_id,
         group_id=group_id,
         filename=file.filename or "untitled",
         content_type=file.content_type or "application/octet-stream",
@@ -84,7 +86,7 @@ async def upload_kb_document(
         status=KBDocumentStatus.PENDING,
     )
     db.add(document)
-    await db.flush()  # assign document.id before it's used as the storage dir name
+    await db.flush()
 
     document.storage_path = await storage.save_kb_upload(document.id, file)
 
@@ -96,11 +98,8 @@ async def upload_kb_document(
         document.error = "Could not start processing — the background worker is unreachable."
 
     await db.commit()
-    # Same reasoning as meetings.py:create_meeting — refresh() doesn't
-    # populate the lazy="joined" owner relationship for a freshly-
-    # constructed object, and KBDocumentRead needs owner_name.
     await db.refresh(document)
-    document.owner = current_user
+    document.owner = ctx.user
     document.group = group
     return document
 
@@ -108,11 +107,11 @@ async def upload_kb_document(
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_kb_document(
     document_id: UUID,
-    current_user: User = Depends(require_admin),
+    ctx: AuthContext = Depends(require_org_admin),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     document = await db.get(KBDocument, document_id)
-    if document is None:
+    if document is None or document.organization_id != ctx.org_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     await db.delete(document)

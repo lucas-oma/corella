@@ -1,11 +1,15 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import logoDark from "@/assets/logo-dark.svg";
 import logoLight from "@/assets/logo-light.svg";
 import Footer from "@/components/Footer";
+import UserAvatar from "@/components/UserAvatar";
+import { ApiError, api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
+import { activeMembership, isOrgAdmin } from "@/lib/org";
+import { useAuthConfig } from "@/lib/useAuthConfig";
 
 const NAV = [
   { to: "/dashboard", label: "Meetings" },
@@ -14,20 +18,9 @@ const NAV = [
 ];
 
 export default function AppShell({ children }: { children: ReactNode }) {
-  const { user, logout } = useAuth();
-  const confirm = useConfirm();
+  const { user, switchOrganization } = useAuth();
   const location = useLocation();
-  const nav = user?.role === "admin" ? [...NAV, { to: "/admin", label: "Admin" }] : NAV;
-
-  async function onSignOut() {
-    const ok = await confirm({
-      title: "Sign out?",
-      description: "You'll need to sign in again to get back to your meetings.",
-      confirmLabel: "Sign out",
-    });
-    if (!ok) return;
-    logout();
-  }
+  const membership = activeMembership(user);
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -42,7 +35,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
               </span>
             </div>
             <nav className="flex items-center gap-1">
-              {nav.map((item) => {
+              {NAV.map((item) => {
                 const active = location.pathname.startsWith(item.to);
                 return (
                   <Link
@@ -60,16 +53,255 @@ export default function AppShell({ children }: { children: ReactNode }) {
               })}
             </nav>
           </div>
-          <div className="flex items-center gap-4">
-            <span className="text-sm text-ink-muted">{user?.full_name}</span>
-            <button onClick={onSignOut} className="text-sm text-ink-muted hover:text-ink dark:hover:text-ink-inverted">
-              Sign out
-            </button>
-          </div>
+          {user && (
+            <div className="flex items-center gap-3">
+              {user.organizations.length > 1 ? (
+                <select
+                  className="max-w-[14rem] truncate bg-transparent py-1 text-sm text-ink-muted outline-none"
+                  value={user.active_organization_id ?? ""}
+                  onChange={(e) => {
+                    void switchOrganization(e.target.value);
+                  }}
+                  aria-label="Switch organization"
+                >
+                  {user.organizations.map((org) => (
+                    <option key={org.id} value={org.id}>
+                      {org.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                membership && (
+                  <span className="max-w-[14rem] truncate text-sm text-ink-muted">
+                    {membership.name}
+                  </span>
+                )
+              )}
+              <span className="h-4 w-px bg-border dark:bg-border-dark" aria-hidden />
+              <AccountMenu />
+            </div>
+          )}
         </div>
       </header>
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">{children}</main>
       <Footer />
     </div>
+  );
+}
+
+function AccountMenu() {
+  const { user, logout, refreshUser } = useAuth();
+  const confirm = useConfirm();
+  const location = useLocation();
+  const authConfig = useAuthConfig();
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [creatingOrg, setCreatingOrg] = useState(false);
+  const [newOrgName, setNewOrgName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  const ownedCount = user?.organizations.filter((org) => org.role === "owner").length ?? 0;
+  const canCreateOrg =
+    Boolean(authConfig?.allow_public_registration) &&
+    ownedCount < (authConfig?.max_orgs_per_user ?? 1);
+
+  useEffect(() => {
+    setOpen(false);
+    setCreatingOrg(false);
+    setCreateError(null);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function onPointerDown(event: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  if (!user) return null;
+
+  async function onSignOut() {
+    setOpen(false);
+    const ok = await confirm({
+      title: "Sign out?",
+      description: "You'll need to sign in again to get back to your meetings.",
+      confirmLabel: "Sign out",
+    });
+    if (!ok) return;
+    logout();
+  }
+
+  async function onCreateOrg(e: FormEvent) {
+    e.preventDefault();
+    const name = newOrgName.trim();
+    if (!name) return;
+    setCreateError(null);
+    try {
+      await api.createOrganization(name);
+      await refreshUser();
+      setCreatingOrg(false);
+      setNewOrgName("");
+      setOpen(false);
+    } catch (err) {
+      setCreateError(err instanceof ApiError ? err.message : "Couldn't create organization");
+    }
+  }
+
+  const menuItem = (active: boolean) =>
+    `block rounded px-3 py-1.5 text-sm transition-colors ${
+      active
+        ? "bg-accent text-accent-foreground"
+        : "text-ink dark:text-ink-inverted hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+    }`;
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Account menu"
+        onClick={() => setOpen((prev) => !prev)}
+        className={`flex cursor-pointer items-center gap-1 rounded p-0.5 pr-1.5 transition-colors ${
+          open
+            ? "bg-black/[0.04] dark:bg-white/[0.06]"
+            : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        }`}
+      >
+        <UserAvatar
+          email={user.email}
+          size={32}
+          className="h-8 w-8 rounded border border-border dark:border-border-dark"
+        />
+        <ChevronIcon open={open} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Account"
+          className="card absolute right-0 z-30 mt-2 w-64 p-1"
+        >
+          <div className="flex items-center gap-3 px-3 py-2.5">
+            <UserAvatar
+              email={user.email}
+              size={36}
+              className="h-9 w-9 shrink-0 rounded border border-border dark:border-border-dark"
+            />
+            <div className="min-w-0">
+              <p className="truncate text-sm text-ink dark:text-ink-inverted">{user.full_name}</p>
+              <p className="truncate text-xs text-ink-subtle">{user.email}</p>
+            </div>
+          </div>
+          {(isOrgAdmin(user) || user.is_super_admin || canCreateOrg || creatingOrg) && (
+            <>
+              <div className="my-1 border-t border-border dark:border-border-dark" />
+              {isOrgAdmin(user) && (
+            <Link
+              role="menuitem"
+              to="/organization"
+              onClick={() => setOpen(false)}
+              className={menuItem(location.pathname.startsWith("/organization"))}
+            >
+              Organization
+            </Link>
+          )}
+          {user.is_super_admin && (
+            <Link
+              role="menuitem"
+              to="/admin"
+              onClick={() => setOpen(false)}
+              className={menuItem(location.pathname.startsWith("/admin"))}
+            >
+              Super admin
+            </Link>
+          )}
+          {canCreateOrg && !creatingOrg && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setCreateError(null);
+                setCreatingOrg(true);
+              }}
+              className={`${menuItem(false)} w-full text-left`}
+            >
+              New organization
+            </button>
+          )}
+          {creatingOrg && (
+            <form onSubmit={onCreateOrg} className="space-y-2 px-3 py-2">
+              <input
+                autoFocus
+                className="field py-1.5 text-sm"
+                placeholder="Organization name"
+                value={newOrgName}
+                onChange={(e) => setNewOrgName(e.target.value)}
+              />
+              {createError && <p className="text-xs text-status-danger">{createError}</p>}
+              <div className="flex items-center gap-3">
+                <button type="submit" className="text-xs text-accent hover:underline">
+                  Create
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreatingOrg(false);
+                    setNewOrgName("");
+                    setCreateError(null);
+                  }}
+                  className="text-xs text-ink-muted hover:underline"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+              )}
+            </>
+          )}
+          <div className="my-1 border-t border-border dark:border-border-dark" />
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => void onSignOut()}
+            className="block w-full rounded px-3 py-1.5 text-left text-sm text-ink-muted hover:bg-black/[0.03] hover:text-status-danger dark:hover:bg-white/[0.04]"
+          >
+            Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden
+      className={`text-ink-subtle transition-transform ${open ? "rotate-180" : ""}`}
+    >
+      <path
+        d="M3 4.5L6 7.5L9 4.5"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }

@@ -31,8 +31,11 @@ class KBDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
-    # Null = not assigned to a group (only the uploader / admins see it).
-    # Set when an admin uploads "for this group" so members search it even
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    # Null = not assigned to a group (only the uploader / org admins see it).
+    # Set when an org admin uploads "for this group" so members search it even
     # if the admin is not in the group.
     group_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("groups.id", ondelete="SET NULL"), index=True

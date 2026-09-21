@@ -1,0 +1,562 @@
+{
+  "$schema": "https://cdn.hopjs.net/npm/@dicebear/schema@1.4.0/dist/definition.min.json",
+  "$comment": "Corella bird avatars. Editorial silhouettes, facing right in source paths; the facing component mirrors the whole bird.",
+  "meta": {
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    },
+    "creator": {
+      "name": "Corella"
+    },
+    "source": {
+      "name": "Corella Bird"
+    }
+  },
+  "canvas": {
+    "width": 128,
+    "height": 128,
+    "elements": [
+      {
+        "type": "element",
+        "name": "rect",
+        "attributes": {
+          "width": "128",
+          "height": "128",
+          "fill": { "type": "color", "name": "background" }
+        }
+      },
+      {
+        "type": "element",
+        "name": "ellipse",
+        "attributes": {
+          "cx": "64",
+          "cy": "116",
+          "rx": "28",
+          "ry": "4.5",
+          "fill": "#12141A",
+          "fill-opacity": "0.08"
+        }
+      },
+      {
+        "type": "component",
+        "name": "facing"
+      }
+    ]
+  },
+  "attributes": {
+    "fill": "none",
+    "shape-rendering": "geometricPrecision"
+  },
+  "colors": {
+    "background": {
+      "values": ["#FAFAF9", "#E4E4E1", "#DDD8CD", "#E8E4DC", "#DCE3E8", "#E6DDD4", "#D4D8D2"]
+    },
+    "body": {
+      "values": [
+        "#12141A",
+        "#0B1B33",
+        "#152847",
+        "#5B5F6B",
+        "#8B8F99",
+        "#A8A396",
+        "#8C9B8F",
+        "#9A8F80",
+        "#8896A3",
+        "#C9C4BA",
+        "#FAFAF9"
+      ],
+      "notEqualTo": ["background"]
+    },
+    "beak": {
+      "values": ["#C4A574", "#E8C9A0", "#B88A6A", "#D4B896", "#9A6B4F", "#EDE4D4"],
+      "notEqualTo": ["body", "background"]
+    },
+    "eye": {
+      "values": ["#12141A", "#0B1B33", "#FAFAF9"],
+      "contrastTo": "body"
+    }
+  },
+  "components": {
+    "facing": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "right": {
+          "elements": [
+            { "type": "component", "name": "tail" },
+            { "type": "component", "name": "body" },
+            { "type": "component", "name": "wing" },
+            { "type": "component", "name": "crest" },
+            { "type": "component", "name": "beak" },
+            { "type": "component", "name": "eye" }
+          ]
+        },
+        "left": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "g",
+              "attributes": { "transform": "translate(128 0) scale(-1 1)" },
+              "children": [
+                { "type": "component", "name": "tail" },
+                { "type": "component", "name": "body" },
+                { "type": "component", "name": "wing" },
+                { "type": "component", "name": "crest" },
+                { "type": "component", "name": "beak" },
+                { "type": "component", "name": "eye" }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "body": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "round": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M78 64C70 58 68 36 86 30C100 26 112 38 108 52C106 60 98 66 88 66C96 74 102 96 90 110C76 122 48 120 36 104C26 90 32 72 52 66C62 64 70 64 78 64Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "sleek": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M78 64C70 58 68 36 86 30C100 26 112 38 108 52C106 60 98 66 88 66C104 70 112 86 104 100C94 114 64 118 40 108C22 98 20 80 36 70C50 62 66 64 78 64Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "pear": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M78 64C70 58 68 36 86 30C100 26 112 38 108 52C106 60 98 66 88 66C100 80 108 104 92 116C72 128 40 124 28 106C18 90 28 72 50 66C62 64 70 64 78 64Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "stocky": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M78 64C70 58 68 36 86 30C100 26 112 38 108 52C106 60 98 66 88 66C98 72 104 92 92 106C78 118 50 116 38 100C28 86 36 70 56 66C66 64 72 64 78 64Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "upright": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M78 64C70 58 68 36 86 30C100 26 112 38 108 52C106 60 98 66 88 66C92 80 94 100 82 114C68 126 48 122 42 104C38 88 48 70 64 66C70 64 74 64 78 64Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "tail": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "short": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M36 88L16 92L18 102L38 98Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "fan": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M38 84L12 76L6 90L10 104L18 112L40 100Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "point": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M38 90C20 88 8 96 10 108C22 104 34 100 42 96Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "fork": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M38 86L10 74L22 92L8 112L40 100Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "wing": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "folded": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M50 70C44 78 46 98 60 108C74 104 78 88 70 74C66 68 56 66 50 70Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M54 80C52 88 56 100 64 104",
+                "stroke": "#12141A",
+                "stroke-width": "1.6",
+                "stroke-linecap": "round",
+                "opacity": "0.22"
+              }
+            }
+          ]
+        },
+        "spread": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M48 68C28 70 16 88 22 104C32 114 52 108 66 94C74 82 66 68 48 68Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M32 86C38 92 48 96 58 94M28 96C36 102 48 104 60 100",
+                "stroke": "#12141A",
+                "stroke-width": "1.4",
+                "stroke-linecap": "round",
+                "opacity": "0.2"
+              }
+            }
+          ]
+        },
+        "raised": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M52 62C40 44 22 40 16 54C14 68 30 80 52 82C62 78 64 68 52 62Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M28 52C34 56 44 64 50 72",
+                "stroke": "#12141A",
+                "stroke-width": "1.4",
+                "stroke-linecap": "round",
+                "opacity": "0.2"
+              }
+            }
+          ]
+        },
+        "tucked": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M54 76C52 86 56 100 66 104C74 96 72 82 64 76C60 74 56 74 54 76Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "droop": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M50 74C44 92 48 114 64 118C76 108 74 90 66 76C60 70 54 70 50 74Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            },
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M54 90C58 98 62 108 68 112",
+                "stroke": "#12141A",
+                "stroke-width": "1.5",
+                "stroke-linecap": "round",
+                "opacity": "0.2"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "crest": {
+      "width": 128,
+      "height": 128,
+      "probability": 72,
+      "variants": {
+        "spike": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M80 34L76 12L86 32L88 10L94 32L98 14L102 36L88 36Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "fan": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M86 32C90 18 102 12 110 22C104 24 98 30 96 36C92 34 88 34 86 32Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "curl": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M84 34C78 20 88 8 100 14C92 16 88 24 90 34Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "tuft": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M80 36C78 28 84 24 88 32C90 24 96 24 98 34C102 28 108 32 104 38L80 38Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        },
+        "sweep": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M78 36C60 28 52 12 64 8C70 18 78 24 88 32Z",
+                "fill": { "type": "color", "name": "body" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "beak": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "short": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M100 50L114 56L100 62Z",
+                "fill": { "type": "color", "name": "beak" }
+              }
+            }
+          ]
+        },
+        "hooked": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M98 48C112 46 120 54 116 66C112 60 106 56 98 58Z",
+                "fill": { "type": "color", "name": "beak" }
+              }
+            }
+          ]
+        },
+        "slender": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M100 52L120 58L100 60Z",
+                "fill": { "type": "color", "name": "beak" }
+              }
+            }
+          ]
+        },
+        "blunt": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M98 48C110 48 116 52 116 58C116 64 108 64 98 60Z",
+                "fill": { "type": "color", "name": "beak" }
+              }
+            }
+          ]
+        },
+        "down": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M98 50C112 50 122 60 116 70C108 62 102 58 98 56Z",
+                "fill": { "type": "color", "name": "beak" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "eye": {
+      "width": 128,
+      "height": 128,
+      "variants": {
+        "round": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "circle",
+              "attributes": {
+                "cx": "84",
+                "cy": "50",
+                "r": "5.5",
+                "fill": { "type": "color", "name": "eye" }
+              }
+            }
+          ]
+        },
+        "dot": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "circle",
+              "attributes": {
+                "cx": "84",
+                "cy": "50",
+                "r": "3.2",
+                "fill": { "type": "color", "name": "eye" }
+              }
+            }
+          ]
+        },
+        "almond": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M76 50C80 44 88 44 92 50C88 56 80 56 76 50Z",
+                "fill": { "type": "color", "name": "eye" }
+              }
+            }
+          ]
+        },
+        "ring": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "circle",
+              "attributes": {
+                "cx": "84",
+                "cy": "50",
+                "r": "6",
+                "fill": "none",
+                "stroke": { "type": "color", "name": "eye" },
+                "stroke-width": "1.8"
+              }
+            },
+            {
+              "type": "element",
+              "name": "circle",
+              "attributes": {
+                "cx": "84",
+                "cy": "50",
+                "r": "2.6",
+                "fill": { "type": "color", "name": "eye" }
+              }
+            }
+          ]
+        },
+        "lidded": {
+          "elements": [
+            {
+              "type": "element",
+              "name": "path",
+              "attributes": {
+                "d": "M76 52C80 46 88 46 92 52C88 54 80 54 76 52Z",
+                "fill": { "type": "color", "name": "eye" }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

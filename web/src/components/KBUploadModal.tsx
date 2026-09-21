@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api, type Group } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 export default function KBUploadModal({
   open,
@@ -11,6 +12,7 @@ export default function KBUploadModal({
   onCancel: () => void;
   onConfirm: (groupId: string | null) => void;
 }) {
+  const { user } = useAuth();
   const [groups, setGroups] = useState<Group[] | null>(null);
   const [forGroup, setForGroup] = useState(false);
   const [groupId, setGroupId] = useState<string>("");
@@ -18,14 +20,19 @@ export default function KBUploadModal({
 
   useEffect(() => {
     if (!open || groups !== null) return;
+    const orgId = user?.active_organization_id;
+    if (!orgId) {
+      setError("Couldn't load groups");
+      return;
+    }
     api
-      .adminListGroups()
+      .listOrgGroups(orgId)
       .then((rows) => {
         setGroups(rows);
         setGroupId(rows[0]?.id ?? "");
       })
       .catch(() => setError("Couldn't load groups"));
-  }, [open, groups]);
+  }, [open, groups, user?.active_organization_id]);
 
   useEffect(() => {
     if (!open) {

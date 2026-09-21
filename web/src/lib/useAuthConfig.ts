@@ -13,7 +13,7 @@ export function useAuthConfig(): AuthConfig | null {
     api
       .authConfig()
       .then(setConfig)
-      .catch(() => setConfig({ allow_public_registration: true }));
+      .catch(() => setConfig({ allow_public_registration: true, max_orgs_per_user: 1 }));
   }, []);
 
   return config;

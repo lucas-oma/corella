@@ -2,12 +2,15 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { ConfirmProvider } from "@/lib/confirm";
+import { isOrgAdmin } from "@/lib/org";
 import Admin from "@/routes/Admin";
 import Dashboard from "@/routes/Dashboard";
+import Invite from "@/routes/Invite";
 import KnowledgeBase from "@/routes/KnowledgeBase";
 import LiveSession from "@/routes/LiveSession";
 import Login from "@/routes/Login";
 import MeetingDetail from "@/routes/MeetingDetail";
+import Organization from "@/routes/Organization";
 import Register from "@/routes/Register";
 import Settings from "@/routes/Settings";
 
@@ -19,9 +22,15 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function RequireAdmin({ children }: { children: React.ReactNode }) {
+function RequireOrgAdmin({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
-  if (user?.role !== "admin") return <Navigate to="/dashboard" replace />;
+  if (!isOrgAdmin(user)) return <Navigate to="/dashboard" replace />;
+  return <>{children}</>;
+}
+
+function RequireSuperAdmin({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  if (!user?.is_super_admin) return <Navigate to="/dashboard" replace />;
   return <>{children}</>;
 }
 
@@ -32,6 +41,7 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
+          <Route path="/invite/:token" element={<Invite />} />
           <Route
             path="/dashboard"
             element={
@@ -73,12 +83,22 @@ export default function App() {
             }
           />
           <Route
+            path="/organization"
+            element={
+              <RequireAuth>
+                <RequireOrgAdmin>
+                  <Organization />
+                </RequireOrgAdmin>
+              </RequireAuth>
+            }
+          />
+          <Route
             path="/admin"
             element={
               <RequireAuth>
-                <RequireAdmin>
+                <RequireSuperAdmin>
                   <Admin />
-                </RequireAdmin>
+                </RequireSuperAdmin>
               </RequireAuth>
             }
           />

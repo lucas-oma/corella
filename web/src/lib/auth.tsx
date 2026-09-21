@@ -9,9 +9,10 @@ interface AuthContextValue {
   register: (email: string, password: string, fullName: string) => Promise<void>;
   logout: () => void;
   /** Re-fetches /api/auth/me and updates the shared user object — used
-   * after a profile change (name, voice enrollment) so the rest of the
-   * app (nav bar, etc.) doesn't stay stale until a full reload. */
+   * after a profile change (name, voice enrollment) or org switch so the
+   * rest of the app (nav bar, etc.) doesn't stay stale until a full reload. */
   refreshUser: () => Promise<void>;
+  switchOrganization: (organizationId: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -53,8 +54,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(await api.me());
   }
 
+  async function switchOrganization(organizationId: string) {
+    await api.switchOrganization(organizationId);
+    await refreshUser();
+  }
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, refreshUser }}>
+    <AuthContext.Provider
+      value={{ user, loading, login, register, logout, refreshUser, switchOrganization }}
+    >
       {children}
     </AuthContext.Provider>
   );

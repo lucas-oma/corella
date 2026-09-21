@@ -74,7 +74,7 @@ async def run_cycle(
     transcript_text = _format_transcript(context_segments)
     ratio = talk_ratio(all_segments)  # whole call, not just the recent window — an honest metric
 
-    kb_context = await _retrieve_kb_context(db, owner_id, transcript_text)
+    kb_context = await _retrieve_kb_context(db, owner_id, meeting_id, transcript_text)
     # The pre-call hook's fetched response, if this meeting's call type had
     # pre_call_use_as_context on (app/services/admin/call_hooks.py:
     # dispatch_pre_call, fired once at meeting creation) — a single scalar
@@ -186,27 +186,50 @@ def _format_transcript(segments: list[TranscriptSegment]) -> str:
     return "\n".join(f"{labels.get(s.channel, 'Unknown')}: {s.text}" for s in segments)
 
 
-async def _retrieve_kb_context(db: AsyncSession, owner_id: UUID, query_text: str) -> list[str]:
-    # Group-aware: a grouped user's copilot draws on documents assigned to
-    # their group (including ones an admin uploaded for them) plus any
-    # unassigned docs they own — same clause as GET /api/kb/documents.
+async def _retrieve_kb_context(
+    db: AsyncSession, owner_id: UUID, meeting_id: UUID, query_text: str
+) -> list[str]:
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        return []
+    organization_id = meeting.organization_id
     user = await db.get(User, owner_id)
     if user is None:
         return []
+    from app.models.organization import OrganizationMembership, OrgRole
+    from app.services.organizations import group_ids_for_user
+
+    group_ids = await group_ids_for_user(db, owner_id, organization_id)
+    membership = await db.scalar(
+        select(OrganizationMembership).where(
+            OrganizationMembership.user_id == owner_id,
+            OrganizationMembership.organization_id == organization_id,
+        )
+    )
+    org_admin = membership is not None and membership.role in (OrgRole.OWNER, OrgRole.ADMIN)
     has_kb = await db.scalar(
         select(KBDocument.id)
-        .where(kb_visible_clause(user), KBDocument.status == KBDocumentStatus.READY)
+        .where(
+            kb_visible_clause(
+                user, organization_id, group_ids=group_ids, org_admin=org_admin
+            ),
+            KBDocument.status == KBDocumentStatus.READY,
+        )
         .limit(1)
     )
     if has_kb is None:
         return []
 
-    owner_ids = await searchable_owner_ids(db, owner_id)
+    owner_ids = await searchable_owner_ids(db, owner_id, organization_id)
     settings = get_settings()
     try:
         embedding = await embed_query(query_text)
         return search_kb(
-            owner_ids, embedding, top_k=settings.copilot_kb_top_k, group_id=user.group_id
+            owner_ids,
+            embedding,
+            top_k=settings.copilot_kb_top_k,
+            group_ids=group_ids,
+            organization_id=organization_id,
         )
     except Exception:
         logger.exception("KB retrieval failed for owner %s", owner_id)

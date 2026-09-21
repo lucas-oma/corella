@@ -6,6 +6,7 @@ import CallTypeModal from "@/components/CallTypeModal";
 import { ApiError, api, type GroupMeeting, type Meeting, type MeetingSearchResult } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
+import { isOrgAdmin } from "@/lib/org";
 
 const DASHBOARD_POLL_INTERVAL_MS = 4000;
 
@@ -66,11 +67,12 @@ export default function Dashboard() {
   const [groupFilter, setGroupFilter] = useState("");
   // Which action the call-type popup is currently gating — set by clicking
   // "Record live" or "Upload recording", cleared on cancel/confirm. Call
-  // types are admin-managed (Admin.tsx) now, not a fixed list, so there's
-  // no static dropdown in the header anymore — the choice happens right
-  // when it's needed instead.
+  // types are org-admin-managed (Organization.tsx) now, not a fixed list,
+  // so there's no static dropdown in the header anymore — the choice
+  // happens right when it's needed instead.
   const [pendingAction, setPendingAction] = useState<"live" | "upload" | null>(null);
-  const isAdmin = user?.role === "admin";
+  const isAdmin = isOrgAdmin(user);
+  const inGroup = Boolean(user?.group_ids?.length);
 
   // Not semantic — an instant client-side filter over what's already
   // fetched, deliberately: unlike Mine/All (real search over transcript
@@ -115,7 +117,7 @@ export default function Dashboard() {
       api.listGroupMeetings().then(setGroupMeetings);
     }
     if (view === "all" && allMeetings === null) {
-      api.listAllMeetings().then(setAllMeetings);
+      api.listOrgMeetings().then(setAllMeetings);
     }
   }, [view, groupMeetings, allMeetings]);
 
@@ -129,7 +131,7 @@ export default function Dashboard() {
       return () => clearTimeout(timer);
     }
     if (view === "all" && allMeetings?.some((m) => m.status === "recording")) {
-      const timer = setTimeout(() => api.listAllMeetings().then(setAllMeetings), DASHBOARD_POLL_INTERVAL_MS);
+      const timer = setTimeout(() => api.listOrgMeetings().then(setAllMeetings), DASHBOARD_POLL_INTERVAL_MS);
       return () => clearTimeout(timer);
     }
   }, [view, groupMeetings, allMeetings]);
@@ -146,7 +148,7 @@ export default function Dashboard() {
     }
     let cancelled = false;
     setSearching(true);
-    const search = view === "all" ? api.searchAllMeetings : api.searchMeetings;
+    const search = view === "all" ? api.searchOrgMeetings : api.searchMeetings;
     const timer = setTimeout(() => {
       search(trimmed)
         .then((results) => {
@@ -286,9 +288,9 @@ export default function Dashboard() {
         onConfirm={onCallTypeChosen}
       />
 
-      {(user?.group_id || isAdmin) && (
+      {(inGroup || isAdmin) && (
         <div className="mb-6 flex gap-1 border-b border-border dark:border-border-dark">
-          {(["mine", ...(user?.group_id ? (["group"] as const) : []), ...(isAdmin ? (["all"] as const) : [])] as const).map(
+          {(["mine", ...(inGroup ? (["group"] as const) : []), ...(isAdmin ? (["all"] as const) : [])] as const).map(
             (tab) => (
               <button
                 key={tab}
@@ -426,7 +428,7 @@ export default function Dashboard() {
           {allMeetings === null && <p className="text-sm text-ink-muted">Loading…</p>}
           {allMeetings?.length === 0 && (
             <div className="card p-10 text-center">
-              <p className="text-sm text-ink-muted">No meetings yet, across any account.</p>
+              <p className="text-sm text-ink-muted">No meetings yet in this organization.</p>
             </div>
           )}
           {allMeetings && allMeetings.length > 0 && (
