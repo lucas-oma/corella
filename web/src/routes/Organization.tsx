@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import AppShell from "@/components/AppShell";
 import JsonTemplateField, { beautifyJson } from "@/components/JsonTemplateField";
+import PageHeader from "@/components/PageHeader";
 import {
   ApiError,
   api,
@@ -650,32 +651,30 @@ export default function Organization() {
 
   return (
     <AppShell>
-      <div className="mb-8">
-        <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">Organization</h1>
-        <p className="mt-1 text-sm text-ink-muted">
-          People, groups, invites, secrets, call types, and spend for this organization.
-        </p>
-        <div className="mt-4 grid grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-          <div className="min-w-0">
-            <label className="label" htmlFor="org-name">
-              Name
-            </label>
-            <input
-              id="org-name"
-              className="field"
-              value={orgName}
-              onChange={(e) => setOrgName(e.target.value)}
-            />
-          </div>
-          <button
-            type="button"
-            onClick={() => void onRenameOrg()}
-            disabled={busy === "rename-org" || !orgName.trim()}
-            className="btn-secondary w-full sm:w-auto"
-          >
-            {busy === "rename-org" ? "Saving…" : "Save name"}
-          </button>
+      <PageHeader
+        title="Organization"
+        subtitle="People, groups, invites, secrets, call types, and spend for this organization."
+      />
+      <div className="mb-8 grid grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+        <div className="min-w-0">
+          <label className="label" htmlFor="org-name">
+            Name
+          </label>
+          <input
+            id="org-name"
+            className="field"
+            value={orgName}
+            onChange={(e) => setOrgName(e.target.value)}
+          />
         </div>
+        <button
+          type="button"
+          onClick={() => void onRenameOrg()}
+          disabled={busy === "rename-org" || !orgName.trim()}
+          className="btn-secondary w-full sm:w-auto"
+        >
+          {busy === "rename-org" ? "Saving…" : "Save name"}
+        </button>
       </div>
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}

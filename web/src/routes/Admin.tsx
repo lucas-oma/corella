@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
+import PageHeader from "@/components/PageHeader";
 import {
   ApiError,
   api,
@@ -150,13 +151,10 @@ export default function Admin() {
 
   return (
     <AppShell>
-      <div className="mb-8">
-        <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">Super admin</h1>
-        <p className="mt-1 text-sm text-ink-muted">
-          Instance-wide organizations, super-admin flags, and spend. Organization people, groups,
-          secrets, and call types live under Organization.
-        </p>
-      </div>
+      <PageHeader
+        title="Super admin"
+        subtitle="Instance-wide organizations, super-admin flags, and spend. Organization people, groups, secrets, and call types live under Organization."
+      />
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
 

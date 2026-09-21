@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import AppShell from "@/components/AppShell";
 import KBUploadModal from "@/components/KBUploadModal";
+import PageHeader from "@/components/PageHeader";
 import { ApiError, api, type Group, type KBDocument } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
@@ -107,34 +108,34 @@ export default function KnowledgeBase() {
 
   return (
     <AppShell>
-      <div className="mb-8 flex items-center justify-between">
-        <div>
-          <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">Knowledge base</h1>
-          <p className="mt-1 text-sm text-ink-muted">
-            {isAdmin
-              ? "Documents the copilot grounds its answers in. Only admins can add or remove them — assign a document to a group so that group shares it."
-              : "Documents your group's copilot grounds its answers in. An admin maintains this knowledge base."}
-          </p>
-        </div>
-        {isAdmin && (
-          <div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf,.md,.markdown,.txt,application/pdf,text/plain,text/markdown"
-              className="hidden"
-              onChange={onFileSelected}
-            />
-            <button
-              onClick={() => setPickerOpen(true)}
-              disabled={uploading}
-              className="btn-primary"
-            >
-              {uploading ? "Uploading…" : "Upload document"}
-            </button>
-          </div>
-        )}
-      </div>
+      <PageHeader
+        title="Knowledge base"
+        subtitle={
+          isAdmin
+            ? "Documents the copilot grounds its answers in. Assign one to a group to share it."
+            : "Documents your group's copilot grounds its answers in."
+        }
+        actions={
+          isAdmin ? (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.md,.markdown,.txt,application/pdf,text/plain,text/markdown"
+                className="hidden"
+                onChange={onFileSelected}
+              />
+              <button
+                onClick={() => setPickerOpen(true)}
+                disabled={uploading}
+                className="btn-primary"
+              >
+                {uploading ? "Uploading…" : "Upload document"}
+              </button>
+            </>
+          ) : undefined
+        }
+      />
 
       {isAdmin && (groups.length > 0 || documents?.some((d) => !d.group_id)) && (
         <div className="mb-6 flex gap-1 overflow-x-auto border-b border-border dark:border-border-dark">

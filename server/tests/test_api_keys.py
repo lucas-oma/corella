@@ -174,9 +174,9 @@ async def test_api_key_last_used_at_updates_on_use(db, make_user, app_client):
 
 @pytest.mark.asyncio
 async def test_meeting_api_key_name_reflects_the_streaming_integration(db, make_user):
-    """Meeting.api_key_name (app/models/meeting.py) is what the "Live via
-    API"/"Recorded via API" badge reads — None for a browser-recorded
-    meeting, the key's own label once one's attached."""
+    """Meeting.api_key_name (app/models/meeting.py) is what the "API: …"
+    badge reads — None for a browser-recorded meeting, the key's own
+    label once one's attached."""
     user = await make_user()
     api_key = ApiKey(
         owner_id=user.id,

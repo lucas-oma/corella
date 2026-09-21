@@ -381,7 +381,7 @@ These are the ones that bite integrations. All are real behavior, not omissions.
 
 1. **API keys are not a second copy of the whole API.** List/search/upload/delete/settings/org/super-admin (including *managing* call types) are JWT-only. `GET /api/call-types` is the exception — keys can list `{id, name, slug, is_default}` for the key's org so create can send a real `call_type_id`.
 2. **API keys stay in the org they were created in.** The owner's switcher does not move them.
-3. **Create ≠ "recorded via API".** The Dashboard badge is set when the **WebSocket** authenticates with a key, not at `POST /api/meetings`.
+3. **Create ≠ the "API: …" badge.** The Dashboard badge is set when the **WebSocket** authenticates with a key, not at `POST /api/meetings`.
 4. **Disconnect finalizes. You cannot resume.** Tab close, process kill, and `stop` all end the meeting. Reconnect → `4409`. Create a new one.
 5. **One live connection per meeting.** Second socket → `4409`, first keeps going. Corella's own "Go to live session" is hidden on API-recorded meetings for this reason; the lock is the real backstop.
 6. **Duration cap is API-key / WebSocket only.** Forgotten Corella browser tabs are not capped. REST polling is not capped. Changing the key's minutes does not affect an in-flight session.

@@ -693,8 +693,8 @@ export default function MeetingDetail() {
                   <div className="flex items-center gap-2">
                     <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Report</h2>
                     {meeting.api_key_name && (
-                      <span className="rounded-sm border border-status-info/30 px-2 py-0.5 text-xs text-status-info">
-                        Recorded via API · {meeting.api_key_name}
+                      <span className="max-w-full truncate rounded-sm border border-status-info/30 px-2 py-0.5 text-xs text-status-info">
+                        API: {meeting.api_key_name}
                       </span>
                     )}
                     {meeting.sentiment && (

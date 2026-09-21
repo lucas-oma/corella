@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import AppShell from "@/components/AppShell";
+import PageHeader from "@/components/PageHeader";
 import {
   ApiError,
   api,
@@ -513,12 +514,7 @@ export default function Settings() {
 
   return (
     <AppShell>
-      <div className="mb-8">
-        <h1 className="font-serif text-2xl text-ink dark:text-ink-inverted">Settings</h1>
-        <p className="mt-1 text-sm text-ink-muted">
-          Copilot providers and knowledge base.
-        </p>
-      </div>
+      <PageHeader title="Settings" subtitle="Copilot providers and knowledge base." />
 
       {error && <p className="mb-4 text-sm text-status-danger">{error}</p>}
 

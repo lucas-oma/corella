@@ -17,73 +17,99 @@ const NAV = [
   { to: "/settings", label: "Settings" },
 ];
 
-export default function AppShell({ children }: { children: ReactNode }) {
+function navClass(active: boolean) {
+  return `rounded px-3 py-1.5 text-sm transition-colors ${
+    active
+      ? "bg-accent text-accent-foreground"
+      : "text-ink-muted hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+  }`;
+}
+
+function OrgLabel({
+  user,
+  membership,
+  onSwitch,
+}: {
+  user: NonNullable<ReturnType<typeof useAuth>["user"]>;
+  membership: ReturnType<typeof activeMembership>;
+  onSwitch: (id: string) => void;
+}) {
+  if (user.organizations.length > 1) {
+    return (
+      <select
+        className="min-w-0 max-w-[9rem] truncate bg-transparent py-1 text-right text-sm text-ink-muted outline-none md:max-w-[14rem] md:text-left"
+        value={user.active_organization_id ?? ""}
+        onChange={(e) => onSwitch(e.target.value)}
+        aria-label="Switch organization"
+      >
+        {user.organizations.map((org) => (
+          <option key={org.id} value={org.id}>
+            {org.name}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (!membership) return null;
+  return (
+    <span className="block min-w-0 max-w-[9rem] truncate text-right text-sm text-ink-muted md:max-w-[14rem] md:text-left">
+      {membership.name}
+    </span>
+  );
+}
+
+export default function AppShell({
+  children,
+  fill = false,
+}: {
+  children: ReactNode;
+  fill?: boolean;
+}) {
   const { user, switchOrganization } = useAuth();
   const location = useLocation();
   const membership = activeMembership(user);
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-40 border-b border-border bg-surface dark:border-border-dark dark:bg-surface-dark">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-8">
-            <div className="flex items-end gap-1.5">
-              <img src={logoLight} alt="" className="h-7 dark:hidden" />
-              <img src={logoDark} alt="" className="hidden h-7 dark:block" />
-              <span className="font-serif text-2xl leading-none text-ink dark:text-ink-inverted">
-                Corella
-              </span>
-            </div>
-            <nav className="flex items-center gap-1">
-              {NAV.map((item) => {
-                const active = location.pathname.startsWith(item.to);
-                return (
-                  <Link
-                    key={item.to}
-                    to={item.to}
-                    className={`rounded px-3 py-1.5 text-sm transition-colors ${
-                      active
-                        ? "bg-accent text-accent-foreground"
-                        : "text-ink-muted hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                    }`}
-                  >
-                    {item.label}
-                  </Link>
-                );
-              })}
-            </nav>
-          </div>
+    <div className={`flex flex-col ${fill ? "h-dvh overflow-hidden" : "min-h-screen"}`}>
+      <header className="sticky top-0 z-40 shrink-0 border-b border-border bg-surface dark:border-border-dark dark:bg-surface-dark">
+        <div className="mx-auto flex max-w-5xl items-center px-4 py-3 md:px-6 md:py-4">
+          <Link to="/dashboard" aria-label="Corella" className="flex shrink-0 items-end gap-1.5">
+            <img src={logoLight} alt="" className="h-7 dark:hidden" />
+            <img src={logoDark} alt="" className="hidden h-7 dark:block" />
+            <span className="font-serif text-2xl leading-none text-ink dark:text-ink-inverted">
+              Corella
+            </span>
+          </Link>
+          <nav className="ml-8 hidden items-center gap-1 md:flex">
+            {NAV.map((item) => {
+              const active = location.pathname.startsWith(item.to);
+              return (
+                <Link key={item.to} to={item.to} className={navClass(active)}>
+                  {item.label}
+                </Link>
+              );
+            })}
+          </nav>
           {user && (
-            <div className="flex items-center gap-3">
-              {user.organizations.length > 1 ? (
-                <select
-                  className="max-w-[14rem] truncate bg-transparent py-1 text-sm text-ink-muted outline-none"
-                  value={user.active_organization_id ?? ""}
-                  onChange={(e) => {
-                    void switchOrganization(e.target.value);
-                  }}
-                  aria-label="Switch organization"
-                >
-                  {user.organizations.map((org) => (
-                    <option key={org.id} value={org.id}>
-                      {org.name}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                membership && (
-                  <span className="max-w-[14rem] truncate text-sm text-ink-muted">
-                    {membership.name}
-                  </span>
-                )
-              )}
-              <span className="h-4 w-px bg-border dark:bg-border-dark" aria-hidden />
+            <div className="ml-auto flex min-w-0 items-center gap-2 md:gap-3">
+              <OrgLabel
+                user={user}
+                membership={membership}
+                onSwitch={(id) => void switchOrganization(id)}
+              />
+              <span className="h-4 w-px shrink-0 bg-border dark:bg-border-dark" aria-hidden />
               <AccountMenu />
             </div>
           )}
         </div>
       </header>
-      <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">{children}</main>
+      <main
+        className={`mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-6 md:px-6 md:py-8 ${
+          fill ? "min-h-0" : ""
+        }`}
+      >
+        {children}
+      </main>
       <Footer />
     </div>
   );
@@ -160,14 +186,14 @@ function AccountMenu() {
   }
 
   const menuItem = (active: boolean) =>
-    `block rounded px-3 py-1.5 text-sm transition-colors ${
+    `block rounded px-3 py-2.5 text-sm transition-colors md:py-1.5 ${
       active
         ? "bg-accent text-accent-foreground"
         : "text-ink dark:text-ink-inverted hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
     }`;
 
   return (
-    <div ref={wrapRef} className="relative">
+    <div ref={wrapRef} className="relative shrink-0">
       <button
         type="button"
         aria-haspopup="menu"
@@ -191,7 +217,7 @@ function AccountMenu() {
         <div
           role="menu"
           aria-label="Account"
-          className="card absolute right-0 z-30 mt-2 w-64 p-1"
+          className="card absolute right-0 z-30 mt-2 w-64 max-h-[min(24rem,calc(100dvh-5rem))] overflow-y-auto overflow-x-hidden p-1 max-md:fixed max-md:inset-x-3 max-md:top-14 max-md:mt-0 max-md:w-auto"
         >
           <div className="flex items-center gap-3 px-3 py-2.5">
             <UserAvatar
@@ -203,6 +229,20 @@ function AccountMenu() {
               <p className="truncate text-sm text-ink dark:text-ink-inverted">{user.full_name}</p>
               <p className="truncate text-xs text-ink-subtle">{user.email}</p>
             </div>
+          </div>
+          <div className="md:hidden">
+            <div className="my-1 border-t border-border dark:border-border-dark" />
+            {NAV.map((item) => (
+              <Link
+                key={item.to}
+                role="menuitem"
+                to={item.to}
+                onClick={() => setOpen(false)}
+                className={menuItem(location.pathname.startsWith(item.to))}
+              >
+                {item.label}
+              </Link>
+            ))}
           </div>
           {(isOrgAdmin(user) || user.is_super_admin || canCreateOrg || creatingOrg) && (
             <>

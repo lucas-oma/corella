@@ -86,7 +86,7 @@ Practical scale already in use across the app — reuse these rather than pickin
 
 - **Radius**: `rounded` (8px) is the default for cards, buttons, inputs. `rounded-sm` (6px) for small elements like status badges. `rounded-lg` (12px) is available for anything intentionally larger/softer but is rarely needed.
 - **Shadow**: exactly one, `shadow-card` (`0 1px 2px 0 rgb(0 0 0 / 0.04)`) — just enough to lift a card off the page. Don't add a second, heavier shadow for "emphasis"; use the border and spacing instead.
-- **Page layout**: a single centered column, `mx-auto max-w-5xl px-6`, header (`py-4`) then main content (`py-10`). Don't introduce a second container width elsewhere in the app without a real reason.
+- **Page layout**: a single centered column, `mx-auto max-w-5xl px-6`, sticky header (`py-4`) then main content (`py-6 md:py-8`). Don't introduce a second container width elsewhere in the app without a real reason. Page titles go through `PageHeader` (`web/src/components/PageHeader.tsx`) — serif `h1`, muted `text-sm` subtitle. On mobile, actions drop under the copy as equal-width buttons; from `md` up they sit on the right and the subtitle caps at `max-w-xl`.
 - **Card rhythm**: stacked sections use `<section className="card p-6">`, each subsequent one adding `mt-6` — see `web/src/routes/Settings.tsx` for the canonical example of several stacked cards.
 
 ## Shared components
@@ -99,6 +99,7 @@ These are the actual reusable classes defined in `web/src/index.css` (`@layer co
 - **`.btn-danger`** — solid `status-danger` background. Exists only as the confirm button inside `ConfirmDialog` for destroy/revoke actions. Never use it as a page-level primary; list-row Delete/Remove links stay muted text (`text-ink-subtle hover:text-status-danger`) and open the dialog.
 - **`.field`** — the standard text input/select styling, with an `accent`-colored focus border.
 - **`.label`** — small muted label text above a field (`text-sm font-medium text-ink-muted`).
+- **`PageHeader`** — `web/src/components/PageHeader.tsx`. Serif page `<h1>`, muted subtitle, optional actions. Mobile stacks copy then a full-width button row; desktop keeps actions on the right. Use this instead of hand-rolling `mb-8` + `h1` + `p` on each screen.
 
 ### Status badges
 
@@ -117,6 +118,8 @@ Not yet promoted to a shared class, but used consistently as an inline pattern a
 ### Navigation
 
 Primary nav is Meetings, Knowledge base, and Settings. The bar is sticky at the top of the viewport (`sticky top-0` on the header in `AppShell.tsx`) so it stays put while the page scrolls — opaque `bg-surface` / `dark:bg-surface-dark` so content doesn't show through. Active vs. inactive follow one rule: active gets a filled `accent` pill (`bg-accent text-accent-foreground`), inactive gets muted text with a subtle hover background (`hover:bg-black/[0.03] dark:hover:bg-white/[0.04]`).
+
+On viewports below `md`, the header is logo + wordmark on the left and org name + profile on the right (primary nav hides). Meetings / Knowledge base / Settings move into the account menu, which is pinned to the viewport (`fixed inset-x-3`) so it cannot overflow the screen.
 
 Organization, Super admin, and Sign out live in the account menu on the right. The trigger is the Corella-bird avatar plus a disclosure chevron (hover/open fill, not a static image). The active org name sits to its left, separated by a 1px `border` rule.
 
