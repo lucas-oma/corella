@@ -229,6 +229,10 @@ Actively developed. Done so far: organizations with owner/admin/member plus inst
 
 Not yet built: post-call "polish" re-transcription with a larger model.
 
+## Security
+
+To report a vulnerability, see [`SECURITY.md`](SECURITY.md). Do not open a public issue.
+
 ## License
 
 [Apache License 2.0](LICENSE).

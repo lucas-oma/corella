@@ -110,4 +110,4 @@ Adding a new STT provider follows the same shape, just against `app/services/asr
 
 ## Reporting bugs / requesting features
 
-Open an issue with what you expected, what actually happened, and how to reproduce it. For a security issue specifically, please don't open a public issue — see the README (or contact the maintainer directly) instead.
+Open an issue with what you expected, what actually happened, and how to reproduce it. For a security issue specifically, do not open a public issue — see [`SECURITY.md`](./SECURITY.md).
