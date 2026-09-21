@@ -34,7 +34,7 @@ Two credential types exist. They are **not** interchangeable on every route.
 
 `GET /api/auth/me` returns `is_super_admin`, `active_organization_id`, `organizations: [{id, name, role, is_instance_org}]`, and `group_ids` in the active org. There is no global `role` / `group_id`.
 
-`GET /api/auth/config` is public: `{ "allow_public_registration": true, "max_orgs_per_user": 1 }`.
+`GET /api/auth/config` is public: `{ "allow_public_registration": true, "max_orgs_per_user": 1, "email_invites": false }`. `email_invites` is true when this instance has both `RESEND_API_KEY` and `RESEND_FROM_EMAIL` set.
 
 ### API key (machine / external)
 
@@ -178,7 +178,7 @@ Browser-only. Active org is stored on the user, not in the JWT.
 | `GET` / `POST` / `PATCH` / `DELETE` | `/api/organizations/{id}/members` | Owner/admin; cannot touch the owner; cannot invite/create as `owner` |
 | `POST` | `/api/organizations/{id}/transfer` | Owner only |
 | `POST` | `/api/organizations/{id}/leave` | Anyone except the last owner |
-| `GET` / `POST` / `DELETE` | `/api/organizations/{id}/invites` | Owner/admin. Token returned once; store a hash. Resend mints a new token |
+| `GET` / `POST` / `DELETE` | `/api/organizations/{id}/invites` | Owner/admin. Token returned once; store a hash. Resend mints a new token. Create/resend email the link when Resend is configured (`email_sent` on that response); a send failure does not fail the invite. |
 | `GET` | `/api/invites/{token}` | Public preview (org name, email, role, expiry) |
 | `POST` | `/api/invites/{token}/accept` | Public — works when registration is closed. New email: body `{password, full_name}`. Existing email: log in first (409 if logged out, 403 if email mismatch) |
 | `GET` / `POST` / `DELETE` / `PUT` | `/api/organizations/{id}/groups` (+ `/members`) | Owner/admin. Groups are org-scoped; membership is many-to-many |

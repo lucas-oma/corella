@@ -127,7 +127,7 @@ Migrations run automatically on `api` startup. `postgres`/`redis`/`qdrant` don't
 See [`.env.example`](.env.example) for the full, documented list. Highlights:
 
 - **Core**: `JWT_SECRET` (required), `CORS_ORIGINS`, `ENVIRONMENT`, `API_PORT` / `WEB_PORT` (host-side published ports in `docker-compose.yml`, default 8090 / 8080), `PUBLIC_APP_URL` (identifies this instance in pre/post call-type API hooks — see [API access](#api-access); must match the web origin). Changing `API_PORT` without setting `PUBLIC_API_URL` is enough — the web image defaults to `http://localhost:${API_PORT}`. Changing `WEB_PORT` means updating `CORS_ORIGINS` and `PUBLIC_APP_URL` to the new origin.
-- **Access control**: `ALLOW_PUBLIC_REGISTRATION`, `MAX_ORGS_PER_USER`, `INVITE_EXPIRE_DAYS`, `ADMIN_EMAIL`/`ADMIN_PASSWORD` (bootstrap super_admin, see [Access control](#access-control) below).
+- **Access control**: `ALLOW_PUBLIC_REGISTRATION`, `MAX_ORGS_PER_USER`, `INVITE_EXPIRE_DAYS`, optional `RESEND_API_KEY` / `RESEND_FROM_EMAIL` (email the invite link; copy-link still works without them), `ADMIN_EMAIL`/`ADMIN_PASSWORD` (bootstrap super_admin, see [Access control](#access-control) below).
 - **Data stores**: `DATABASE_URL`, `REDIS_URL`, `QDRANT_URL` — defaults match `docker-compose.yml`'s service names, only change these if you're pointing at externally-hosted stores.
 - **Speech**: `HF_TOKEN` (diarization, see below), `WHISPER_MODEL`/`WHISPER_COMPUTE_TYPE`, optional `DEEPGRAM_API_KEY`/`DEFAULT_MODEL_DEEPGRAM`.
 - **Storage**: `AUDIO_STORAGE_PATH`/`MAX_AUDIO_UPLOAD_MB`, `KB_STORAGE_PATH`/`MAX_KB_UPLOAD_MB`, `EMBEDDING_MODEL`.
@@ -175,7 +175,7 @@ Roles are two enums, never one:
 
 The web app picks the **active org** (`PUT /api/organizations/current`); every browser request runs in that org. API keys do not switch — each key is bound to one org at creation.
 
-Invites are copy-link tokens (`INVITE_EXPIRE_DAYS`, default 7). Accepting works even when public registration is closed. A new email creates an account and joins that org (no auto-created personal org); an existing account adds a membership.
+Invites are copy-link tokens (`INVITE_EXPIRE_DAYS`, default 7). If `RESEND_API_KEY` and `RESEND_FROM_EMAIL` are set, creating or resending an invite also emails that link; a Resend failure is logged and the invite still works. Accepting works even when public registration is closed. A new email creates an account and joins that org (no auto-created personal org); an existing account adds a membership.
 
 Writes (delete meeting, report, action-item edits) stay **owner-only**. Org owner/admin get today's instance-admin powers **inside the active org** (org-wide meeting list, full read, KB upload/delete, call types, secrets, org cost dashboard).
 

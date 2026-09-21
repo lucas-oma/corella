@@ -327,3 +327,80 @@ async def test_cannot_delete_last_org(app_client, make_user, auth_headers):
     )
     assert response.status_code == 422
     assert response.json()["detail"] == "Cannot delete the last organization"
+
+
+@pytest.mark.asyncio
+async def test_create_invite_emails_when_resend_is_configured(
+    app_client, make_user, auth_headers, monkeypatch
+):
+    sent: list[dict] = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        return True
+
+    monkeypatch.setattr("app.api.organizations.send_invite_email", fake_send)
+    owner = await make_user(email="owner@example.com", full_name="Ada Owner")
+    created = await app_client.post(
+        f"/api/organizations/{owner.active_organization_id}/invites",
+        json={"email": "new@example.com", "role": "member"},
+        headers=auth_headers(owner),
+    )
+    assert created.status_code == 201
+    body = created.json()
+    assert body["email_sent"] is True
+    assert body["token"]
+    assert len(sent) == 1
+    assert sent[0]["to"] == "new@example.com"
+    assert sent[0]["inviter_name"] == "Ada Owner"
+    assert sent[0]["role"] == "member"
+    assert sent[0]["token"] == body["token"]
+
+
+@pytest.mark.asyncio
+async def test_invite_still_created_when_email_send_fails(
+    app_client, make_user, auth_headers, monkeypatch
+):
+    async def fake_send(**kwargs):
+        return False
+
+    monkeypatch.setattr("app.api.organizations.send_invite_email", fake_send)
+    owner = await make_user()
+    created = await app_client.post(
+        f"/api/organizations/{owner.active_organization_id}/invites",
+        json={"email": "new@example.com", "role": "admin"},
+        headers=auth_headers(owner),
+    )
+    assert created.status_code == 201
+    assert created.json()["email_sent"] is False
+    assert created.json()["token"]
+
+
+@pytest.mark.asyncio
+async def test_resend_invite_emails_the_new_token(
+    app_client, make_user, auth_headers, monkeypatch
+):
+    sent: list[str] = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs["token"])
+        return True
+
+    monkeypatch.setattr("app.api.organizations.send_invite_email", fake_send)
+    owner = await make_user()
+    created = await app_client.post(
+        f"/api/organizations/{owner.active_organization_id}/invites",
+        json={"email": "new@example.com", "role": "member"},
+        headers=auth_headers(owner),
+    )
+    first = created.json()["token"]
+    resent = await app_client.post(
+        f"/api/organizations/{owner.active_organization_id}/invites/{created.json()['id']}/resend",
+        headers=auth_headers(owner),
+    )
+    assert resent.status_code == 200
+    assert resent.json()["email_sent"] is True
+    second = resent.json()["token"]
+    assert second != first
+    assert sent == [first, second]
+
