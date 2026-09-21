@@ -18,7 +18,7 @@ import { api, type CaptureMode } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
 import { isOrgAdmin } from "@/lib/org";
-import { speakerColorKey, speakerDotClass } from "@/lib/speakerColor";
+import { assignSpeakerColors, speakerColorKey, speakerDotClass } from "@/lib/speakerColor";
 import { speakerShareFromLabeled } from "@/lib/speakerShare";
 import LiveCoachCluster from "@/components/LiveCoachCluster";
 
@@ -35,9 +35,8 @@ interface SpeakerInfo {
 // their group) or once a second distinct voice is confirmed *on that
 // channel* (see app/services/diarization/cluster.py — Me and Them gate
 // independently) or once an unrecognized voice's name is spotted live from
-// what it said (corella.identify_speaker_name). A small stable color per
-// speaker (id when we have it, else the label) helps them read as distinct
-// people at a glance.
+// what it said (corella.identify_speaker_name). Sequential muted colors
+// (Me always navy) keep them distinct at a glance.
 
 // Debug aid, not a durable record — nothing persisted server-side, so
 // capping client-side is enough to keep the panel from growing unbounded
@@ -112,6 +111,19 @@ export default function LiveSession() {
       captureMode ?? undefined,
     );
   }, [transcript, speakerLabels, user?.id, captureMode]);
+
+  const speakerColors = useMemo(() => {
+    const speakers: { colorKey: string; isMe: boolean }[] = [];
+    for (const segment of transcript) {
+      const label = displayLabel(segment.id);
+      if (!label) continue;
+      speakers.push({
+        colorKey: speakerColorKey(speakerLabels[segment.id]?.speakerId, label),
+        isMe: label === "Me",
+      });
+    }
+    return assignSpeakerColors(speakers);
+  }, [transcript, speakerLabels, user?.id]);
 
   const clientRef = useRef<LiveSessionClient | null>(null);
   const micCaptureRef = useRef<CaptureHandle | null>(null);
@@ -372,6 +384,8 @@ export default function LiveSession() {
           )}
           {transcript.map((segment) => {
             const label = displayLabel(segment.id);
+            const colorKey = speakerColorKey(speakerLabels[segment.id]?.speakerId, label ?? "");
+            const colorIndex = speakerColors.get(colorKey) ?? 1;
             return (
               <div
                 key={segment.id}
@@ -385,9 +399,7 @@ export default function LiveSession() {
                       }`}
                     >
                       <span
-                        className={`h-1.5 w-1.5 rounded-full ${speakerDotClass(
-                          speakerColorKey(speakerLabels[segment.id]?.speakerId, label),
-                        )}`}
+                        className={`h-1.5 w-1.5 rounded-full ${speakerDotClass(colorIndex)}`}
                       />
                       {label}
                     </p>

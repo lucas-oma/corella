@@ -14,7 +14,11 @@ import {
 import { useAuth } from "@/lib/auth";
 import { meetingsListPath, meetingsTabFromState } from "@/lib/meetingsTab";
 import { parseSentiment, SENTIMENTS, type Sentiment } from "@/lib/sentiment";
-import { speakerShareFromSegments, type SpeakerShareSlice } from "@/lib/speakerShare";
+import {
+  speakerShareFromApi,
+  speakerShareFromSegments,
+  type SpeakerShareSlice,
+} from "@/lib/speakerShare";
 import { isOrgAdmin } from "@/lib/org";
 import { useConfirm } from "@/lib/confirm";
 import TalkShareBar from "@/components/TalkShareBar";
@@ -746,9 +750,7 @@ export default function MeetingDetail() {
           : prev,
       );
       setActionItems(await api.listActionItems(meetingId));
-      setSpeakerShare(
-        report.speaker_share?.map((slice) => ({ ...slice, colorKey: slice.label })) ?? null,
-      );
+      setSpeakerShare(speakerShareFromApi(report.speaker_share));
     } catch (err) {
       setReportError(err instanceof ApiError ? err.message : "Couldn't generate the report");
     } finally {

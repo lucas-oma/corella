@@ -105,7 +105,7 @@ export default function LiveCoachCluster({
                     cy={CY}
                     r={R_SIDE}
                     fill="none"
-                    className={speakerStrokeClass(slice.colorKey)}
+                    className={speakerStrokeClass(slice.colorIndex)}
                     strokeWidth={STROKE_SIDE}
                     strokeDasharray={`${Math.max(seg, 1)} ${C_SIDE - Math.max(seg, 1)}`}
                     strokeDashoffset={-offset}

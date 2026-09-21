@@ -35,6 +35,11 @@ export default {
           warning: "#9A6300",
           danger: "#B3261E",
         },
+        speaker: {
+          steel: "#2A6A84",
+          plum: "#5C4E79",
+          sage: "#3E6A58",
+        },
       },
       fontFamily: {
         sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],

@@ -387,13 +387,23 @@ let sentimentFillFn = (value) => {
 const ACCENT = "#0B1B33";
 const TRACK = "#E4E4E1";
 const SENTIMENT_COLOR = "#1D5A8C";
-const SPEAKER_COLORS = ["#0B1B33", "#1F7A4D", "#B3261E", "#8B8F99"];
+const SPEAKER_COLORS = ["#0B1B33", "#2A6A84", "#1F7A4D", "#9A6300", "#B3261E", "#5C4E79", "#3E6A58", "#8B8F99"];
 const ANON_RE = /^(Speaker|Them) \\d+$/;
 
-function speakerColorHex(key) {
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
-  return SPEAKER_COLORS[hash % SPEAKER_COLORS.length];
+function assignSpeakerColors(labels) {
+  const map = new Map();
+  let nextOther = 1;
+  const otherSlots = SPEAKER_COLORS.length - 1;
+  for (const label of labels) {
+    if (map.has(label)) continue;
+    if (label === "Me") map.set(label, 0);
+    else { map.set(label, 1 + ((nextOther - 1) % otherSlots)); nextOther += 1; }
+  }
+  return map;
+}
+function speakerColorHex(label, colors) {
+  const index = colors && colors.has(label) ? colors.get(label) : (label === "Me" ? 0 : 1);
+  return SPEAKER_COLORS[index % SPEAKER_COLORS.length];
 }
 function canonicalLabel(line) {
   const raw = line.speakerLabel;
@@ -407,21 +417,25 @@ function canonicalLabel(line) {
 function isAnonymous(label) {
   return label === "Unknown" || label === "Them" || label === "Speaker" || ANON_RE.test(label);
 }
-function speakerShareFromLines(rows) {
+function lineDisplayLabels(rows) {
   const aliases = new Map();
   let nextN = 1;
+  return rows.map((line) => {
+    const raw = canonicalLabel(line);
+    if (raw === "Me" || !isAnonymous(raw)) return raw;
+    const key = (line.channel || "unknown") + ":" + raw;
+    if (!aliases.has(key)) { aliases.set(key, "Speaker " + nextN); nextN += 1; }
+    return aliases.get(key);
+  });
+}
+function speakerShareFromLines(rows) {
+  const labeled = lineDisplayLabels(rows);
   const msByLabel = new Map();
   const order = [];
-  for (const line of rows) {
-    const duration = Math.max(0, (line.end_ms || 0) - (line.start_ms || 0));
+  for (let i = 0; i < rows.length; i++) {
+    const duration = Math.max(0, (rows[i].end_ms || 0) - (rows[i].start_ms || 0));
     if (duration <= 0) continue;
-    const raw = canonicalLabel(line);
-    let label = raw;
-    if (raw !== "Me" && isAnonymous(raw)) {
-      const key = (line.channel || "unknown") + ":" + raw;
-      if (!aliases.has(key)) { aliases.set(key, "Speaker " + nextN); nextN += 1; }
-      label = aliases.get(key);
-    }
+    const label = labeled[i];
     if (!msByLabel.has(label)) { order.push(label); msByLabel.set(label, 0); }
     msByLabel.set(label, msByLabel.get(label) + duration);
   }
@@ -429,7 +443,8 @@ function speakerShareFromLines(rows) {
   if (!total || !order.length) return null;
   const pcts = order.map((label) => Math.round((msByLabel.get(label) / total) * 100));
   pcts[pcts.length - 1] += 100 - pcts.reduce((sum, pct) => sum + pct, 0);
-  return order.map((label, i) => ({ label, pct: pcts[i], color: speakerColorHex(label) })).filter((row) => row.pct > 0);
+  const colors = assignSpeakerColors(order);
+  return order.map((label, i) => ({ label, pct: pcts[i], color: speakerColorHex(label, colors) })).filter((row) => row.pct > 0);
 }
 
 for (const id of ["apiBase", "apiKey"]) {
@@ -529,9 +544,11 @@ function clusterHtml(score, sentiment, share) {
 }
 
 function renderGauges() {
-  const share = speakerShareFromLines(lines) || (lastCopilot.speaker_share || []).map((s) => ({
-    label: s.label, pct: s.pct, color: speakerColorHex(s.label),
-  })).filter((s) => s.label && s.pct > 0);
+  const fromCopilot = (lastCopilot.speaker_share || []).filter((s) => s.label && s.pct > 0);
+  const copilotColors = assignSpeakerColors(fromCopilot.map((s) => s.label));
+  const share = speakerShareFromLines(lines) || fromCopilot.map((s) => ({
+    label: s.label, pct: s.pct, color: speakerColorHex(s.label, copilotColors),
+  }));
   document.getElementById("gauges").innerHTML = clusterHtml(
     lastCopilot.coach_score ?? null,
     lastCopilot.sentiment,
@@ -540,9 +557,11 @@ function renderGauges() {
 }
 
 function renderTranscript() {
-  let html = lines.map((s) => {
-    const label = canonicalLabel(s);
-    return `<div class="line"><span class="dot" style="background:${speakerColorHex(label)}"></span><b>${escapeHtml(label)}</b>: ${escapeHtml(s.text)}</div>`;
+  const labels = lineDisplayLabels(lines);
+  const colors = assignSpeakerColors(labels);
+  let html = lines.map((s, i) => {
+    const label = labels[i];
+    return `<div class="line"><span class="dot" style="background:${speakerColorHex(label, colors)}"></span><b>${escapeHtml(label)}</b>: ${escapeHtml(s.text)}</div>`;
   }).join("");
   for (const ch of ["me", "them"]) {
     if (partials[ch]) html += `<div class="line partial"><b>${ch}</b>: ${escapeHtml(partials[ch])}…</div>`;

@@ -1,10 +1,11 @@
 import type { CaptureMode, TranscriptSegment } from "@/lib/api";
-import { speakerColorKey, speakerDotClass } from "@/lib/speakerColor";
+import { assignSpeakerColors, speakerColorKey, speakerDotClass } from "@/lib/speakerColor";
 
 export type SpeakerShareSlice = {
   label: string;
   pct: number;
   colorKey: string;
+  colorIndex: number;
 };
 
 const ANON_RE = /^(Speaker|Them) \d+$/;
@@ -90,8 +91,22 @@ export function speakerShareFromLabeled(
   if (total === 0 || order.length === 0) return null;
   const pcts = order.map((label) => Math.round(((msByLabel.get(label) ?? 0) / total) * 100));
   pcts[pcts.length - 1] += 100 - pcts.reduce((sum, pct) => sum + pct, 0);
+  const colorIndexByKey = assignSpeakerColors(
+    order.map((label) => ({
+      colorKey: colorByLabel.get(label) ?? label,
+      isMe: label === "Me",
+    })),
+  );
   return order
-    .map((label, i) => ({ label, pct: pcts[i], colorKey: colorByLabel.get(label) ?? label }))
+    .map((label, i) => {
+      const colorKey = colorByLabel.get(label) ?? label;
+      return {
+        label,
+        pct: pcts[i],
+        colorKey,
+        colorIndex: colorIndexByKey.get(colorKey) ?? 1,
+      };
+    })
     .filter((row) => row.pct > 0);
 }
 
@@ -103,6 +118,24 @@ export function speakerShareFromSegments(
   return speakerShareFromLabeled(segments, viewerId, captureMode);
 }
 
+/** Report / copilot payloads only have label + pct — assign sequential colors. */
+export function speakerShareFromApi(
+  share: Array<{ label: string; pct: number }> | null | undefined,
+): SpeakerShareSlice[] | null {
+  if (!share?.length) return null;
+  const rows = share.filter((row) => row.pct > 0);
+  if (!rows.length) return null;
+  const colorIndexByKey = assignSpeakerColors(
+    rows.map((row) => ({ colorKey: row.label, isMe: row.label === "Me" })),
+  );
+  return rows.map((row) => ({
+    label: row.label,
+    pct: row.pct,
+    colorKey: row.label,
+    colorIndex: colorIndexByKey.get(row.label) ?? 1,
+  }));
+}
+
 export function speakerDotForSlice(slice: SpeakerShareSlice): string {
-  return speakerDotClass(slice.colorKey);
+  return speakerDotClass(slice.colorIndex);
 }
