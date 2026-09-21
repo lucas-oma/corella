@@ -8,6 +8,9 @@ name: Push lint
 on:
   push:
 
+permissions:
+  contents: read
+
 jobs:
   ruff:
     name: ruff
