@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import AppShell from "@/components/AppShell";
+import HookVariablesHint from "@/components/HookVariablesHint";
 import JsonTemplateField, { beautifyJson } from "@/components/JsonTemplateField";
 import PageHeader from "@/components/PageHeader";
 import {
@@ -1184,8 +1185,8 @@ export default function Organization() {
         <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Call types</h2>
         <p className="mt-1 text-sm text-ink-muted">
           What steers the post-call report&apos;s focus, and optional APIs fired before a call of
-          this type starts and after it finishes automatic processing. Put tokens in Secrets above
-          and reference them in headers as {"{{secret.NAME}}"}.
+          this type starts and after it finishes automatic processing. Body fields use{" "}
+          {"{{corella.KEY}}"}; secrets belong in headers as {"{{secret.NAME}}"}.
         </p>
 
         <ul className="mt-5 divide-y divide-border dark:divide-border-dark">
@@ -1541,27 +1542,6 @@ function EyeOffIcon() {
   );
 }
 
-function SecretHeaderHint({ secrets }: { secrets: AppSecret[] }) {
-  if (secrets.length === 0) {
-    return (
-      <p className="text-xs text-ink-subtle">
-        Add a secret in Secrets above, then use {"{{secret.NAME}}"} as a header value.
-      </p>
-    );
-  }
-  return (
-    <p className="text-xs text-ink-subtle">
-      Use {"{{secret.NAME}}"}. Available:{" "}
-      {secrets.map((s, i) => (
-        <span key={s.id}>
-          {i > 0 && ", "}
-          <code>{`{{secret.${s.name}}}`}</code>
-        </span>
-      ))}
-    </p>
-  );
-}
-
 function CallTypeForm({
   draft,
   setDraft,
@@ -1651,12 +1631,12 @@ function CallTypeForm({
               value={draft.pre_call_headers}
               onChange={(value) => setDraft((prev) => ({ ...prev, pre_call_headers: value }))}
             />
-            <SecretHeaderHint secrets={secrets} />
             <JsonTemplateField
-              placeholder={'{\n  "title": "{{title}}"\n}'}
+              placeholder={'{\n  "title": "{{corella.title}}"\n}'}
               value={draft.pre_call_body_template}
               onChange={(value) => setDraft((prev) => ({ ...prev, pre_call_body_template: value }))}
             />
+            <HookVariablesHint phase="pre" secrets={secrets} />
             <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
               <input
                 type="checkbox"
@@ -1725,7 +1705,6 @@ function CallTypeForm({
               value={draft.post_call_headers}
               onChange={(value) => setDraft((prev) => ({ ...prev, post_call_headers: value }))}
             />
-            <SecretHeaderHint secrets={secrets} />
             <label className="flex items-center gap-2 text-sm text-ink dark:text-ink-inverted">
               <input
                 type="checkbox"
@@ -1739,20 +1718,12 @@ function CallTypeForm({
               items) instead of a custom body
             </label>
             <JsonTemplateField
-              placeholder={'{\n  "meeting": "{{meeting_id}}",\n  "summary": "{{summary}}"\n}'}
+              placeholder={'{\n  "meeting": "{{corella.meeting_id}}",\n  "summary": "{{corella.summary}}"\n}'}
               value={draft.post_call_body_template}
               onChange={(value) => setDraft((prev) => ({ ...prev, post_call_body_template: value }))}
               disabled={draft.post_call_send_full_payload}
             />
-            {!draft.post_call_send_full_payload && (
-              <p className="text-xs text-ink-subtle">
-                Placeholders (place inside quotes in the JSON): {"{{meeting_id}}"}, {"{{owner_name}}"},{" "}
-                {"{{title}}"}, {"{{call_type}}"}, {"{{status}}"}, {"{{summary}}"}, {"{{key_topics}}"},{" "}
-                {"{{sentiment}}"}, {"{{notable_quotes}}"}, {"{{coach_score}}"}, {"{{estimated_cost_usd}}"},{" "}
-                {"{{talk_ratio}}"}, {"{{action_items}}"}, {"{{copilot_insights}}"}, {"{{transcript}}"},{" "}
-                {"{{created_at}}"}, {"{{duration_seconds}}"}, or {"{{full_payload}}"} for everything at once.
-              </p>
-            )}
+            <HookVariablesHint phase="post" secrets={secrets} />
             <label className="flex items-start gap-2 text-sm text-ink dark:text-ink-inverted">
               <input
                 type="checkbox"

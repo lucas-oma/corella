@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
 import PageHeader from "@/components/PageHeader";
@@ -56,6 +56,7 @@ function speakerDotColor(label: string): string {
 export default function LiveSession() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
   const confirm = useConfirm();
 
@@ -194,7 +195,7 @@ export default function LiveSession() {
       client.onDebugEvent = (event) =>
         setDebugEvents((prev) => [...prev, event].slice(-MAX_DEBUG_EVENTS));
       client.onError = (message) => setError(message);
-      client.onStopped = () => navigate(`/meetings/${meetingId}`);
+      client.onStopped = () => navigate(`/meetings/${meetingId}`, { state: location.state });
 
       try {
         await client.waitUntilReady();
@@ -226,7 +227,7 @@ export default function LiveSession() {
       streamsRef.current.forEach((s) => s.getTracks().forEach((t) => t.stop()));
       clientRef.current?.close();
     };
-  }, [meetingId, navigate]);
+  }, [meetingId, navigate, location.state]);
 
   async function onShareTabAudio() {
     try {

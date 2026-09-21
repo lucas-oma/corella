@@ -272,6 +272,16 @@ def _json_value(value) -> str:
     return dumped
 
 
+def _apply_placeholders(template: str, values: dict) -> str:
+    """Replace {{corella.KEY}} tokens only. Unprefixed {{KEY}} is left
+    as-is — body templates must use the corella namespace.
+    """
+    rendered = template
+    for key, value in values.items():
+        rendered = rendered.replace("{{corella." + key + "}}", _json_value(value))
+    return rendered
+
+
 async def _build_transcript_text(db: AsyncSession, meeting_id: UUID) -> str:
     segments = list(
         await db.scalars(
@@ -307,10 +317,11 @@ async def _build_copilot_insights(db: AsyncSession, meeting_id: UUID) -> list[di
 async def build_full_payload(db: AsyncSession, meeting: Meeting, report: ReportResult) -> dict:
     """Everything this app knows about a finished call, as a plain dict —
     used directly when a call type's post_call_send_full_payload is on,
-    and also what {{full_payload}} expands to inside a hand-written body
-    template. "revisions" from the original ask is interpreted as action
-    items' open/done status (the closest tracked concept — there's no
-    edit-history on a report itself), included here per item.
+    and also what {{corella.full_payload}} expands to inside a
+    hand-written body template. "revisions" from the original
+    ask is interpreted as action items' open/done status (the closest
+    tracked concept — there's no edit-history on a report itself),
+    included here per item.
     """
     return {
         "meeting_id": str(meeting.id),
@@ -337,8 +348,8 @@ async def build_full_payload(db: AsyncSession, meeting: Meeting, report: ReportR
 
 
 async def render_template(db: AsyncSession, template: str, meeting: Meeting, report: ReportResult) -> str:
-    """Substitutes {{placeholder}} tokens in an admin-authored call-hook
-    body template with real meeting/report data. Supported placeholders:
+    """Substitutes {{corella.KEY}} tokens in an admin-authored call-hook
+    body template with real meeting/report data. Keys:
     meeting_id, owner_id, owner_name, title, call_type, status, summary,
     key_topics, sentiment, notable_quotes, coach_score, estimated_cost_usd,
     talk_ratio, action_items (now [{text, status}]), copilot_insights,
@@ -348,16 +359,11 @@ async def render_template(db: AsyncSession, template: str, meeting: Meeting, rep
     post_call_send_full_payload flag.
     """
     payload = await build_full_payload(db, meeting, report)
-    values = {**payload, "full_payload": payload}
-
-    rendered = template
-    for key, value in values.items():
-        rendered = rendered.replace("{{" + key + "}}", _json_value(value))
-    return rendered
+    return _apply_placeholders(template, {**payload, "full_payload": payload})
 
 
 def render_pre_call_template(template: str, meeting: Meeting) -> str:
-    """Substitutes {{placeholder}} tokens in an admin-authored pre-call
+    """Substitutes {{corella.KEY}} tokens in an admin-authored pre-call
     body template — a much smaller placeholder set than render_template's
     (post-call) one, since a pre-call fires before any transcript/report
     exists: meeting_id, owner_id, owner_name, title, call_type, status,
@@ -373,10 +379,7 @@ def render_pre_call_template(template: str, meeting: Meeting) -> str:
         "status": meeting.status.value,
         "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
     }
-    rendered = template
-    for key, value in values.items():
-        rendered = rendered.replace("{{" + key + "}}", _json_value(value))
-    return rendered
+    return _apply_placeholders(template, values)
 
 
 async def dispatch_pre_call(db: AsyncSession, meeting: Meeting) -> str | None:
@@ -393,7 +396,7 @@ async def dispatch_pre_call(db: AsyncSession, meeting: Meeting) -> str | None:
 
     pre_call_body_template (when set) is substituted via
     render_pre_call_template before sending — a real case for a POST
-    pre-call, e.g. {"lookup": "{{owner_name}}"} for a CRM query.
+    pre-call, e.g. {"lookup": "{{corella.owner_name}}"} for a CRM query.
 
     Any failure — bad URL, malformed headers, timeout, connection error,
     non-2xx — is logged (hook_logs + logger) and swallowed, never raised:

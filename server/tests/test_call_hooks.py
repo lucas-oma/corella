@@ -95,11 +95,26 @@ async def test_basic_placeholders_substitute(db, make_user):
     meeting = await db.get(Meeting, meeting.id)
 
     rendered = await render_template(
-        db, '{"id": "{{meeting_id}}", "owner": "{{owner_name}}"}', meeting, _report()
+        db, '{"id": "{{corella.meeting_id}}", "owner": "{{corella.owner_name}}"}', meeting, _report()
     )
     parsed = json.loads(rendered)
     assert parsed["id"] == str(meeting.id)
     assert parsed["owner"] == user.full_name
+
+
+def test_unprefixed_placeholders_are_left_as_is():
+    from uuid import uuid4
+
+    meeting = Meeting(
+        owner_id=uuid4(),
+        organization_id=uuid4(),
+        title="Discovery call",
+        status=MeetingStatus.RECORDING,
+    )
+    meeting.owner = type("Owner", (), {"full_name": "Jane Doe"})()
+
+    rendered = render_pre_call_template('{"title": "{{title}}", "id": "{{meeting_id}}"}', meeting)
+    assert rendered == '{"title": "{{title}}", "id": "{{meeting_id}}"}'
 
 
 @pytest.mark.asyncio
@@ -114,7 +129,7 @@ async def test_quotes_apostrophes_and_newlines_stay_valid_json(db, make_user):
     meeting = await db.get(Meeting, meeting.id)
 
     tricky_summary = 'She said "we\'d need it under $10k," then paused.\nA new line too.'
-    rendered = await render_template(db, '{"summary": "{{summary}}"}', meeting, _report(summary=tricky_summary))
+    rendered = await render_template(db, '{"summary": "{{corella.summary}}"}', meeting, _report(summary=tricky_summary))
 
     parsed = json.loads(rendered)  # must not raise
     assert parsed["summary"] == tricky_summary
@@ -130,7 +145,7 @@ async def test_array_and_number_placeholders_render_as_real_json_types(db, make_
 
     rendered = await render_template(
         db,
-        '{"key_topics": {{key_topics}}, "coach_score": {{coach_score}}}',
+        '{"key_topics": {{corella.key_topics}}, "coach_score": {{corella.coach_score}}}',
         meeting,
         _report(key_topics=["Budget", "Timeline"], coach_score=73),
     )
@@ -155,7 +170,7 @@ async def test_transcript_placeholder_includes_real_segments(db, make_user):
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
 
-    rendered = await render_template(db, '{"transcript": "{{transcript}}"}', meeting, _report())
+    rendered = await render_template(db, '{"transcript": "{{corella.transcript}}"}', meeting, _report())
     parsed = json.loads(rendered)
     assert "Hello there." in parsed["transcript"]
     assert "Me:" in parsed["transcript"]
@@ -175,7 +190,7 @@ async def test_call_type_placeholder_resolves_to_the_real_name(db, make_user):
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
 
-    rendered = await render_template(db, '{"type": "{{call_type}}"}', meeting, _report())
+    rendered = await render_template(db, '{"type": "{{corella.call_type}}"}', meeting, _report())
     assert json.loads(rendered)["type"] == "Sales call"
 
 
@@ -224,7 +239,7 @@ async def test_full_payload_placeholder_expands_inline(db, make_user):
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
 
-    rendered = await render_template(db, '{"data": {{full_payload}}}', meeting, _report())
+    rendered = await render_template(db, '{"data": {{corella.full_payload}}}', meeting, _report())
     parsed = json.loads(rendered)
     assert parsed["data"]["meeting_id"] == str(meeting.id)
     assert parsed["data"]["summary"] == "A plain summary."
@@ -273,7 +288,8 @@ def test_render_pre_call_template_substitutes_meeting_level_fields():
     meeting.owner = type("Owner", (), {"full_name": "Jane Doe"})()
 
     rendered = render_pre_call_template(
-        '{"lookup_name": "{{owner_name}}", "meeting": "{{meeting_id}}", "type": "{{call_type}}"}', meeting
+        '{"lookup_name": "{{corella.owner_name}}", "meeting": "{{corella.meeting_id}}", "type": "{{corella.call_type}}"}',
+        meeting,
     )
     parsed = json.loads(rendered)
     assert parsed["lookup_name"] == "Jane Doe"
@@ -293,7 +309,7 @@ async def test_dispatch_pre_call_sends_rendered_body_template(db, make_user, mon
         pre_call_enabled=True,
         pre_call_url="https://example.com/lookup",
         pre_call_method="POST",
-        pre_call_body_template='{"owner": "{{owner_name}}"}',
+        pre_call_body_template='{"owner": "{{corella.owner_name}}"}',
     )
     db.add(call_type)
     await db.commit()

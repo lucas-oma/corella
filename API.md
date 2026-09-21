@@ -280,7 +280,7 @@ Default: fires **synchronously** from `POST /api/meetings`, before the response 
 
 - **Method**: any (`GET` by default).
 - **URL / headers / body**: org owner/admin-configurable. Headers are a JSON object. Put tokens in **Organization → Secrets** and reference them as `{{secret.NAME}}` (e.g. `{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}`). Org-admin GET returns that template — never the resolved value. Dispatch interpolates the secret at send time. A missing/unknown secret aborts that hook (logged, swallowed). Literal header values still work but will be visible to org admins on the next GET.
-- **Body template**: `{{placeholder}}` substitution for `POST`/`PUT`/`PATCH`. Only meeting-level fields exist yet: `{{meeting_id}}`, `{{owner_id}}`, `{{owner_name}}`, `{{title}}`, `{{call_type}}`, `{{status}}`, `{{created_at}}`. Transcript/report placeholders are post-call only. A failed template render aborts that pre-call (logged, swallowed) — meeting creation still succeeds.
+- **Body template**: `{{corella.KEY}}` substitution for `POST`/`PUT`/`PATCH`. Only meeting-level fields exist yet: `{{corella.meeting_id}}`, `{{corella.owner_id}}`, `{{corella.owner_name}}`, `{{corella.title}}`, `{{corella.call_type}}`, `{{corella.status}}`, `{{corella.created_at}}`. Transcript/report placeholders are post-call only. A failed template render aborts that pre-call (logged, swallowed) — meeting creation still succeeds.
 - **"Use response as conversation context"**: when on, the response body is stored on the meeting (`pre_call_context`) and fed into every live-copilot cycle, *alongside* (not instead of) the group's knowledge base. Capped at `pre_call_context_max_chars` (default 20,000). Independent of whether a body template is set — the request still fires; this flag only controls whether the *response* becomes context. With it off, a pre-call is still useful as a side effect (notify another system a call started).
 - **Don't wait (async)** (default off): queue the request instead of blocking create. Use this when the lookup is slow and you would rather start recording first.
 - Non-2xx, timeout, DNS failure, bad URL: logged and swallowed. Returns no context. **Never fails meeting creation.**
@@ -310,23 +310,25 @@ On **every** pre-call and post-call, **always**, after custom headers are merged
 
 ### Placeholder reference (post-call body templates)
 
+Body tokens are `{{corella.KEY}}` only — unprefixed `{{KEY}}` is left as-is. Organization secrets (`{{secret.NAME}}`) are headers-only.
+
 | Placeholder | Value |
 |---|---|
-| `{{meeting_id}}`, `{{owner_id}}`, `{{owner_name}}` | Identity |
-| `{{title}}`, `{{call_type}}`, `{{status}}` | Basics (`call_type` is the type's **name** string, or JSON `null` if untyped) |
-| `{{summary}}`, `{{key_topics}}`, `{{sentiment}}`, `{{notable_quotes}}` | Report content |
-| `{{coach_score}}`, `{{estimated_cost_usd}}`, `{{talk_ratio}}` | Report metrics (`talk_ratio` is `{"me": <pct>, "them": <pct>}`) |
-| `{{action_items}}` | `[{"text": "...", "status": "open"\|"done"}, ...]` |
-| `{{copilot_insights}}` | `[{"at_ms": 12000, "suggestion": "...", "blockers": [...], "coach_score": 74}, ...]` — same timeline `GET /insights` returns |
-| `{{transcript}}` | Full transcript, `"Me: ...\nThem: ...\n..."` (channel-based labels, not resolved speaker names) |
-| `{{created_at}}`, `{{started_at}}`, `{{ended_at}}`, `{{duration_seconds}}` | Timing (ISO-8601 or JSON `null`) |
-| `{{full_payload}}` | The entire structured payload below, as one embedded JSON object — equivalent to turning "Send everything" on, but usable inline in a hand-written template |
+| `{{corella.meeting_id}}`, `{{corella.owner_id}}`, `{{corella.owner_name}}` | Identity |
+| `{{corella.title}}`, `{{corella.call_type}}`, `{{corella.status}}` | Basics (`call_type` is the type's **name** string, or JSON `null` if untyped) |
+| `{{corella.summary}}`, `{{corella.key_topics}}`, `{{corella.sentiment}}`, `{{corella.notable_quotes}}` | Report content |
+| `{{corella.coach_score}}`, `{{corella.estimated_cost_usd}}`, `{{corella.talk_ratio}}` | Report metrics (`talk_ratio` is `{"me": <pct>, "them": <pct>}`) |
+| `{{corella.action_items}}` | `[{"text": "...", "status": "open"\|"done"}, ...]` |
+| `{{corella.copilot_insights}}` | `[{"at_ms": 12000, "suggestion": "...", "blockers": [...], "coach_score": 74}, ...]` — same timeline `GET /insights` returns |
+| `{{corella.transcript}}` | Full transcript, `"Me: ...\nThem: ...\n..."` (channel-based labels, not resolved speaker names) |
+| `{{corella.created_at}}`, `{{corella.started_at}}`, `{{corella.ended_at}}`, `{{corella.duration_seconds}}` | Timing (ISO-8601 or JSON `null`) |
+| `{{corella.full_payload}}` | The entire structured payload below, as one embedded JSON object — equivalent to turning "Send everything" on, but usable inline in a hand-written template |
 
-A placeholder inside a quoted string (`"summary": "{{summary}}"`) is substituted as a properly JSON-escaped string (quotes/newlines in a summary cannot break the surrounding JSON). An array/object/number/null placeholder (`"key_topics": {{key_topics}}`) must sit *outside* quotes — it substitutes as real JSON. `{{full_payload}}` is an object, so it belongs outside quotes.
+A placeholder inside a quoted string (`"summary": "{{corella.summary}}"`) is substituted as a properly JSON-escaped string (quotes/newlines in a summary cannot break the surrounding JSON). An array/object/number/null placeholder (`"key_topics": {{corella.key_topics}}`) must sit *outside* quotes — it substitutes as real JSON. `{{corella.full_payload}}` is an object, so it belongs outside quotes.
 
 Pre-call templates use the same escaping rules on their smaller set.
 
-### The full payload shape ("Send everything" / `{{full_payload}}`)
+### The full payload shape ("Send everything" / `{{corella.full_payload}}`)
 
 ```json
 {

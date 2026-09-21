@@ -49,7 +49,7 @@ class CallType(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # (Admin → Secrets); dispatch interpolates them. The template is
     # returned to admins on GET — the secret *values* are not.
     pre_call_headers_encrypted: Mapped[str | None] = mapped_column(Text)
-    # Raw JSON text with {{placeholder}} tokens — see
+    # Raw JSON text with {{corella.KEY}} tokens — see
     # app/services/admin/call_hooks.py:render_template for the
     # substitution rules and the supported placeholder list.
     pre_call_body_template: Mapped[str | None] = mapped_column(Text)
