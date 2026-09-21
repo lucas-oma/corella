@@ -35,7 +35,7 @@ dependencies = [
     # sentence-transformers below — it's light enough to run in the api
     # process itself rather than needing a worker/Celery round-trip.
     "faster-whisper==1.1.0",
-    "requests==2.32.3",  # faster-whisper's own model-download path needs it directly
+    "requests==2.33.0",  # faster-whisper's own model-download path needs it directly
     "webrtcvad==2.0.10",
     # A range, not an exact pin: mixing.py's numpy usage (zeros/frombuffer/
     # astype/clip/tobytes) is trivial and version-agnostic, and an exact pin
