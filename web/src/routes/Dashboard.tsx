@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
-import CallTypeModal from "@/components/CallTypeModal";
+import CallTypeModal, { type CaptureChoice } from "@/components/CallTypeModal";
 import PageHeader from "@/components/PageHeader";
 import { ApiError, api, type GroupMeeting, type Meeting, type MeetingSearchResult } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -204,7 +204,9 @@ export default function Dashboard() {
     setUploading(true);
     let meeting: Meeting | null = null;
     try {
-      meeting = await api.createMeeting(titleFromFilename(file.name), pendingCallTypeId.current);
+      meeting = await api.createMeeting(titleFromFilename(file.name), pendingCallTypeId.current, {
+        mode: "upload",
+      });
       await api.uploadMeetingAudio(meeting.id, file);
       navigate(meetingDetailLocation(meeting.id, view));
     } catch (err) {
@@ -219,11 +221,14 @@ export default function Dashboard() {
     }
   }
 
-  async function onRecordLive(callTypeId: string) {
+  async function onRecordLive(callTypeId: string, capture: CaptureChoice) {
     setError(null);
     setStarting(true);
     try {
-      const meeting = await api.createMeeting("Live recording", callTypeId);
+      const meeting = await api.createMeeting("Live recording", callTypeId, {
+        mode: capture.mode,
+        app: capture.app,
+      });
       navigate({ ...meetingDetailLocation(meeting.id, view), pathname: `/meetings/${meeting.id}/live` });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't start a live session");
@@ -232,11 +237,11 @@ export default function Dashboard() {
     }
   }
 
-  function onCallTypeChosen(callTypeId: string) {
+  function onCallTypeChosen(callTypeId: string, capture: CaptureChoice) {
     const action = pendingAction;
     setPendingAction(null);
     if (action === "live") {
-      onRecordLive(callTypeId);
+      onRecordLive(callTypeId, capture);
     } else if (action === "upload") {
       pendingCallTypeId.current = callTypeId;
       // Still inside the same click-driven gesture chain (popup "Continue"
@@ -307,6 +312,7 @@ export default function Dashboard() {
 
       <CallTypeModal
         open={pendingAction !== null}
+        showCapture={pendingAction === "live"}
         onCancel={() => setPendingAction(null)}
         onConfirm={onCallTypeChosen}
       />

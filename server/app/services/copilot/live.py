@@ -10,8 +10,9 @@ from app.models.cost import UsageKind
 from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import (
     ActionItem,
+    ActionItemSource,
     ActionItemStatus,
-    Channel,
+    CaptureMode,
     CopilotInsight,
     Meeting,
     TranscriptSegment,
@@ -27,6 +28,7 @@ from app.services.embeddings.query import embed_query
 from app.services.llm.base import LLMError, LLMMessage, complete
 from app.services.llm.pricing import estimate_cost_usd
 from app.services.llm.resolve import ResolvedProvider
+from app.services.transcript_format import format_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +48,7 @@ Use empty arrays / null when there's nothing to report in a field. Keep the sugg
 class CopilotResult:
     suggestion: str | None
     blockers: list[str]
-    action_items: list[str]  # all currently-open items for the meeting, not just new ones this cycle
+    action_items: list[str]  # currently-open live captures, not the report digest
     coach_score: int | None
 
 
@@ -71,20 +73,22 @@ async def run_cycle(
         return None
 
     context_segments = all_segments[-settings.copilot_context_window_segments :]
-    transcript_text = _format_transcript(context_segments)
     ratio = talk_ratio(all_segments)  # whole call, not just the recent window — an honest metric
 
-    kb_context = await _retrieve_kb_context(db, owner_id, meeting_id, transcript_text)
-    # The pre-call hook's fetched response, if this meeting's call type had
-    # pre_call_use_as_context on (app/services/admin/call_hooks.py:
-    # dispatch_pre_call, fired once at meeting creation) — a single scalar
-    # column select, not a full Meeting load, since that's all this needs.
-    pre_call_context = await db.scalar(select(Meeting.pre_call_context).where(Meeting.id == meeting_id))
-
-    user_content = (
-        f"Recent transcript:\n{transcript_text}\n\n"
-        f"Talk ratio so far — Me: {ratio['me']}%, Them: {ratio['them']}%"
+    capture_row = (
+        await db.execute(select(Meeting.pre_call_context, Meeting.capture_mode).where(Meeting.id == meeting_id))
+    ).first()
+    pre_call_context = capture_row[0] if capture_row else None
+    capture_mode = capture_row[1] if capture_row else CaptureMode.OPEN_MIC
+    transcript_text = format_transcript(
+        context_segments, owner_id=owner_id, capture_mode=capture_mode
     )
+
+    kb_context = await _retrieve_kb_context(db, owner_id, meeting_id, transcript_text)
+
+    user_content = f"Recent transcript:\n{transcript_text}"
+    if capture_mode == CaptureMode.MEETING_TAB and ratio["them"] > 0:
+        user_content += f"\n\nTalk ratio so far — Me: {ratio['me']}%, Them: {ratio['them']}%"
     if pre_call_context:
         # Alongside, not instead of, the knowledge base below — an
         # external system's own pre-fetched data (e.g. a CRM lookup) is a
@@ -168,7 +172,9 @@ async def run_cycle(
     open_items = list(
         await db.scalars(
             select(ActionItem.text).where(
-                ActionItem.meeting_id == meeting_id, ActionItem.status == ActionItemStatus.OPEN
+                ActionItem.meeting_id == meeting_id,
+                ActionItem.source == ActionItemSource.LIVE,
+                ActionItem.status == ActionItemStatus.OPEN,
             )
         )
     )
@@ -179,11 +185,6 @@ async def run_cycle(
         action_items=open_items,
         coach_score=coach_score,
     )
-
-
-def _format_transcript(segments: list[TranscriptSegment]) -> str:
-    labels = {Channel.ME: "Me", Channel.THEM: "Them"}
-    return "\n".join(f"{labels.get(s.channel, 'Unknown')}: {s.text}" for s in segments)
 
 
 async def _retrieve_kb_context(

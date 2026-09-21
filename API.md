@@ -94,11 +94,12 @@ POST /api/meetings
 Authorization: Bearer <jwt or api key>
 Content-Type: application/json
 
-{ "title": "Sales call with Acme", "call_type_id": null }
+{ "title": "Sales call with Acme", "call_type_id": null, "capture_mode": "open_mic", "capture_app": null }
 ```
 
 - `title` defaults to `"Untitled meeting"` if omitted.
 - `call_type_id` is optional. Omit it or send `null` to use whichever call type is currently marked default. Unknown id → `422`. If the instance has no call types at all, the meeting is created untyped (`call_type: null`) and no pre-call fires. `GET /api/call-types` (API key or JWT) returns `{id, name, slug, is_default}` so you can pick an id.
+- `capture_mode` is how audio arrives, not the call type. `open_mic` (default) is one microphone. `meeting_tab` is mic plus a shared tab (Meet/Teams/Zoom). `upload` is set automatically when a file is posted to `/audio`. `capture_app` is `meet` | `teams` | `zoom` | `other` | `null` and is stored only for `meeting_tab`. First PCM on the them channel also promotes `open_mic` → `meeting_tab`.
 - There is **no separate "start" call**. The meeting is created with `status: "recording"` immediately.
 - If that call type has a pre-call hook, it fires **here**. Default is **sync**: Corella waits (bounded by `pre_call_timeout_seconds`, default 5s) before the `201` comes back. Admins can mark the hook **async** — create returns immediately and the worker runs the same request; if "use as context" is on, live copilot picks the body up on the next cycle. A slow/broken hook never fails creation; you just get no extra context that time.
 - Creating with an API key does **not** mark the meeting as "via API". That stamp (`api_key_name` on later reads) is set only when a live WebSocket actually authenticates with a key. You can create with a JWT and stream with a key (badge appears), or create with a key and record in the browser (no badge).
@@ -114,7 +115,7 @@ Response (`201`) — `MeetingRead`:
   "summary": null, "key_topics": null, "sentiment": null, "notable_quotes": null,
   "coach_score": null, "estimated_cost_usd": null,
   "created_at": "2026-09-08T12:00:00Z", "owner_id": "...", "owner_name": "...",
-  "api_key_name": null
+  "api_key_name": null, "capture_mode": "open_mic", "capture_app": null
 }
 ```
 
@@ -129,7 +130,7 @@ GET  /api/meetings/{id}/insights     → [{ id, at_ms, suggestion, blockers: [st
 POST /api/meetings/{id}/report       → generates (or regenerates) the summary/report synchronously
 ```
 
-**Transcript.** `channel` is `"me"` | `"them"` | `"unknown"`. `speaker_label` may still be `null` while same-room diarization catches up (or permanently, for a voice that never accumulated enough speech). `linked_user_id` is set only when the label resolved to an enrolled account — render `"Me"` only when it equals the viewing user's id.
+**Transcript.** `channel` is `"me"` | `"them"` | `"unknown"` — the audio pipe, not the printed name. `speaker_label` may still be `null` while same-room diarization catches up (or permanently, for a voice that never accumulated enough speech). `linked_user_id` is set only when the label resolved to an enrolled account — render `"Me"` only when it equals the viewing user's id. `{{corella.transcript}}` / the report prompt use those identities (`Me` / `Speaker N` / a name), not the raw channel.
 
 **Insights.** The persisted live-copilot timeline, timestamp-ordered. `at_ms` lines up with `transcript[].start_ms` / `end_ms`. This shape does **not** include `action_items` — those on the live `copilot` WebSocket message are per-cycle suggestions; the durable open/done action items live on the report (`POST /report` / post-call payload).
 
@@ -280,7 +281,7 @@ Default: fires **synchronously** from `POST /api/meetings`, before the response 
 
 - **Method**: any (`GET` by default).
 - **URL / headers / body**: org owner/admin-configurable. Headers are a JSON object. Put tokens in **Organization → Secrets** and reference them as `{{secret.NAME}}` (e.g. `{"X-Corella-Webhook-Secret": "{{secret.WEBHOOK_SECRET}}"}`). Org-admin GET returns that template — never the resolved value. Dispatch interpolates the secret at send time. A missing/unknown secret aborts that hook (logged, swallowed). Literal header values still work but will be visible to org admins on the next GET.
-- **Body template**: `{{corella.KEY}}` substitution for `POST`/`PUT`/`PATCH`. Only meeting-level fields exist yet: `{{corella.meeting_id}}`, `{{corella.owner_id}}`, `{{corella.owner_name}}`, `{{corella.title}}`, `{{corella.call_type}}`, `{{corella.status}}`, `{{corella.created_at}}`. Transcript/report placeholders are post-call only. A failed template render aborts that pre-call (logged, swallowed) — meeting creation still succeeds.
+- **Body template**: `{{corella.KEY}}` substitution for `POST`/`PUT`/`PATCH`. Only meeting-level fields exist yet: `{{corella.meeting_id}}`, `{{corella.owner_id}}`, `{{corella.owner_name}}`, `{{corella.title}}`, `{{corella.call_type}}`, `{{corella.capture_mode}}`, `{{corella.capture_app}}`, `{{corella.status}}`, `{{corella.created_at}}`. Transcript/report placeholders are post-call only. A failed template render aborts that pre-call (logged, swallowed) — meeting creation still succeeds.
 - **"Use response as conversation context"**: when on, the response body is stored on the meeting (`pre_call_context`) and fed into every live-copilot cycle, *alongside* (not instead of) the group's knowledge base. Capped at `pre_call_context_max_chars` (default 20,000). Independent of whether a body template is set — the request still fires; this flag only controls whether the *response* becomes context. With it off, a pre-call is still useful as a side effect (notify another system a call started).
 - **Don't wait (async)** (default off): queue the request instead of blocking create. Use this when the lookup is slow and you would rather start recording first.
 - Non-2xx, timeout, DNS failure, bad URL: logged and swallowed. Returns no context. **Never fails meeting creation.**
@@ -316,11 +317,12 @@ Body tokens are `{{corella.KEY}}` only — unprefixed `{{KEY}}` is left as-is. O
 |---|---|
 | `{{corella.meeting_id}}`, `{{corella.owner_id}}`, `{{corella.owner_name}}` | Identity |
 | `{{corella.title}}`, `{{corella.call_type}}`, `{{corella.status}}` | Basics (`call_type` is the type's **name** string, or JSON `null` if untyped) |
+| `{{corella.capture_mode}}`, `{{corella.capture_app}}` | How audio arrived: `open_mic` / `meeting_tab` / `upload`, and `meet` / `teams` / `zoom` / `other` / JSON `null` |
 | `{{corella.summary}}`, `{{corella.key_topics}}`, `{{corella.sentiment}}`, `{{corella.notable_quotes}}` | Report content |
 | `{{corella.coach_score}}`, `{{corella.estimated_cost_usd}}`, `{{corella.talk_ratio}}` | Report metrics (`talk_ratio` is `{"me": <pct>, "them": <pct>}`) |
-| `{{corella.action_items}}` | `[{"text": "...", "status": "open"\|"done"}, ...]` |
+| `{{corella.action_items}}` | Report digest only (`source=report`): `[{"text": "...", "status": "open"\|"done"}, ...]` — not the live-capture pile |
 | `{{corella.copilot_insights}}` | `[{"at_ms": 12000, "suggestion": "...", "blockers": [...], "coach_score": 74}, ...]` — same timeline `GET /insights` returns |
-| `{{corella.transcript}}` | Full transcript, `"Me: ...\nThem: ...\n..."` (channel-based labels, not resolved speaker names) |
+| `{{corella.transcript}}` | Full transcript as `"Me: ...\nSpeaker 1: ..."` — owner's enrolled voice (or unlabeled `meeting_tab` mic) is `Me`; other people are names or `Speaker N`. Not the raw me/them channel. |
 | `{{corella.created_at}}`, `{{corella.started_at}}`, `{{corella.ended_at}}`, `{{corella.duration_seconds}}` | Timing (ISO-8601 or JSON `null`) |
 | `{{corella.full_payload}}` | The entire structured payload below, as one embedded JSON object — equivalent to turning "Send everything" on, but usable inline in a hand-written template |
 
@@ -333,7 +335,8 @@ Pre-call templates use the same escaping rules on their smaller set.
 ```json
 {
   "meeting_id": "3fa2...", "owner_id": "...", "owner_name": "Jane Doe",
-  "title": "Sales call with Acme", "call_type": "Sales", "status": "ready",
+  "title": "Sales call with Acme", "call_type": "Sales",
+  "capture_mode": "open_mic", "capture_app": null, "status": "ready",
   "summary": "...", "key_topics": ["Pricing", "Timeline"], "sentiment": "Positive",
   "notable_quotes": ["..."],
   "coach_score": 82, "estimated_cost_usd": 0.0341, "talk_ratio": {"me": 58, "them": 42},
@@ -341,13 +344,13 @@ Pre-call templates use the same escaping rules on their smaller set.
   "copilot_insights": [
     {"at_ms": 42000, "suggestion": "Address the pricing objection directly", "blockers": ["Pricing concern raised"], "coach_score": 71}
   ],
-  "transcript": "Me: ...\nThem: ...",
+  "transcript": "Me: ...\nSpeaker 1: ...",
   "created_at": "2026-09-08T12:00:00Z", "started_at": "2026-09-08T12:00:05Z",
   "ended_at": "2026-09-08T12:31:20Z", "duration_seconds": 1875
 }
 ```
 
-`title` here is the **report** title (the LLM may rewrite it), not necessarily the create-time title.
+`title` here is the **report** title (the LLM may rewrite it), not necessarily the create-time title. `action_items` is the post-call digest (`source=report`), not the live-copilot capture list.
 
 ### Example: receiving a post-call payload (Node/Express)
 
@@ -391,7 +394,7 @@ These are the ones that bite integrations. All are real behavior, not omissions.
 8. **Auth is the first WS frame, in 5 seconds, or `4401`.** Don't open the socket and then wait on your audio pipeline before sending `auth`.
 9. **Audio format is fixed.** PCM16LE mono 16 kHz, channel byte prefix. No `Content-Type`, no JSON wrapper, no Opus/WebM.
 10. **Partial transcripts are UI-only.** Only `transcript` (and later diarization rewrites of those segments) is persisted.
-11. **Live `copilot.action_items` ≠ report action items.** The WS field is ephemeral per cycle; durable open/done items come from the report / post-call payload. `GET /insights` has suggestion/blockers/score, not those live action items.
+11. **Live `copilot.action_items` ≠ report action items.** The WS field is ephemeral per cycle. Durable items are `GET /action-items` with `source=live|report`. The report / post-call payload is the digest (`source=report`) only. `GET /insights` has suggestion/blockers/score, not those live action items.
 12. **Post-call runs only after a successful auto-report.** No LLM connected → no auto-report → no hook, even if the recording finalized to `ready`. Manual `POST /report` also does not fire it.
 13. **Pre-call failure is silent to the caller.** You still get `201`. The most common prod miss is DNS: the hostname in the hook URL does not resolve *inside* the api container (`Name or service not known`). Org owner/admins can open the meeting's **API logs**; otherwise check Corella logs or your receiving endpoint.
 14. **Mandatory hook headers always win.** You cannot spoof `X-Corella-Meeting-Id` or `X-Corella-Org-Id` via custom header config.

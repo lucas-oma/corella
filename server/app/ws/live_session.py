@@ -18,7 +18,7 @@ from app.core.db import SessionLocal
 from app.core.security import decode_access_token, hash_api_key
 from app.models.api_key import ApiKey
 from app.models.cost import UsageKind
-from app.models.meeting import Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
+from app.models.meeting import CaptureMode, Channel, Meeting, MeetingStatus, Speaker, TranscriptSegment
 from app.models.organization import OrganizationMembership, OrgRole
 from app.models.user import User
 from app.services import recording_lock
@@ -72,6 +72,19 @@ def _spawn_background(coro) -> None:
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+async def _promote_capture_to_meeting_tab(meeting_id: UUID) -> None:
+    """First them-channel audio means this is no longer a single-mic call."""
+    try:
+        async with SessionLocal() as db:
+            meeting = await db.get(Meeting, meeting_id)
+            if meeting is None or meeting.capture_mode != CaptureMode.OPEN_MIC:
+                return
+            meeting.capture_mode = CaptureMode.MEETING_TAB
+            await db.commit()
+    except Exception:
+        logger.exception("Failed to promote capture_mode for meeting %s", meeting_id)
 
 
 class _Utterance:
@@ -178,6 +191,8 @@ class LiveSession:
             Channel.ME: {},
             Channel.THEM: {},
         }
+        # First them-channel PCM promotes open_mic → meeting_tab once.
+        self.capture_promoted = False
 
     def elapsed_ms(self) -> int:
         return int((time.monotonic() - self._start) * 1000)
@@ -206,6 +221,9 @@ class LiveSession:
         when the queue consumer eventually gets to them.
         """
         self.recordings[_CHANNEL_KEY[channel]].append((self.elapsed_ms(), pcm))
+        if channel == Channel.THEM and not self.capture_promoted:
+            self.capture_promoted = True
+            _spawn_background(_promote_capture_to_meeting_tab(self.meeting_id))
 
         stream = self.deepgram_streams.get(channel)
         if stream is not None:

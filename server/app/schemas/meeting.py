@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.meeting import MeetingStatus
+from app.models.meeting import CaptureApp, CaptureMode, MeetingStatus
 from app.schemas.call_type import CallTypeOption
 
 
@@ -14,6 +14,10 @@ class MeetingCreate(BaseModel):
     # now, not a fixed compile-time list, so there's no static default to
     # fall back to here.
     call_type_id: UUID | None = None
+    # How audio arrives. Default open_mic (one microphone). capture_app
+    # is only stored when mode is meeting_tab.
+    capture_mode: CaptureMode = CaptureMode.OPEN_MIC
+    capture_app: CaptureApp | None = None
 
 
 class MeetingRead(BaseModel):
@@ -42,6 +46,8 @@ class MeetingRead(BaseModel):
     # browser — None otherwise. Used for the "API: …" badge (Dashboard,
     # MeetingDetail).
     api_key_name: str | None
+    capture_mode: CaptureMode
+    capture_app: CaptureApp | None
 
 
 class GroupMeetingRead(BaseModel):

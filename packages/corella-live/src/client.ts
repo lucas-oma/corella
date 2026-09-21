@@ -58,6 +58,8 @@ export async function createMeeting(opts: CreateMeetingOptions): Promise<Meeting
     body: JSON.stringify({
       title: opts.title || "Untitled meeting",
       call_type_id: opts.callTypeId ?? null,
+      capture_mode: opts.captureMode ?? "open_mic",
+      capture_app: opts.captureApp ?? null,
     }),
   });
 

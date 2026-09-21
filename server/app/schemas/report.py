@@ -2,7 +2,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.meeting import ActionItemStatus
+from app.models.meeting import ActionItemSource, ActionItemStatus
 
 
 class ActionItemRead(BaseModel):
@@ -11,6 +11,7 @@ class ActionItemRead(BaseModel):
     id: UUID
     text: str
     status: ActionItemStatus
+    source: ActionItemSource
 
 
 class ActionItemUpdate(BaseModel):

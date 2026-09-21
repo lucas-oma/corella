@@ -33,6 +33,29 @@ class ActionItemStatus(str, enum.Enum):
     DONE = "done"
 
 
+class ActionItemSource(str, enum.Enum):
+    LIVE = "live"
+    REPORT = "report"
+
+
+class CaptureMode(str, enum.Enum):
+    """How audio arrives — not the same as call type (sales vs 1:1).
+    open_mic is the default: one pipe, speaker labels distinguish people.
+    meeting_tab is mic + shared tab (Meet/Teams/Zoom). upload is a file.
+    """
+
+    OPEN_MIC = "open_mic"
+    MEETING_TAB = "meeting_tab"
+    UPLOAD = "upload"
+
+
+class CaptureApp(str, enum.Enum):
+    MEET = "meet"
+    TEAMS = "teams"
+    ZOOM = "zoom"
+    OTHER = "other"
+
+
 class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "meetings"
 
@@ -88,6 +111,12 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     notable_quotes: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     coach_score: Mapped[int | None] = mapped_column(Integer)
     estimated_cost_usd: Mapped[float | None] = mapped_column(Float)
+    capture_mode: Mapped[CaptureMode] = mapped_column(
+        pg_enum(CaptureMode, "meeting_capture_mode"), default=CaptureMode.OPEN_MIC
+    )
+    capture_app: Mapped[CaptureApp | None] = mapped_column(
+        pg_enum(CaptureApp, "meeting_capture_app")
+    )
 
     owner: Mapped[User] = relationship(lazy="joined")
     call_type: Mapped[CallType | None] = relationship(lazy="joined")
@@ -252,4 +281,7 @@ class ActionItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     text: Mapped[str] = mapped_column(Text)
     status: Mapped[ActionItemStatus] = mapped_column(
         pg_enum(ActionItemStatus, "action_item_status"), default=ActionItemStatus.OPEN
+    )
+    source: Mapped[ActionItemSource] = mapped_column(
+        pg_enum(ActionItemSource, "action_item_source"), default=ActionItemSource.LIVE
     )

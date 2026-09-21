@@ -5,6 +5,8 @@ export { CHANNEL_BYTE, CLOSE } from "./types.js";
 export type {
   ApiAuthOptions,
   CallTypeOption,
+  CaptureApp,
+  CaptureMode,
   CloseCode,
   CloseEvent,
   ConnectOptions,

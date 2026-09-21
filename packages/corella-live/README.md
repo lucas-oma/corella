@@ -59,7 +59,7 @@ const session = await CorellaLive.connect({
 });
 ```
 
-`createMeeting({ apiBase, apiKey, title?, callTypeId? })` is the REST helper `start()` uses.
+`createMeeting({ apiBase, apiKey, title?, callTypeId?, captureMode?, captureApp? })` is the REST helper `start()` uses. `captureMode` defaults to `open_mic`.
 
 `listCallTypes({ apiBase, apiKey })` returns `{ id, name, slug, is_default }[]` so you can pick a type instead of the instance default. Same CORS rule as create.
 

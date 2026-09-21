@@ -14,6 +14,7 @@ import {
   type TranscriptEvent,
   startCapture,
 } from "@/lib/live";
+import { api, type CaptureMode } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
 import { isOrgAdmin } from "@/lib/org";
@@ -70,6 +71,7 @@ export default function LiveSession() {
   const [partials, setPartials] = useState<Partial<Record<LiveChannel, string>>>({});
   const [micActive, setMicActive] = useState(false);
   const [themActive, setThemActive] = useState(false);
+  const [captureMode, setCaptureMode] = useState<CaptureMode | null>(null);
   const [stopping, setStopping] = useState(false);
   const [copilot, setCopilot] = useState<CopilotEvent | null>(null);
   const [copilotAvailable, setCopilotAvailable] = useState(true);
@@ -168,6 +170,11 @@ export default function LiveSession() {
       pulseTimeoutsRef.current.push(timeout);
     }
   }
+
+  useEffect(() => {
+    if (!meetingId) return;
+    api.getMeeting(meetingId).then((m) => setCaptureMode(m.capture_mode)).catch(() => {});
+  }, [meetingId]);
 
   useEffect(() => {
     if (!meetingId) return;
@@ -326,7 +333,7 @@ export default function LiveSession() {
         </span>
         {!themActive && connection === "connected" && (
           <button onClick={onShareTabAudio} className="btn-secondary ml-auto">
-            Share tab audio
+            {captureMode === "meeting_tab" ? "Share meeting audio" : "Share tab audio"}
           </button>
         )}
         {isOrgAdmin(user) && connection === "connected" && (

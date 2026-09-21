@@ -4,14 +4,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cost import UsageKind
-from app.models.meeting import ActionItem, ActionItemStatus, Channel, Meeting, TranscriptSegment
-from app.services.copilot.action_items import persist_new_action_items
+from app.models.meeting import ActionItem, ActionItemSource, CaptureMode, Meeting, TranscriptSegment
+from app.services.copilot.action_items import list_report_action_items, replace_report_action_items
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import as_str_list, parse_json_response
 from app.services.copilot.talk_ratio import talk_ratio
 from app.services.llm.base import LLMError, LLMMessage, complete
 from app.services.llm.pricing import estimate_cost_usd
 from app.services.llm.resolve import ResolvedProvider
+from app.services.transcript_format import format_transcript
 
 _SYSTEM_PROMPT = """You are summarizing a completed call transcript. Respond with ONLY a single JSON object, no other text, in exactly this shape:
 
@@ -22,10 +23,8 @@ _SYSTEM_PROMPT = """You are summarizing a completed call transcript. Respond wit
   "sentiment": "<one or two words describing the overall tone, e.g. Positive, Neutral, Tense, Mixed>",
   "notable_quotes": ["<a directly-quoted, noteworthy line from the transcript, verbatim, 0-4 items>"],
   "coach_score": <integer 0-100 rating how well this call went for Me overall, considering engagement and whether Them's questions or concerns were addressed>,
-  "action_items": ["<a commitment or follow-up task mentioned anywhere in the call>"]
+  "action_items": ["<a distinct, concrete next step — 3-8 items, merge paraphrases of the same task, only real commitments not a restated project plan, or [] if none>"]
 }"""
-
-_LABELS = {Channel.ME: "Me", Channel.THEM: "Them"}
 
 
 class ReportError(Exception):
@@ -42,7 +41,7 @@ class ReportResult:
     notable_quotes: list[str]
     coach_score: int | None
     estimated_cost_usd: float | None
-    action_items: list[ActionItem]  # all open items for the meeting, after persisting new ones
+    action_items: list[ActionItem]  # report digest only (source=report), after replace
     talk_ratio: dict[str, int] | None  # None if this meeting has no Me/Them channel data
 
 
@@ -57,13 +56,32 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
     if not segments:
         raise ReportError("This meeting has no transcript yet")
 
-    transcript_text = "\n".join(f"{_LABELS.get(s.channel, 'Speaker')}: {s.text}" for s in segments)
+    capture_mode = meeting.capture_mode or CaptureMode.OPEN_MIC
+    transcript_text = format_transcript(
+        segments, owner_id=meeting.owner_id, capture_mode=capture_mode
+    )
     ratio = talk_ratio(segments)
-    has_channel_data = ratio["me"] > 0 or ratio["them"] > 0
+    # Me/Them talk ratio is only honest when a second audio pipe existed.
+    # Open-mic / upload is all one channel — 100% Me would be a lie.
+    has_channel_data = capture_mode == CaptureMode.MEETING_TAB and ratio["them"] > 0
+
+    live_items = list(
+        await db.scalars(
+            select(ActionItem.text).where(
+                ActionItem.meeting_id == meeting.id, ActionItem.source == ActionItemSource.LIVE
+            )
+        )
+    )
 
     user_content = f"Full transcript:\n{transcript_text}"
     if has_channel_data:
         user_content += f"\n\nTalk ratio — Me: {ratio['me']}%, Them: {ratio['them']}%"
+    if live_items:
+        user_content += (
+            "\n\nAction items captured live during the call — deduplicate and summarize "
+            "these into the action_items array; do not repeat paraphrases:\n"
+            + "\n".join(f"- {text}" for text in live_items)
+        )
 
     # meeting.call_type is a lazy="joined" relationship (app/models/meeting.py)
     # — admin-managed now (app/models/call_type.py), not a hardcoded dict.
@@ -128,9 +146,7 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
     raw_score = parsed.get("coach_score")
     coach_score = int(raw_score) if isinstance(raw_score, int | float) else None
 
-    new_items = as_str_list(parsed.get("action_items"))
-    if new_items:
-        await persist_new_action_items(db, meeting.id, new_items)
+    await replace_report_action_items(db, meeting.id, as_str_list(parsed.get("action_items")))
 
     meeting.title = title
     meeting.summary = summary
@@ -144,13 +160,7 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
     # post-increment total for the response.
     await db.refresh(meeting, ["estimated_cost_usd"])
 
-    open_items = list(
-        await db.scalars(
-            select(ActionItem).where(
-                ActionItem.meeting_id == meeting.id, ActionItem.status == ActionItemStatus.OPEN
-            )
-        )
-    )
+    digest = await list_report_action_items(db, meeting.id)
 
     return ReportResult(
         title=title,
@@ -160,6 +170,6 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
         notable_quotes=notable_quotes,
         coach_score=coach_score,
         estimated_cost_usd=meeting.estimated_cost_usd,
-        action_items=open_items,
+        action_items=digest,
         talk_ratio=ratio if has_channel_data else None,
     )
