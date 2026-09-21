@@ -89,7 +89,7 @@ worker = [
     # torchcodec above which now live in base for the api process's own
     # in-process embedding check.
     "sentence-transformers==3.3.1",
-    "pypdf==5.1.0",
+    "pypdf==6.16.1",
 ]
 dev = [
     "pytest==8.3.4",
