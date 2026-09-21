@@ -74,3 +74,12 @@ async def test_auth_config_reflects_the_real_setting(app_client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["allow_public_registration"] is False
     assert "max_orgs_per_user" in response.json()
+    assert response.json()["email_invites"] is False
+
+
+@pytest.mark.asyncio
+async def test_auth_config_email_invites_follows_resend_env(app_client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "resend_api_key", "re_test")
+    monkeypatch.setattr(get_settings(), "resend_from_email", "corella@example.com")
+    response = await app_client.get("/api/auth/config")
+    assert response.json()["email_invites"] is True

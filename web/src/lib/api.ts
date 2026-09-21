@@ -116,6 +116,7 @@ export interface User {
 export interface AuthConfig {
   allow_public_registration: boolean;
   max_orgs_per_user: number;
+  email_invites: boolean;
 }
 
 export interface Organization {
@@ -142,6 +143,7 @@ export interface OrgInvite {
   expires_at: string;
   created_at: string;
   token?: string | null;
+  email_sent?: boolean | null;
 }
 
 export interface InvitePreview {

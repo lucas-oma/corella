@@ -14,6 +14,7 @@ from app.core.security import create_access_token, hash_password, verify_passwor
 from app.models.user import User
 from app.models.voice_identity import VoiceIdentity
 from app.schemas.user import AuthConfig, ProfileUpdate, Token, UserCreate, UserLogin, UserRead
+from app.services.email import email_invites_enabled
 from app.services.embeddings.qdrant_store import delete_speaker_embedding
 from app.services.organizations import create_organization, default_org_name
 from app.workers.celery_app import celery_app
@@ -48,6 +49,7 @@ async def auth_config() -> AuthConfig:
     return AuthConfig(
         allow_public_registration=get_settings().allow_public_registration,
         max_orgs_per_user=get_settings().max_orgs_per_user,
+        email_invites=email_invites_enabled(),
     )
 
 

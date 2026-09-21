@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     max_orgs_per_user: int = 1
     invite_expire_days: int = 7
 
+    # Optional transactional email (Resend). When both are set, creating or
+    # resending an org invite emails the copy-link URL; a missing key or a
+    # Resend failure never fails the invite itself (copy-link still works).
+    # from_email must be a domain you've verified in Resend.
+    resend_api_key: str | None = None
+    resend_from_email: str | None = None
+
     # Bootstrap super-admin account, created on startup if it doesn't
     # already exist. Required to have any instance operator at all once
     # public registration is turned off.

@@ -46,6 +46,9 @@ class InviteRead(BaseModel):
     expires_at: datetime
     created_at: datetime
     token: str | None = None
+    # Set on create/resend when this instance tried to email the link.
+    # None on list — those rows never include the raw token either.
+    email_sent: bool | None = None
 
 
 class InvitePreview(BaseModel):

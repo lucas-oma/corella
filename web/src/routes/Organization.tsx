@@ -18,6 +18,7 @@ import {
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
 import { activeMembership, isOrgOwner } from "@/lib/org";
+import { useAuthConfig } from "@/lib/useAuthConfig";
 
 const EMPTY_NEW_USER = {
   email: "",
@@ -168,6 +169,8 @@ function periodCaption(period: CostPeriod, dayCount: number): string {
 export default function Organization() {
   const { user: me, refreshUser } = useAuth();
   const confirm = useConfirm();
+  const authConfig = useAuthConfig();
+  const emailInvites = Boolean(authConfig?.email_invites);
   const orgId = me?.active_organization_id ?? "";
   const owner = isOrgOwner(me);
   const canDeleteOrg = owner && !activeMembership(me)?.is_instance_org;
@@ -979,7 +982,9 @@ export default function Organization() {
       <section className="card mt-6 p-6">
         <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">Invites</h2>
         <p className="mt-1 text-sm text-ink-muted">
-          Copy a link to invite someone. They can accept even when public registration is closed.
+          {emailInvites
+            ? "We'll email them a link. You can still copy it. They can accept even when public registration is closed."
+            : "Copy a link to invite someone. They can accept even when public registration is closed."}
         </p>
         <div className="mt-4 grid grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_10rem_auto]">
           <div className="min-w-0">
@@ -1019,7 +1024,13 @@ export default function Organization() {
             disabled={busy === "new-invite" || !newInvite.email.trim()}
             className="btn-secondary w-full sm:w-auto"
           >
-            {busy === "new-invite" ? "Creating…" : "Create invite"}
+            {busy === "new-invite"
+              ? emailInvites
+                ? "Sending…"
+                : "Creating…"
+              : emailInvites
+                ? "Send invite"
+                : "Create invite"}
           </button>
         </div>
         <ul className="mt-4 divide-y divide-border dark:divide-border-dark">

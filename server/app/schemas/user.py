@@ -59,3 +59,4 @@ class Token(BaseModel):
 class AuthConfig(BaseModel):
     allow_public_registration: bool
     max_orgs_per_user: int
+    email_invites: bool = False

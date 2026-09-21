@@ -36,6 +36,7 @@ from app.schemas.organization import (
     TransferOwnership,
 )
 from app.schemas.user import MemberCreate, MemberUpdate, OrgMembershipRead, Token, UserRead
+from app.services.email import send_invite_email
 from app.services.organizations import (
     add_membership,
     create_organization,
@@ -364,6 +365,33 @@ async def leave_org(
     await db.commit()
 
 
+def _invite_read(
+    invite: OrganizationInvite, token: str | None = None, email_sent: bool | None = None
+) -> InviteRead:
+    return InviteRead(
+        id=invite.id,
+        email=invite.email,
+        role=invite.role,
+        expires_at=invite.expires_at,
+        created_at=invite.created_at,
+        token=token,
+        email_sent=email_sent,
+    )
+
+
+async def _email_invite(
+    invite: OrganizationInvite, token: str, *, org_name: str, inviter_name: str
+) -> bool:
+    return await send_invite_email(
+        to=invite.email,
+        organization_name=org_name,
+        inviter_name=inviter_name,
+        role=invite.role.value,
+        token=token,
+        expires_at=invite.expires_at,
+    )
+
+
 @router.get("/{org_id}/invites", response_model=list[InviteRead])
 async def list_invites(
     org_id: UUID,
@@ -377,16 +405,7 @@ async def list_invites(
         .where(OrganizationInvite.organization_id == org_id, OrganizationInvite.accepted_at.is_(None))
         .order_by(OrganizationInvite.created_at.desc())
     )
-    return [
-        InviteRead(
-            id=inv.id,
-            email=inv.email,
-            role=inv.role,
-            expires_at=inv.expires_at,
-            created_at=inv.created_at,
-        )
-        for inv in rows
-    ]
+    return [_invite_read(inv) for inv in rows]
 
 
 @router.post("/{org_id}/invites", response_model=InviteRead, status_code=status.HTTP_201_CREATED)
@@ -429,14 +448,10 @@ async def create_invite(
     db.add(invite)
     await db.commit()
     await db.refresh(invite)
-    return InviteRead(
-        id=invite.id,
-        email=invite.email,
-        role=invite.role,
-        expires_at=invite.expires_at,
-        created_at=invite.created_at,
-        token=raw,
+    email_sent = await _email_invite(
+        invite, raw, org_name=ctx.organization.name, inviter_name=ctx.user.full_name
     )
+    return _invite_read(invite, token=raw, email_sent=email_sent)
 
 
 @router.post("/{org_id}/invites/{invite_id}/resend", response_model=InviteRead)
@@ -456,14 +471,10 @@ async def resend_invite(
     invite.expires_at = invite_expiry()
     await db.commit()
     await db.refresh(invite)
-    return InviteRead(
-        id=invite.id,
-        email=invite.email,
-        role=invite.role,
-        expires_at=invite.expires_at,
-        created_at=invite.created_at,
-        token=raw,
+    email_sent = await _email_invite(
+        invite, raw, org_name=ctx.organization.name, inviter_name=ctx.user.full_name
     )
+    return _invite_read(invite, token=raw, email_sent=email_sent)
 
 
 @router.delete("/{org_id}/invites/{invite_id}", status_code=status.HTTP_204_NO_CONTENT)
