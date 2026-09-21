@@ -1,4 +1,6 @@
 import mimetypes
+import os
+import re
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -8,6 +10,11 @@ from fastapi import HTTPException, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 
 from app.core.config import get_settings
+
+# Upload filenames only contribute an extension, glued onto "original".
+# Restrict that suffix so a Content-Disposition value cannot inject extra
+# path segments into dest_path (CodeQL py/path-injection on _save_upload).
+_SAFE_SUFFIX = re.compile(r"\.[a-z0-9]{1,10}")
 
 CHUNK_SIZE = 1024 * 1024  # 1MB
 
@@ -29,8 +36,46 @@ for _ext, _type in {
     mimetypes.add_type(_type, _ext)
 
 
+def _contained_under(root: Path, candidate: Path) -> Path:
+    """Resolve candidate and refuse it if it would sit outside root.
+
+    UUID-keyed dirs and original.{ext} writes are already under root by
+    construction; this is the explicit check CodeQL's path-injection query
+    needs to see, and a last line of defense if a caller ever passed a
+    weird id.
+    """
+    base = root.resolve()
+    resolved = candidate.resolve()
+    # is_relative_to is the readable check; commonpath is the shape CodeQL's
+    # py/path-injection sanitizer recognizes.
+    if (
+        not resolved.is_relative_to(base)
+        or os.path.commonpath((str(base), str(resolved))) != str(base)
+    ):
+        raise ValueError("storage path escapes root")
+    return resolved
+
+
+def _contained_path(root: str, *parts: str) -> Path:
+    base = Path(root)
+    return _contained_under(base, base.joinpath(*parts))
+
+
 def _item_dir(root: str, item_id: UUID) -> Path:
-    return Path(root) / str(item_id)
+    return _contained_path(root, str(item_id))
+
+
+def _safe_upload_suffix(filename: str | None) -> str:
+    """The only piece of an upload filename we persist on disk: a dotted
+    alphanumeric extension, taken from the last path component. Anything
+    else (empty, traversal-shaped, double-dot) becomes .bin — same
+    fallback _save_upload already used for a missing suffix.
+    """
+    suffix = Path(Path(filename or "").name).suffix.lower()
+    matched = _SAFE_SUFFIX.fullmatch(suffix)
+    if matched is None:
+        return ".bin"
+    return matched.group(0)
 
 
 async def _save_upload(dest_dir: Path, upload: UploadFile, max_mb: int) -> str:
@@ -40,9 +85,10 @@ async def _save_upload(dest_dir: Path, upload: UploadFile, max_mb: int) -> str:
     """
     max_bytes = max_mb * 1024 * 1024
 
-    ext = Path(upload.filename or "").suffix or ".bin"
+    dest_dir = dest_dir.resolve()
+    ext = _safe_upload_suffix(upload.filename)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / f"original{ext}"
+    dest_path = _contained_under(dest_dir, dest_dir / f"original{ext}")
 
     written = 0
     try:
@@ -85,7 +131,10 @@ def delete_meeting_files(meeting_id: UUID) -> None:
     itself is deleted. Never raises — a missing/already-gone directory is
     not an error here.
     """
-    shutil.rmtree(meeting_dir(meeting_id), ignore_errors=True)
+    try:
+        shutil.rmtree(meeting_dir(meeting_id), ignore_errors=True)
+    except ValueError:
+        return
 
 
 # --- Knowledge base documents -------------------------------------------
@@ -102,7 +151,10 @@ async def save_kb_upload(document_id: UUID, upload: UploadFile) -> str:
 
 def delete_kb_document_files(document_id: UUID) -> None:
     """Best-effort cleanup of a KB document's stored file. Never raises."""
-    shutil.rmtree(kb_document_dir(document_id), ignore_errors=True)
+    try:
+        shutil.rmtree(kb_document_dir(document_id), ignore_errors=True)
+    except ValueError:
+        return
 
 
 # --- Profile voice enrollment (Phase O) ---------------------------------
@@ -113,7 +165,7 @@ def delete_kb_document_files(document_id: UUID) -> None:
 
 
 def voice_sample_dir(user_id: UUID) -> Path:
-    return Path(get_settings().audio_storage_path) / "voice_samples" / str(user_id)
+    return _contained_path(get_settings().audio_storage_path, "voice_samples", str(user_id))
 
 
 async def save_voice_upload(user_id: UUID, upload: UploadFile) -> str:
@@ -123,7 +175,10 @@ async def save_voice_upload(user_id: UUID, upload: UploadFile) -> str:
 
 def delete_voice_sample_files(user_id: UUID) -> None:
     """Best-effort cleanup of a user's stored voice sample. Never raises."""
-    shutil.rmtree(voice_sample_dir(user_id), ignore_errors=True)
+    try:
+        shutil.rmtree(voice_sample_dir(user_id), ignore_errors=True)
+    except ValueError:
+        return
 
 
 def find_voice_sample_path(user_id: UUID) -> str | None:
@@ -132,7 +187,10 @@ def find_voice_sample_path(user_id: UUID) -> str | None:
     task (corella.enroll_voice) locates it by globbing this same
     convention, same "original.<ext>" pattern _save_upload always writes.
     """
-    matches = sorted(voice_sample_dir(user_id).glob("original.*"))
+    try:
+        matches = sorted(voice_sample_dir(user_id).glob("original.*"))
+    except ValueError:
+        return None
     return str(matches[0]) if matches else None
 
 
