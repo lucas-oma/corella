@@ -272,6 +272,7 @@ export interface Report {
   estimated_cost_usd: number | null;
   action_items: ActionItem[];
   talk_ratio: { me: number; them: number } | null;
+  speaker_share: { label: string; pct: number }[] | null;
 }
 
 export interface TranscriptSegment {

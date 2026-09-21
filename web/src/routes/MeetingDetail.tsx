@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
@@ -13,6 +13,12 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { meetingsListPath, meetingsTabFromState } from "@/lib/meetingsTab";
+import {
+  sliceOpacity,
+  speakerShareFromSegments,
+  talkRatioFromSegments,
+  type SpeakerShareSlice,
+} from "@/lib/speakerShare";
 import { isOrgAdmin } from "@/lib/org";
 import { useConfirm } from "@/lib/confirm";
 
@@ -406,6 +412,7 @@ export default function MeetingDetail() {
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
   const [showCaptured, setShowCaptured] = useState(false);
   const [talkRatio, setTalkRatio] = useState<{ me: number; them: number } | null>(null);
+  const [speakerShare, setSpeakerShare] = useState<SpeakerShareSlice[] | null>(null);
   const [providerConnected, setProviderConnected] = useState<boolean | null>(null);
   const [generatingReport, setGeneratingReport] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
@@ -621,6 +628,7 @@ export default function MeetingDetail() {
       );
       setActionItems(await api.listActionItems(meetingId));
       setTalkRatio(report.talk_ratio);
+      setSpeakerShare(report.speaker_share);
     } catch (err) {
       setReportError(err instanceof ApiError ? err.message : "Couldn't generate the report");
     } finally {
@@ -629,6 +637,15 @@ export default function MeetingDetail() {
   }
 
   const reportReady = Boolean(meeting?.summary);
+  const shownTalkRatio = useMemo(
+    () => talkRatioFromSegments(transcript ?? [], meeting?.capture_mode) ?? talkRatio,
+    [transcript, meeting?.capture_mode, talkRatio],
+  );
+  const shownSpeakerShare = useMemo(
+    () =>
+      speakerShareFromSegments(transcript ?? [], meeting?.capture_mode, user?.id) ?? speakerShare,
+    [transcript, meeting?.capture_mode, user?.id, speakerShare],
+  );
   const liveActionItems = actionItems.filter((item) => item.source !== "report");
   const shownActionItems = reportReady
     ? actionItems.filter((item) => item.source === "report")
@@ -874,14 +891,35 @@ export default function MeetingDetail() {
                   </ul>
                 )}
 
-                {talkRatio && (
+                {shownTalkRatio && (
                   <div className="mt-4">
                     <p className="label mb-1">Talk ratio</p>
                     <div className="flex h-2 overflow-hidden rounded-full bg-border dark:bg-border-dark">
-                      <div className="bg-accent" style={{ width: `${talkRatio.me}%` }} />
+                      <div className="bg-accent" style={{ width: `${shownTalkRatio.me}%` }} />
                     </div>
                     <p className="mt-1 text-xs text-ink-subtle">
-                      Me {talkRatio.me}% · Them {talkRatio.them}%
+                      Me {shownTalkRatio.me}% · Them {shownTalkRatio.them}%
+                    </p>
+                  </div>
+                )}
+
+                {!shownTalkRatio && shownSpeakerShare && shownSpeakerShare.length > 0 && (
+                  <div className="mt-4">
+                    <p className="label mb-1">Talk share</p>
+                    <div className="flex h-2 overflow-hidden rounded-full bg-border dark:bg-border-dark">
+                      {shownSpeakerShare.map((slice, i) => (
+                        <div
+                          key={`${slice.label}-${i}`}
+                          className="bg-accent"
+                          style={{
+                            width: `${slice.pct}%`,
+                            opacity: sliceOpacity(i, shownSpeakerShare.length),
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <p className="mt-1 text-xs text-ink-subtle">
+                      {shownSpeakerShare.map((slice) => `${slice.label} ${slice.pct}%`).join(" · ")}
                     </p>
                   </div>
                 )}

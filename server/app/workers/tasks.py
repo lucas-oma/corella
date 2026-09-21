@@ -22,6 +22,7 @@ from app.models.meeting import (
     ActionItem,
     ActionItemSource,
     ActionItemStatus,
+    CaptureMode,
     Channel,
     Meeting,
     MeetingStatus,
@@ -43,6 +44,7 @@ from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import parse_json_response
 from app.services.copilot.report import ReportError, ReportResult
 from app.services.copilot.report import generate_report as run_generate_report
+from app.services.copilot.talk_ratio import talk_ratio
 from app.services.diarization import events as diar_events
 from app.services.diarization.cluster import (
     SIMILARITY_THRESHOLD,
@@ -69,6 +71,7 @@ from app.services.embeddings.qdrant_store import (
 from app.services.llm.base import LLMError, LLMMessage, complete
 from app.services.llm.pricing import estimate_cost_usd
 from app.services.llm.resolve import resolve_provider
+from app.services.transcript_format import speaker_share
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -1128,6 +1131,16 @@ async def _dispatch_post_call_async(meeting_id: str) -> None:
                 )
             )
         )
+        segments = list(
+            await db.scalars(
+                select(TranscriptSegment)
+                .where(TranscriptSegment.meeting_id == meeting.id)
+                .order_by(TranscriptSegment.start_ms)
+            )
+        )
+        capture_mode = meeting.capture_mode or CaptureMode.OPEN_MIC
+        ratio = talk_ratio(segments)
+        has_channel_data = capture_mode == CaptureMode.MEETING_TAB and ratio["them"] > 0
         result = ReportResult(
             title=meeting.title,
             summary=meeting.summary or "",
@@ -1137,7 +1150,8 @@ async def _dispatch_post_call_async(meeting_id: str) -> None:
             coach_score=meeting.coach_score,
             estimated_cost_usd=meeting.estimated_cost_usd,
             action_items=items,
-            talk_ratio=None,
+            talk_ratio=ratio if has_channel_data else None,
+            speaker_share=speaker_share(segments, owner_id=meeting.owner_id, capture_mode=capture_mode),
         )
         await dispatch_post_call(db, meeting, result)
         await db.commit()

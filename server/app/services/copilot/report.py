@@ -12,7 +12,7 @@ from app.services.copilot.talk_ratio import talk_ratio
 from app.services.llm.base import LLMError, LLMMessage, complete
 from app.services.llm.pricing import estimate_cost_usd
 from app.services.llm.resolve import ResolvedProvider
-from app.services.transcript_format import format_transcript
+from app.services.transcript_format import format_transcript, speaker_share
 
 _SYSTEM_PROMPT = """You are summarizing a completed call transcript. Respond with ONLY a single JSON object, no other text, in exactly this shape:
 
@@ -42,7 +42,8 @@ class ReportResult:
     coach_score: int | None
     estimated_cost_usd: float | None
     action_items: list[ActionItem]  # report digest only (source=report), after replace
-    talk_ratio: dict[str, int] | None  # None if this meeting has no Me/Them channel data
+    talk_ratio: dict[str, int] | None  # None unless meeting_tab with them audio
+    speaker_share: list[dict[str, str | int]] | None  # open_mic / upload; None on meeting_tab
 
 
 async def generate_report(db: AsyncSession, meeting: Meeting, provider: ResolvedProvider) -> ReportResult:
@@ -64,6 +65,7 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
     # Me/Them talk ratio is only honest when a second audio pipe existed.
     # Open-mic / upload is all one channel — 100% Me would be a lie.
     has_channel_data = capture_mode == CaptureMode.MEETING_TAB and ratio["them"] > 0
+    share = speaker_share(segments, owner_id=meeting.owner_id, capture_mode=capture_mode)
 
     live_items = list(
         await db.scalars(
@@ -76,6 +78,8 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
     user_content = f"Full transcript:\n{transcript_text}"
     if has_channel_data:
         user_content += f"\n\nTalk ratio — Me: {ratio['me']}%, Them: {ratio['them']}%"
+    elif share:
+        user_content += "\n\nTalk share — " + ", ".join(f"{row['label']}: {row['pct']}%" for row in share)
     if live_items:
         user_content += (
             "\n\nAction items captured live during the call — deduplicate and summarize "
@@ -172,4 +176,5 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
         estimated_cost_usd=meeting.estimated_cost_usd,
         action_items=digest,
         talk_ratio=ratio if has_channel_data else None,
+        speaker_share=share,
     )

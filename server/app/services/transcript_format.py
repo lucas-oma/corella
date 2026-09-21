@@ -30,13 +30,13 @@ def _is_anonymous(label: str) -> bool:
     return label in {"Unknown", "Them", "Speaker"} or bool(_ANON_RE.match(label))
 
 
-def format_transcript(
+def display_labels(
     segments: Sequence[TranscriptSegment],
     *,
     owner_id: UUID,
     capture_mode: CaptureMode,
-) -> str:
-    """One `Name: text` line per segment, in the given order.
+) -> list[str]:
+    """Stable per-line names used by the transcript string and speaker share.
 
     The owner's enrolled voice is always Me. A meeting_tab mic line with
     no speaker yet is also Me (that pipe is known). Everyone else who
@@ -47,7 +47,7 @@ def format_transcript(
     """
     aliases: dict[object, str] = {}
     next_n = 1
-    lines: list[str] = []
+    labels: list[str] = []
     for segment in segments:
         raw = _raw_label(segment, owner_id, capture_mode)
         if raw == "Me":
@@ -60,5 +60,47 @@ def format_transcript(
                 aliases[key] = f"Speaker {next_n}"
                 next_n += 1
             display = aliases[key]
-        lines.append(f"{display}: {segment.text}")
-    return "\n".join(lines)
+        labels.append(display)
+    return labels
+
+
+def format_transcript(
+    segments: Sequence[TranscriptSegment],
+    *,
+    owner_id: UUID,
+    capture_mode: CaptureMode,
+) -> str:
+    """One `Name: text` line per segment, in the given order."""
+    labels = display_labels(segments, owner_id=owner_id, capture_mode=capture_mode)
+    return "\n".join(f"{label}: {segment.text}" for label, segment in zip(labels, segments, strict=True))
+
+
+def speaker_share(
+    segments: Sequence[TranscriptSegment],
+    *,
+    owner_id: UUID,
+    capture_mode: CaptureMode,
+) -> list[dict[str, str | int]] | None:
+    """Open-mic / upload talk share by display name. None for meeting_tab
+    (Me/Them channel ratio is the honest metric there) or no speech.
+    Percents are rounded to integers and forced to sum to 100.
+    """
+    if capture_mode == CaptureMode.MEETING_TAB:
+        return None
+    labels = display_labels(segments, owner_id=owner_id, capture_mode=capture_mode)
+    ms_by_label: dict[str, int] = {}
+    order: list[str] = []
+    for segment, label in zip(segments, labels, strict=True):
+        duration = max(0, segment.end_ms - segment.start_ms)
+        if duration <= 0:
+            continue
+        if label not in ms_by_label:
+            order.append(label)
+            ms_by_label[label] = 0
+        ms_by_label[label] += duration
+    total = sum(ms_by_label.values())
+    if total == 0 or not order:
+        return None
+    pcts = [round(ms_by_label[label] / total * 100) for label in order]
+    pcts[-1] += 100 - sum(pcts)
+    return [{"label": label, "pct": pct} for label, pct in zip(order, pcts, strict=True) if pct > 0]
