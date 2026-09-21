@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
 import CallTypeModal from "@/components/CallTypeModal";
@@ -7,6 +7,12 @@ import PageHeader from "@/components/PageHeader";
 import { ApiError, api, type GroupMeeting, type Meeting, type MeetingSearchResult } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
+import {
+  meetingDetailLocation,
+  parseMeetingsTab,
+  writeMeetingsTab,
+  type MeetingsTab,
+} from "@/lib/meetingsTab";
 import { isOrgAdmin } from "@/lib/org";
 
 const DASHBOARD_POLL_INTERVAL_MS = 4000;
@@ -51,6 +57,7 @@ function titleFromFilename(name: string): string {
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -62,7 +69,12 @@ export default function Dashboard() {
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<MeetingSearchResult[] | null>(null);
   const [searching, setSearching] = useState(false);
-  const [view, setView] = useState<"mine" | "group" | "all">("mine");
+  const view = parseMeetingsTab(searchParams.get("tab"));
+
+  function setView(tab: MeetingsTab) {
+    writeMeetingsTab(tab);
+    setSearchParams(tab === "mine" ? {} : { tab }, { replace: true });
+  }
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[] | null>(null);
   const [allMeetings, setAllMeetings] = useState<GroupMeeting[] | null>(null);
   const [groupFilter, setGroupFilter] = useState("");
@@ -74,6 +86,18 @@ export default function Dashboard() {
   const [pendingAction, setPendingAction] = useState<"live" | "upload" | null>(null);
   const isAdmin = isOrgAdmin(user);
   const inGroup = Boolean(user?.group_ids?.length);
+
+  useEffect(() => {
+    if (view === "all" && !isAdmin) {
+      setView("mine");
+      return;
+    }
+    if (view === "group" && !inGroup) {
+      setView("mine");
+      return;
+    }
+    writeMeetingsTab(view);
+  }, [view, isAdmin, inGroup]);
 
   // Not semantic — an instant client-side filter over what's already
   // fetched, deliberately: unlike Mine/All (real search over transcript
@@ -182,7 +206,7 @@ export default function Dashboard() {
     try {
       meeting = await api.createMeeting(titleFromFilename(file.name), pendingCallTypeId.current);
       await api.uploadMeetingAudio(meeting.id, file);
-      navigate(`/meetings/${meeting.id}`);
+      navigate(meetingDetailLocation(meeting.id, view));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Upload failed");
       // Don't leave a stuck, audio-less "recording" meeting behind just
@@ -200,7 +224,7 @@ export default function Dashboard() {
     setStarting(true);
     try {
       const meeting = await api.createMeeting("Live recording", callTypeId);
-      navigate(`/meetings/${meeting.id}/live`);
+      navigate({ ...meetingDetailLocation(meeting.id, view), pathname: `/meetings/${meeting.id}/live` });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't start a live session");
     } finally {
@@ -372,7 +396,7 @@ export default function Dashboard() {
               {filteredGroupMeetings.map((meeting) => (
                 <li key={meeting.id}>
                   <Link
-                    to={`/meetings/${meeting.id}`}
+                    to={meetingDetailLocation(meeting.id, view)}
                     className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
                   >
                     <div>
@@ -409,7 +433,7 @@ export default function Dashboard() {
               {searchResults.map((result) => (
                 <li key={result.meeting_id}>
                   <Link
-                    to={`/meetings/${result.meeting_id}?t=${result.start_ms}`}
+                    to={meetingDetailLocation(result.meeting_id, view, `?t=${result.start_ms}`)}
                     className="block px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
                   >
                     <div className="flex items-center justify-between">
@@ -444,7 +468,7 @@ export default function Dashboard() {
               {allMeetings.map((meeting) => (
                 <li key={meeting.id}>
                   <Link
-                    to={`/meetings/${meeting.id}`}
+                    to={meetingDetailLocation(meeting.id, view)}
                     className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
                   >
                     <div>
@@ -486,7 +510,7 @@ export default function Dashboard() {
               {meetings.map((meeting) => (
                 <li key={meeting.id}>
                   <Link
-                    to={`/meetings/${meeting.id}`}
+                    to={meetingDetailLocation(meeting.id, view)}
                     className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
                   >
                     <div>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
 import {
@@ -12,6 +12,7 @@ import {
   type TranscriptSegment,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { meetingsListPath, meetingsTabFromState } from "@/lib/meetingsTab";
 import { isOrgAdmin } from "@/lib/org";
 import { useConfirm } from "@/lib/confirm";
 
@@ -302,6 +303,7 @@ function CoachScoreTimeline({
 export default function MeetingDetail() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
   const confirm = useConfirm();
   const [searchParams] = useSearchParams();
@@ -350,7 +352,7 @@ export default function MeetingDetail() {
     setDeleting(true);
     try {
       await api.deleteMeeting(meetingId);
-      navigate("/dashboard");
+      navigate(meetingsListPath(meetingsTabFromState(location.state)));
     } finally {
       setDeleting(false);
     }
@@ -592,7 +594,10 @@ export default function MeetingDetail() {
   return (
     <AppShell>
       <div className="flex items-center justify-between">
-        <Link to="/dashboard" className="text-sm text-ink-muted hover:text-ink dark:hover:text-ink-inverted">
+        <Link
+          to={meetingsListPath(meetingsTabFromState(location.state))}
+          className="text-sm text-ink-muted hover:text-ink dark:hover:text-ink-inverted"
+        >
           ← Meetings
         </Link>
         {meeting && isOwner && (

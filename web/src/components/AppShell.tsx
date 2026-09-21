@@ -8,6 +8,7 @@ import UserAvatar from "@/components/UserAvatar";
 import { ApiError, api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
+import { meetingsListPath } from "@/lib/meetingsTab";
 import { activeMembership, isOrgAdmin } from "@/lib/org";
 import { useAuthConfig } from "@/lib/useAuthConfig";
 
@@ -73,7 +74,7 @@ export default function AppShell({
     <div className={`flex flex-col ${fill ? "h-dvh overflow-hidden" : "min-h-screen"}`}>
       <header className="sticky top-0 z-40 shrink-0 border-b border-border bg-surface dark:border-border-dark dark:bg-surface-dark">
         <div className="mx-auto flex max-w-5xl items-center px-4 py-3 md:px-6 md:py-4">
-          <Link to="/dashboard" aria-label="Corella" className="flex shrink-0 items-end gap-1.5">
+          <Link to={meetingsListPath()} aria-label="Corella" className="flex shrink-0 items-end gap-1.5">
             <img src={logoLight} alt="" className="h-7 dark:hidden" />
             <img src={logoDark} alt="" className="hidden h-7 dark:block" />
             <span className="font-serif text-2xl leading-none text-ink dark:text-ink-inverted">
@@ -84,7 +85,11 @@ export default function AppShell({
             {NAV.map((item) => {
               const active = location.pathname.startsWith(item.to);
               return (
-                <Link key={item.to} to={item.to} className={navClass(active)}>
+                <Link
+                  key={item.to}
+                  to={item.to === "/dashboard" ? meetingsListPath() : item.to}
+                  className={navClass(active)}
+                >
                   {item.label}
                 </Link>
               );
@@ -236,7 +241,7 @@ function AccountMenu() {
               <Link
                 key={item.to}
                 role="menuitem"
-                to={item.to}
+                to={item.to === "/dashboard" ? meetingsListPath() : item.to}
                 onClick={() => setOpen(false)}
                 className={menuItem(location.pathname.startsWith(item.to))}
               >
