@@ -8,7 +8,7 @@ How to integrate an external system with Corella. There are **three** integratio
 
 Interactive request/response schemas for every HTTP route (including browser-only ones) live at `/docs` (FastAPI's Swagger UI). This document is the integration contract: which credentials work where, the WebSocket protocol, hook payloads, and every quirk that the schema cannot show.
 
-Base URL is your instance's API origin. In local Docker that is `http://localhost:8090` (host port remap in `docker-compose.yml`; the container itself still listens on 8000). Unauthenticated liveness: `GET /api/health` → `{"status":"ok"}`.
+Base URL is your instance's API origin. In local Docker that is `http://localhost:8090` by default (`API_PORT` in `.env`; host-side remap in `docker-compose.yml` — the container itself still listens on 8000). Unauthenticated liveness: `GET /api/health` → `{"status":"ok"}`.
 
 ---
 
@@ -303,7 +303,7 @@ On **every** pre-call and post-call, **always**, after custom headers are merged
 
 | Header | Value |
 |---|---|
-| `X-Corella-App-Url` | This instance's public URL (`public_app_url`, default `http://localhost:8080`) — identifies *which* deployment the request came from. Not the same as `PUBLIC_API_URL` (that's which API the browser talks to). |
+| `X-Corella-App-Url` | This instance's public URL (`public_app_url`, default `http://localhost:8080` / `WEB_PORT`) — identifies *which* deployment the request came from. Not the same as `PUBLIC_API_URL` (that's which API the browser talks to). |
 | `X-Corella-Meeting-Id` | The meeting's UUID |
 | `X-Corella-User-Id` | The meeting **owner's** user UUID (not whoever triggered create, which is the same person when using their own API key) |
 | `X-Corella-Org-Id` | The meeting's organization UUID |
@@ -443,7 +443,7 @@ Build the client once first:
 cd packages/corella-live && npm install && npm run build
 ```
 
-1. Create an API key (Settings → API keys) and paste it in, with the API base URL (`http://localhost:8090` in local Docker).
+1. Create an API key (Settings → API keys) and paste it in, with the API base URL (`http://localhost:8090` in local Docker, or whatever `API_PORT` you set).
 2. **Start** — proxied `POST /api/meetings`, then `CorellaLive.connect` + `startMic()`.
 3. Speak — transcript (already labeled) and (if an LLM is connected) coaching update live.
 4. **Stop** — finalizes like a real recording (auto-report, post-call hook if configured).

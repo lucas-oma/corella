@@ -104,8 +104,8 @@ cp .env.example .env   # fill in JWT_SECRET at minimum
 docker compose up --build
 ```
 
-- Web UI: http://localhost:8080
-- API: http://localhost:8090 (docs at `/docs`)
+- Web UI: http://localhost:8080 (`WEB_PORT`)
+- API: http://localhost:8090 (`API_PORT`; docs at `/docs`)
 
 If you have an NVIDIA GPU + the NVIDIA Container Toolkit installed, layer on the GPU override for faster/larger transcription and diarization models:
 
@@ -126,7 +126,7 @@ Migrations run automatically on `api` startup. `postgres`/`redis`/`qdrant` don't
 
 See [`.env.example`](.env.example) for the full, documented list. Highlights:
 
-- **Core**: `JWT_SECRET` (required), `CORS_ORIGINS`, `ENVIRONMENT`, `PUBLIC_APP_URL` (identifies this instance in pre/post call-type API hooks — see [API access](#api-access)).
+- **Core**: `JWT_SECRET` (required), `CORS_ORIGINS`, `ENVIRONMENT`, `API_PORT` / `WEB_PORT` (host-side published ports in `docker-compose.yml`, default 8090 / 8080), `PUBLIC_APP_URL` (identifies this instance in pre/post call-type API hooks — see [API access](#api-access); must match the web origin). Changing `API_PORT` without setting `PUBLIC_API_URL` is enough — the web image defaults to `http://localhost:${API_PORT}`. Changing `WEB_PORT` means updating `CORS_ORIGINS` and `PUBLIC_APP_URL` to the new origin.
 - **Access control**: `ALLOW_PUBLIC_REGISTRATION`, `MAX_ORGS_PER_USER`, `INVITE_EXPIRE_DAYS`, `ADMIN_EMAIL`/`ADMIN_PASSWORD` (bootstrap super_admin, see [Access control](#access-control) below).
 - **Data stores**: `DATABASE_URL`, `REDIS_URL`, `QDRANT_URL` — defaults match `docker-compose.yml`'s service names, only change these if you're pointing at externally-hosted stores.
 - **Speech**: `HF_TOKEN` (diarization, see below), `WHISPER_MODEL`/`WHISPER_COMPUTE_TYPE`, optional `DEEPGRAM_API_KEY`/`DEFAULT_MODEL_DEEPGRAM`.
