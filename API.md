@@ -319,7 +319,8 @@ Body tokens are `{{corella.KEY}}` only — unprefixed `{{KEY}}` is left as-is. O
 | `{{corella.title}}`, `{{corella.call_type}}`, `{{corella.status}}` | Basics (`call_type` is the type's **name** string, or JSON `null` if untyped) |
 | `{{corella.capture_mode}}`, `{{corella.capture_app}}` | How audio arrived: `open_mic` / `meeting_tab` / `upload`, and `meet` / `teams` / `zoom` / `other` / JSON `null` |
 | `{{corella.summary}}`, `{{corella.key_topics}}`, `{{corella.sentiment}}`, `{{corella.notable_quotes}}` | Report content |
-| `{{corella.coach_score}}`, `{{corella.estimated_cost_usd}}`, `{{corella.talk_ratio}}` | Report metrics (`talk_ratio` is `{"me": <pct>, "them": <pct>}`) |
+| `{{corella.coach_score}}`, `{{corella.estimated_cost_usd}}`, `{{corella.talk_ratio}}` | Report metrics (`talk_ratio` is `{"me": <pct>, "them": <pct>}` on `meeting_tab` only; JSON `null` otherwise) |
+| `{{corella.speaker_share}}` | Open-mic / upload talk share by display name: `[{"label": "Speaker 1", "pct": 40}, …]` (sums to 100). JSON `null` on `meeting_tab` |
 | `{{corella.action_items}}` | Report digest only (`source=report`): `[{"text": "...", "status": "open"\|"done"}, ...]` — not the live-capture pile |
 | `{{corella.copilot_insights}}` | `[{"at_ms": 12000, "suggestion": "...", "blockers": [...], "coach_score": 74}, ...]` — same timeline `GET /insights` returns |
 | `{{corella.transcript}}` | Full transcript as `"Me: ...\nSpeaker 1: ..."` — owner's enrolled voice (or unlabeled `meeting_tab` mic) is `Me`; other people are names or `Speaker N`. Not the raw me/them channel. |
@@ -339,7 +340,8 @@ Pre-call templates use the same escaping rules on their smaller set.
   "capture_mode": "open_mic", "capture_app": null, "status": "ready",
   "summary": "...", "key_topics": ["Pricing", "Timeline"], "sentiment": "Positive",
   "notable_quotes": ["..."],
-  "coach_score": 82, "estimated_cost_usd": 0.0341, "talk_ratio": {"me": 58, "them": 42},
+  "coach_score": 82, "estimated_cost_usd": 0.0341, "talk_ratio": null,
+  "speaker_share": [{"label": "Me", "pct": 55}, {"label": "Speaker 1", "pct": 45}],
   "action_items": [{"text": "Send proposal by Friday", "status": "open"}],
   "copilot_insights": [
     {"at_ms": 42000, "suggestion": "Address the pricing objection directly", "blockers": ["Pricing concern raised"], "coach_score": 71}

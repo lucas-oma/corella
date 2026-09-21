@@ -342,6 +342,7 @@ async def build_full_payload(db: AsyncSession, meeting: Meeting, report: ReportR
         "coach_score": report.coach_score,
         "estimated_cost_usd": report.estimated_cost_usd,
         "talk_ratio": report.talk_ratio,
+        "speaker_share": report.speaker_share,
         "action_items": [{"text": item.text, "status": item.status.value} for item in report.action_items],
         "copilot_insights": await _build_copilot_insights(db, meeting.id),
         "transcript": await _build_transcript_text(db, meeting),
@@ -358,7 +359,7 @@ async def render_template(db: AsyncSession, template: str, meeting: Meeting, rep
     meeting_id, owner_id, owner_name, title, call_type, capture_mode,
     capture_app, status, summary,
     key_topics, sentiment, notable_quotes, coach_score, estimated_cost_usd,
-    talk_ratio, action_items (now [{text, status}]), copilot_insights,
+    talk_ratio, speaker_share, action_items (now [{text, status}]), copilot_insights,
     transcript, created_at, started_at, ended_at, duration_seconds, and
     full_payload — the entire build_full_payload() dict, for a template
     that just wants everything without ticking the separate

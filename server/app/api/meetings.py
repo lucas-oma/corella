@@ -490,6 +490,7 @@ async def create_meeting_report(
         estimated_cost_usd=result.estimated_cost_usd,
         action_items=[ActionItemRead.model_validate(item) for item in result.action_items],
         talk_ratio=result.talk_ratio,
+        speaker_share=result.speaker_share,
     )
 
 

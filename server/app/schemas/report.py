@@ -28,3 +28,4 @@ class ReportResponse(BaseModel):
     estimated_cost_usd: float | None
     action_items: list[ActionItemRead]
     talk_ratio: dict[str, int] | None
+    speaker_share: list[dict[str, str | int]] | None

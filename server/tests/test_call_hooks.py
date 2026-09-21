@@ -44,6 +44,7 @@ def _report(**overrides) -> ReportResult:
         estimated_cost_usd=0.01,
         action_items=[],
         talk_ratio={"me": 60, "them": 40},
+        speaker_share=None,
     )
     defaults.update(overrides)
     return ReportResult(**defaults)
@@ -155,6 +156,24 @@ async def test_array_and_number_placeholders_render_as_real_json_types(db, make_
 
 
 @pytest.mark.asyncio
+async def test_speaker_share_placeholder_renders_as_json(db, make_user):
+    user = await make_user()
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="Discovery call", status=MeetingStatus.READY)
+    db.add(meeting)
+    await db.commit()
+    meeting = await db.get(Meeting, meeting.id)
+
+    share = [{"label": "Me", "pct": 60}, {"label": "Speaker 1", "pct": 40}]
+    rendered = await render_template(
+        db,
+        '{"speaker_share": {{corella.speaker_share}}}',
+        meeting,
+        _report(talk_ratio=None, speaker_share=share),
+    )
+    assert json.loads(rendered)["speaker_share"] == share
+
+
+@pytest.mark.asyncio
 async def test_transcript_placeholder_includes_real_segments(db, make_user):
     from app.models.meeting import TranscriptSegment
 
@@ -252,6 +271,7 @@ async def test_full_payload_includes_every_field(db, make_user):
     assert payload["notable_quotes"] == ["A real quote."]
     assert payload["estimated_cost_usd"] == 0.0123
     assert payload["talk_ratio"] == {"me": 55, "them": 45}
+    assert payload["speaker_share"] is None
     assert payload["action_items"] == [{"text": "Follow up", "status": "open"}]
     assert payload["copilot_insights"] == [
         {"at_ms": 500, "suggestion": "Mention the discount", "blockers": ["Price"], "coach_score": 70}

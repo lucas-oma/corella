@@ -85,6 +85,7 @@ def _report(**overrides) -> ReportResult:
         estimated_cost_usd=0.01,
         action_items=[],
         talk_ratio={"me": 50, "them": 50},
+        speaker_share=None,
     )
     defaults.update(overrides)
     return ReportResult(**defaults)
@@ -268,7 +269,7 @@ async def test_post_call_special_mode_sends_full_payload(db, make_user, receiver
     body = json.loads(received[0]["body"])
     assert body["summary"] == "Full payload real test."
     assert set(body.keys()) >= {
-        "meeting_id", "transcript", "copilot_insights", "talk_ratio", "estimated_cost_usd", "action_items",
+        "meeting_id", "transcript", "copilot_insights", "talk_ratio", "speaker_share", "estimated_cost_usd", "action_items",
     }
 
 
