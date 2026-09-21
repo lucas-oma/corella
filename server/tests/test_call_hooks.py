@@ -13,7 +13,7 @@ import pytest
 from app.core.config import get_settings
 from app.core.security import encrypt_secret
 from app.models.app_secret import AppSecret
-from app.models.meeting import ActionItemStatus, Channel, Meeting, MeetingStatus
+from app.models.meeting import ActionItemStatus, CaptureApp, Channel, Meeting, MeetingStatus
 from app.services.admin.call_hooks import (
     build_full_payload,
     dispatch_pre_call,
@@ -173,7 +173,36 @@ async def test_transcript_placeholder_includes_real_segments(db, make_user):
     rendered = await render_template(db, '{"transcript": "{{corella.transcript}}"}', meeting, _report())
     parsed = json.loads(rendered)
     assert "Hello there." in parsed["transcript"]
-    assert "Me:" in parsed["transcript"]
+    assert "Speaker 1:" in parsed["transcript"]
+    assert "Me:" not in parsed["transcript"]
+
+
+@pytest.mark.asyncio
+async def test_transcript_meeting_tab_unlabeled_mic_is_me(db, make_user):
+    from app.models.meeting import CaptureMode, TranscriptSegment
+
+    user = await make_user()
+    meeting = Meeting(
+        owner_id=user.id,
+        organization_id=user.active_organization_id,
+        title="Discovery call",
+        status=MeetingStatus.READY,
+        capture_mode=CaptureMode.MEETING_TAB,
+        capture_app=CaptureApp.MEET,
+    )
+    db.add(meeting)
+    await db.commit()
+    db.add(
+        TranscriptSegment(
+            meeting_id=meeting.id, channel=Channel.ME, start_ms=0, end_ms=1000, text="Hello there."
+        )
+    )
+    await db.commit()
+    meeting = await db.get(Meeting, meeting.id)
+
+    rendered = await render_template(db, '{"transcript": "{{corella.transcript}}"}', meeting, _report())
+    parsed = json.loads(rendered)
+    assert parsed["transcript"].startswith("Me: Hello there.")
 
 
 @pytest.mark.asyncio
@@ -288,13 +317,14 @@ def test_render_pre_call_template_substitutes_meeting_level_fields():
     meeting.owner = type("Owner", (), {"full_name": "Jane Doe"})()
 
     rendered = render_pre_call_template(
-        '{"lookup_name": "{{corella.owner_name}}", "meeting": "{{corella.meeting_id}}", "type": "{{corella.call_type}}"}',
+        '{"lookup_name": "{{corella.owner_name}}", "meeting": "{{corella.meeting_id}}", "type": "{{corella.call_type}}", "capture": "{{corella.capture_mode}}"}',
         meeting,
     )
     parsed = json.loads(rendered)
     assert parsed["lookup_name"] == "Jane Doe"
     assert parsed["meeting"] == str(meeting.id)
     assert parsed["type"] == "Sales"
+    assert parsed["capture"] == "open_mic"
 
 
 @pytest.mark.asyncio

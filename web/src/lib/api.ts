@@ -210,11 +210,16 @@ export interface AppSecret {
   updated_at: string;
 }
 
+export type CaptureMode = "open_mic" | "meeting_tab" | "upload";
+export type CaptureApp = "meet" | "teams" | "zoom" | "other";
+
 export interface Meeting {
   id: string;
   title: string;
   status: "recording" | "processing" | "ready" | "failed";
   call_type: CallTypeOption | null;
+  capture_mode: CaptureMode;
+  capture_app: CaptureApp | null;
   started_at: string | null;
   ended_at: string | null;
   duration_seconds: number | null;
@@ -254,6 +259,7 @@ export interface ActionItem {
   id: string;
   text: string;
   status: "open" | "done";
+  source: "live" | "report";
 }
 
 export interface Report {
@@ -448,10 +454,19 @@ export const api = {
     request<MeetingSearchResult[]>(`/api/meetings/search/org?q=${encodeURIComponent(query)}`),
   searchAllMeetings: (query: string) =>
     request<MeetingSearchResult[]>(`/api/meetings/search/all?q=${encodeURIComponent(query)}`),
-  createMeeting: (title: string, callTypeId: string | null = null) =>
+  createMeeting: (
+    title: string,
+    callTypeId: string | null = null,
+    capture?: { mode?: CaptureMode; app?: CaptureApp | null },
+  ) =>
     request<Meeting>("/api/meetings", {
       method: "POST",
-      body: JSON.stringify({ title, call_type_id: callTypeId }),
+      body: JSON.stringify({
+        title,
+        call_type_id: callTypeId,
+        capture_mode: capture?.mode ?? "open_mic",
+        capture_app: capture?.app ?? null,
+      }),
     }),
   getMeeting: (id: string) => request<Meeting>(`/api/meetings/${id}`),
   uploadMeetingAudio: (id: string, file: File) => {

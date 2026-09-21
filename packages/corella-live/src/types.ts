@@ -40,11 +40,17 @@ export interface ApiAuthOptions {
   apiKey: string;
 }
 
+export type CaptureMode = "open_mic" | "meeting_tab" | "upload";
+export type CaptureApp = "meet" | "teams" | "zoom" | "other";
+
 export interface CreateMeetingOptions {
   apiBase: string;
   apiKey: string;
   title?: string;
   callTypeId?: string | null;
+  /** How audio arrives. Defaults to open_mic on the server if omitted. */
+  captureMode?: CaptureMode;
+  captureApp?: CaptureApp | null;
 }
 
 export interface ConnectOptions {

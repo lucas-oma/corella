@@ -13,12 +13,11 @@ from app.core.config import get_settings
 from app.core.security import decrypt_secret
 from app.models.app_secret import AppSecret
 from app.models.hook_log import HookLog
-from app.models.meeting import Channel, CopilotInsight, Meeting, TranscriptSegment
+from app.models.meeting import CaptureMode, CopilotInsight, Meeting, TranscriptSegment
 from app.services.copilot.report import ReportResult
+from app.services.transcript_format import format_transcript
 
 logger = logging.getLogger(__name__)
-
-_LABELS = {Channel.ME: "Me", Channel.THEM: "Them"}
 
 # Matches {{secret.NAME}} — NAME is the same character class
 # app/schemas/app_secret.py:SECRET_NAME_RE accepts.
@@ -282,15 +281,19 @@ def _apply_placeholders(template: str, values: dict) -> str:
     return rendered
 
 
-async def _build_transcript_text(db: AsyncSession, meeting_id: UUID) -> str:
+async def _build_transcript_text(db: AsyncSession, meeting: Meeting) -> str:
     segments = list(
         await db.scalars(
             select(TranscriptSegment)
-            .where(TranscriptSegment.meeting_id == meeting_id)
+            .where(TranscriptSegment.meeting_id == meeting.id)
             .order_by(TranscriptSegment.start_ms)
         )
     )
-    return "\n".join(f"{_LABELS.get(s.channel, 'Speaker')}: {s.text}" for s in segments)
+    return format_transcript(
+        segments,
+        owner_id=meeting.owner_id,
+        capture_mode=meeting.capture_mode or CaptureMode.OPEN_MIC,
+    )
 
 
 async def _build_copilot_insights(db: AsyncSession, meeting_id: UUID) -> list[dict]:
@@ -329,6 +332,8 @@ async def build_full_payload(db: AsyncSession, meeting: Meeting, report: ReportR
         "owner_name": meeting.owner_name,
         "title": report.title,
         "call_type": meeting.call_type.name if meeting.call_type else None,
+        "capture_mode": (meeting.capture_mode or CaptureMode.OPEN_MIC).value,
+        "capture_app": meeting.capture_app.value if meeting.capture_app else None,
         "status": meeting.status.value,
         "summary": report.summary,
         "key_topics": report.key_topics,
@@ -339,7 +344,7 @@ async def build_full_payload(db: AsyncSession, meeting: Meeting, report: ReportR
         "talk_ratio": report.talk_ratio,
         "action_items": [{"text": item.text, "status": item.status.value} for item in report.action_items],
         "copilot_insights": await _build_copilot_insights(db, meeting.id),
-        "transcript": await _build_transcript_text(db, meeting.id),
+        "transcript": await _build_transcript_text(db, meeting),
         "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
         "started_at": meeting.started_at.isoformat() if meeting.started_at else None,
         "ended_at": meeting.ended_at.isoformat() if meeting.ended_at else None,
@@ -350,7 +355,8 @@ async def build_full_payload(db: AsyncSession, meeting: Meeting, report: ReportR
 async def render_template(db: AsyncSession, template: str, meeting: Meeting, report: ReportResult) -> str:
     """Substitutes {{corella.KEY}} tokens in an admin-authored call-hook
     body template with real meeting/report data. Keys:
-    meeting_id, owner_id, owner_name, title, call_type, status, summary,
+    meeting_id, owner_id, owner_name, title, call_type, capture_mode,
+    capture_app, status, summary,
     key_topics, sentiment, notable_quotes, coach_score, estimated_cost_usd,
     talk_ratio, action_items (now [{text, status}]), copilot_insights,
     transcript, created_at, started_at, ended_at, duration_seconds, and
@@ -366,9 +372,9 @@ def render_pre_call_template(template: str, meeting: Meeting) -> str:
     """Substitutes {{corella.KEY}} tokens in an admin-authored pre-call
     body template — a much smaller placeholder set than render_template's
     (post-call) one, since a pre-call fires before any transcript/report
-    exists: meeting_id, owner_id, owner_name, title, call_type, status,
-    created_at only. No DB access needed (unlike render_template), so
-    this isn't async.
+    exists: meeting_id, owner_id, owner_name, title, call_type,
+    capture_mode, capture_app, status, created_at only. No DB access
+    needed (unlike render_template), so this isn't async.
     """
     values = {
         "meeting_id": str(meeting.id),
@@ -376,6 +382,8 @@ def render_pre_call_template(template: str, meeting: Meeting) -> str:
         "owner_name": meeting.owner_name,
         "title": meeting.title,
         "call_type": meeting.call_type.name if meeting.call_type else None,
+        "capture_mode": (meeting.capture_mode or CaptureMode.OPEN_MIC).value,
+        "capture_app": meeting.capture_app.value if meeting.capture_app else None,
         "status": meeting.status.value,
         "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
     }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
@@ -131,6 +131,66 @@ function HookLogBlock({ label, text }: { label: string; text: string }) {
   );
 }
 
+function CapturedActionItemsDialog({
+  open,
+  items,
+  onClose,
+}: {
+  open: boolean;
+  items: ActionItem[];
+  onClose: () => void;
+}) {
+  const titleId = useId();
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    closeRef.current?.focus();
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="card flex max-h-[min(32rem,90vh)] w-full max-w-lg flex-col p-6"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h2 id={titleId} className="font-serif text-lg text-ink dark:text-ink-inverted">
+          Captured during the call
+        </h2>
+        <p className="mt-1 text-sm text-ink-muted">
+          Raw live-copilot items, including duplicates. The report list above is the
+          deduped digest.
+        </p>
+        <ul className="mt-4 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+          {items.map((item) => (
+            <li key={item.id} className="text-sm text-ink dark:text-ink-inverted">
+              {item.text}
+            </li>
+          ))}
+        </ul>
+        <div className="mt-5 flex justify-end">
+          <button ref={closeRef} type="button" onClick={onClose} className="btn-secondary">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** A resolved identity linked to an enrolled account (segment.linked_user_id)
  * is viewer-relative: the account owner sees "Me" here (first person, their
  * own meeting), anyone else with legitimate access (an admin, per Phase J —
@@ -167,6 +227,19 @@ function speakerLabel(
     return diarizationCatchingUp ? "Identifying…" : "Unknown";
   }
   return null;
+}
+
+const CAPTURE_APP_LABEL: Record<string, string> = {
+  meet: "Google Meet",
+  teams: "Teams",
+  zoom: "Zoom",
+  other: "Browser meeting",
+};
+
+function captureBadge(mode: string | undefined, app: string | null | undefined): string {
+  if (mode === "upload") return "Upload";
+  if (mode === "meeting_tab") return CAPTURE_APP_LABEL[app ?? ""] ?? "Browser meeting";
+  return "Open mic";
 }
 
 /** Any live-recorded (me/them) segment whose speaker hasn't been resolved
@@ -331,6 +404,7 @@ export default function MeetingDetail() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
+  const [showCaptured, setShowCaptured] = useState(false);
   const [talkRatio, setTalkRatio] = useState<{ me: number; them: number } | null>(null);
   const [providerConnected, setProviderConnected] = useState<boolean | null>(null);
   const [generatingReport, setGeneratingReport] = useState(false);
@@ -494,7 +568,7 @@ export default function MeetingDetail() {
       let items = await api.listActionItems(meetingId);
       if (cancelled) return;
       setActionItems(items);
-      if (meeting.summary || items.length > 0) return;
+      if (meeting.summary) return;
       setReportPending(true);
       while (!cancelled && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, REPORT_POLL_INTERVAL_MS));
@@ -502,7 +576,7 @@ export default function MeetingDetail() {
         const [fresh, freshItems] = await Promise.all([api.getMeeting(meetingId), api.listActionItems(meetingId)]);
         if (cancelled) return;
         items = freshItems;
-        if (fresh.summary || items.length > 0) {
+        if (fresh.summary) {
           setMeeting(fresh);
           setActionItems(items);
           break;
@@ -518,11 +592,11 @@ export default function MeetingDetail() {
 
   async function onGenerateReport() {
     if (!meetingId) return;
-    const hasReport = Boolean(meeting?.summary) || actionItems.length > 0;
+    const hasReport = Boolean(meeting?.summary);
     if (hasReport) {
       const ok = await confirm({
         title: "Regenerate this report?",
-        description: "The current summary, topics, and action items will be replaced.",
+        description: "The current summary, topics, and action-item digest will be replaced. Items captured during the call are kept.",
         confirmLabel: "Regenerate",
       });
       if (!ok) return;
@@ -545,7 +619,7 @@ export default function MeetingDetail() {
             }
           : prev,
       );
-      setActionItems(report.action_items);
+      setActionItems(await api.listActionItems(meetingId));
       setTalkRatio(report.talk_ratio);
     } catch (err) {
       setReportError(err instanceof ApiError ? err.message : "Couldn't generate the report");
@@ -553,6 +627,13 @@ export default function MeetingDetail() {
       setGeneratingReport(false);
     }
   }
+
+  const reportReady = Boolean(meeting?.summary);
+  const liveActionItems = actionItems.filter((item) => item.source !== "report");
+  const shownActionItems = reportReady
+    ? actionItems.filter((item) => item.source === "report")
+    : actionItems;
+  const canShowCaptured = reportReady && liveActionItems.length > 0;
 
   async function onToggleActionItem(item: ActionItem) {
     if (!meetingId) return;
@@ -622,6 +703,9 @@ export default function MeetingDetail() {
                 {meeting.call_type.name}
               </span>
             )}
+            <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-ink-muted dark:border-border-dark">
+              {captureBadge(meeting.capture_mode, meeting.capture_app)}
+            </span>
           </div>
           <p className="mt-1 text-sm text-ink-muted">
             {!isOwner && <>{meeting.owner_name} · </>}
@@ -721,7 +805,7 @@ export default function MeetingDetail() {
                       </span>
                     )}
                   </div>
-                  {isOwner && (meeting.summary || actionItems.length > 0) && (
+                  {isOwner && meeting.summary && (
                     <button
                       onClick={onGenerateReport}
                       disabled={generatingReport || providerConnected === false}
@@ -740,7 +824,7 @@ export default function MeetingDetail() {
                   </p>
                 )}
 
-                {isOwner && !meeting.summary && actionItems.length === 0 && (
+                {isOwner && !meeting.summary && (
                   <>
                     {reportPending ? (
                       <p className="text-sm text-ink-muted">Generating report…</p>
@@ -802,30 +886,49 @@ export default function MeetingDetail() {
                   </div>
                 )}
 
-                {actionItems.length > 0 && (
-                  <ul className="mt-4 space-y-1.5">
-                    {actionItems.map((item) => (
-                      <li key={item.id} className="flex items-start gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={item.status === "done"}
-                          onChange={isOwner ? () => onToggleActionItem(item) : undefined}
-                          disabled={!isOwner}
-                          className="mt-0.5"
-                        />
-                        <span
-                          className={
-                            item.status === "done"
-                              ? "text-ink-subtle line-through"
-                              : "text-ink dark:text-ink-inverted"
-                          }
+                {(shownActionItems.length > 0 || canShowCaptured) && (
+                  <div className="mt-4">
+                    <div className="mb-1.5 flex items-baseline justify-between gap-3">
+                      <p className="label">Action items</p>
+                      {canShowCaptured && (
+                        <button
+                          type="button"
+                          onClick={() => setShowCaptured(true)}
+                          className="text-xs text-accent hover:underline"
                         >
-                          {item.text}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
+                          See all captured ({liveActionItems.length})
+                        </button>
+                      )}
+                    </div>
+                    <ul className="space-y-1.5">
+                      {shownActionItems.map((item) => (
+                        <li key={item.id} className="flex items-start gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={item.status === "done"}
+                            onChange={isOwner ? () => onToggleActionItem(item) : undefined}
+                            disabled={!isOwner}
+                            className="mt-0.5"
+                          />
+                          <span
+                            className={
+                              item.status === "done"
+                                ? "text-ink-subtle line-through"
+                                : "text-ink dark:text-ink-inverted"
+                            }
+                          >
+                            {item.text}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
+                <CapturedActionItemsDialog
+                  open={showCaptured}
+                  items={liveActionItems}
+                  onClose={() => setShowCaptured(false)}
+                />
               </div>
 
               {canViewFull && (

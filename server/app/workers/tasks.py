@@ -20,6 +20,7 @@ from app.models.cost import UsageKind
 from app.models.kb_document import KBDocument, KBDocumentStatus
 from app.models.meeting import (
     ActionItem,
+    ActionItemSource,
     ActionItemStatus,
     Channel,
     Meeting,
@@ -1121,7 +1122,9 @@ async def _dispatch_post_call_async(meeting_id: str) -> None:
         items = list(
             await db.scalars(
                 select(ActionItem).where(
-                    ActionItem.meeting_id == meeting.id, ActionItem.status == ActionItemStatus.OPEN
+                    ActionItem.meeting_id == meeting.id,
+                    ActionItem.source == ActionItemSource.REPORT,
+                    ActionItem.status == ActionItemStatus.OPEN,
                 )
             )
         )

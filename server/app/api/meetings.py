@@ -19,7 +19,14 @@ from app.core.db import get_db
 from app.models.call_type import CallType
 from app.models.group import Group, GroupMembership
 from app.models.hook_log import HookLog
-from app.models.meeting import ActionItem, CopilotInsight, Meeting, MeetingStatus, TranscriptSegment
+from app.models.meeting import (
+    ActionItem,
+    CaptureMode,
+    CopilotInsight,
+    Meeting,
+    MeetingStatus,
+    TranscriptSegment,
+)
 from app.models.user import User
 from app.schemas.copilot_insight import CopilotInsightRead
 from app.schemas.hook_log import HookLogRead
@@ -139,11 +146,16 @@ async def create_meeting(
             )
         )
 
+    capture_mode = payload.capture_mode
+    capture_app = payload.capture_app if capture_mode == CaptureMode.MEETING_TAB else None
+
     meeting = Meeting(
         owner_id=ctx.user.id,
         organization_id=ctx.org_id,
         title=payload.title,
         call_type_id=call_type.id if call_type else None,
+        capture_mode=capture_mode,
+        capture_app=capture_app,
     )
     db.add(meeting)
     await db.commit()
@@ -364,6 +376,8 @@ async def upload_meeting_audio(
     meeting.audio_path = await storage.save_upload(meeting_id, file)
     meeting.status = MeetingStatus.PROCESSING
     meeting.processing_error = None
+    meeting.capture_mode = CaptureMode.UPLOAD
+    meeting.capture_app = None
 
     try:
         celery_app.send_task("corella.process_meeting_audio", args=[str(meeting_id)])
