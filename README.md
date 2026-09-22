@@ -1,5 +1,13 @@
 <p align="center">
-  <img alt="Corella" src="web/src/assets/logo-light.png" width="96" height="96" style="border-radius: 16px; object-fit: contain;" />
+  <img alt="Corella" src="web/src/assets/logo-light.png" width="150" height="150" style="border-radius: 8px; object-fit: contain;" />
+</p>
+
+<p align="center">
+  <a href="#"><img alt="Version" src="https://img.shields.io/badge/version-BETA-orange" /></a>
+  <a href="https://www.npmjs.com/package/corella-live"><img alt="NPM Version" src="https://img.shields.io/npm/v/corella-live?color=success" /></a>
+  <a href="https://socket.dev/npm/package/corella-live"><img alt="Socket Badge" src="https://badge.socket.dev/npm/package/corella-live" /></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache_2.0-success" /></a>
+  <a href="https://github.com/lucas-oma/corella/actions/workflows/pr-checks.yml"><img alt="GitHub Actions Workflow Status" src="https://img.shields.io/github/actions/workflow/status/lucas-oma/corella/pr-checks.yml" /></a>
 </p>
 
 # Corella
