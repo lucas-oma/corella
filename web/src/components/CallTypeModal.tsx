@@ -59,98 +59,112 @@ export default function CallTypeModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="card w-full max-w-md p-6">
-        <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">What kind of call is this?</h2>
-        <p className="mt-1 text-sm text-ink-muted">Steers what the post-call report focuses on.</p>
+      <div className={`card w-full p-6 ${showCapture ? "max-w-2xl" : "max-w-md"}`}>
+        <div
+          className={
+            showCapture
+              ? "grid gap-6 sm:grid-cols-2 sm:gap-0"
+              : ""
+          }
+        >
+          <div className={showCapture ? "sm:pr-8" : ""}>
+            <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">
+              What kind of call is this?
+            </h2>
+            <p className="mt-1 text-sm text-ink-muted">Steers what the post-call report focuses on.</p>
 
-        {error && <p className="mt-4 text-sm text-status-danger">{error}</p>}
+            {error && <p className="mt-4 text-sm text-status-danger">{error}</p>}
 
-        {types === null && !error && <p className="mt-5 text-sm text-ink-muted">Loading…</p>}
+            {types === null && !error && <p className="mt-5 text-sm text-ink-muted">Loading…</p>}
 
-        {types !== null && (
-          <ul className="mt-5 max-h-40 space-y-1 overflow-y-auto">
-            {types.map((type) => (
-              <li key={type.id}>
-                <label className="flex cursor-pointer items-center gap-2.5 rounded px-2 py-1.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
-                  <input
-                    type="radio"
-                    name="call-type"
-                    checked={selected === type.id}
-                    onChange={() => setSelected(type.id)}
-                    className="accent-accent"
-                  />
-                  <span className="text-sm text-ink dark:text-ink-inverted">
-                    {type.name}
-                    {type.is_default && <span className="ml-1.5 text-xs text-ink-subtle">(default)</span>}
-                  </span>
-                </label>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        {showCapture && (
-          <div className="mt-5 border-t border-border pt-4 dark:border-border-dark">
-            <p className="text-sm text-ink dark:text-ink-inverted">How are you recording?</p>
-            <p className="mt-0.5 text-xs text-ink-subtle">
-              Open mic is one microphone. Browser meeting is your mic plus a shared tab.
-            </p>
-            <ul className="mt-3 space-y-1">
-              <li>
-                <label className="flex cursor-pointer items-center gap-2.5 rounded px-2 py-1.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
-                  <input
-                    type="radio"
-                    name="capture-mode"
-                    checked={captureMode === "open_mic"}
-                    onChange={() => setCaptureMode("open_mic")}
-                    className="accent-accent"
-                  />
-                  <span className="text-sm text-ink dark:text-ink-inverted">
-                    Open mic <span className="ml-1.5 text-xs text-ink-subtle">(default)</span>
-                  </span>
-                </label>
-              </li>
-              <li>
-                <label className="flex cursor-pointer items-center gap-2.5 rounded px-2 py-1.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
-                  <input
-                    type="radio"
-                    name="capture-mode"
-                    checked={captureMode === "meeting_tab"}
-                    onChange={() => setCaptureMode("meeting_tab")}
-                    className="accent-accent"
-                  />
-                  <span className="text-sm text-ink dark:text-ink-inverted">Browser meeting</span>
-                </label>
-              </li>
-            </ul>
-            {captureMode === "meeting_tab" && (
-              <ul className="mt-2 flex flex-wrap gap-1.5 px-2">
-                {(
-                  [
-                    ["meet", "Google Meet"],
-                    ["teams", "Teams"],
-                    ["zoom", "Zoom"],
-                    ["other", "Other"],
-                  ] as const
-                ).map(([id, label]) => (
-                  <li key={id}>
-                    <button
-                      type="button"
-                      onClick={() => setCaptureApp(id)}
-                      className={`rounded-full border px-2.5 py-0.5 text-xs ${
-                        captureApp === id
-                          ? "border-accent text-accent"
-                          : "border-border text-ink-muted dark:border-border-dark"
-                      }`}
-                    >
-                      {label}
-                    </button>
+            {types !== null && (
+              <ul className="mt-5 max-h-40 space-y-1 overflow-y-auto">
+                {types.map((type) => (
+                  <li key={type.id}>
+                    <label className="flex cursor-pointer items-center gap-2.5 rounded px-2 py-1.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+                      <input
+                        type="radio"
+                        name="call-type"
+                        checked={selected === type.id}
+                        onChange={() => setSelected(type.id)}
+                        className="accent-accent"
+                      />
+                      <span className="text-sm text-ink dark:text-ink-inverted">
+                        {type.name}
+                        {type.is_default && <span className="ml-1.5 text-xs text-ink-subtle">(default)</span>}
+                      </span>
+                    </label>
                   </li>
                 ))}
               </ul>
             )}
           </div>
-        )}
+
+          {showCapture && (
+            <div className="border-t border-border pt-5 dark:border-border-dark sm:border-l sm:border-t-0 sm:pl-8 sm:pt-0">
+              <h2 className="font-serif text-lg text-ink dark:text-ink-inverted">
+                How are you recording?
+              </h2>
+              <p className="mt-1 text-sm text-ink-muted">
+                Open mic is one microphone. Browser meeting is your mic plus a shared tab.
+              </p>
+              <ul className="mt-5 space-y-1">
+                <li>
+                  <label className="flex cursor-pointer items-center gap-2.5 rounded px-2 py-1.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+                    <input
+                      type="radio"
+                      name="capture-mode"
+                      checked={captureMode === "open_mic"}
+                      onChange={() => setCaptureMode("open_mic")}
+                      className="accent-accent"
+                    />
+                    <span className="text-sm text-ink dark:text-ink-inverted">
+                      Open mic <span className="ml-1.5 text-xs text-ink-subtle">(default)</span>
+                    </span>
+                  </label>
+                </li>
+                <li>
+                  <label className="flex cursor-pointer items-center gap-2.5 rounded px-2 py-1.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+                    <input
+                      type="radio"
+                      name="capture-mode"
+                      checked={captureMode === "meeting_tab"}
+                      onChange={() => setCaptureMode("meeting_tab")}
+                      className="accent-accent"
+                    />
+                    <span className="text-sm text-ink dark:text-ink-inverted">Browser meeting</span>
+                  </label>
+                </li>
+              </ul>
+              {captureMode === "meeting_tab" && (
+                <ul className="mt-2 flex flex-wrap gap-1.5 px-2">
+                  {(
+                    [
+                      ["meet", "Google Meet"],
+                      ["teams", "Teams"],
+                      ["zoom", "Zoom"],
+                      ["other", "Other"],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <li key={id}>
+                      <button
+                        type="button"
+                        onClick={() => setCaptureApp(id)}
+                        className={`rounded-full border px-2.5 py-0.5 text-xs ${
+                          captureApp === id
+                            ? "border-accent text-accent"
+                            : "border-border text-ink-muted dark:border-border-dark"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
 
         <div className="mt-6 flex justify-end gap-2">
           <button onClick={onCancel} className="btn-secondary">

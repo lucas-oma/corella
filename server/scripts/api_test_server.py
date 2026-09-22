@@ -317,15 +317,15 @@ _LIVE_TEST_PAGE_HTML = """<!doctype html>
   #transcript .partial { opacity: .55; font-style: italic; }
   .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8b8f99; margin: 14px 0 4px; }
   .label:first-child { margin-top: 0; }
-  .gauges { display: flex; justify-content: flex-start; margin-bottom: 4px; }
+  .gauges { margin-bottom: 4px; }
   .gauges:empty { display: none; }
-  .cluster { width: 144px; }
-  .cluster-ring { position: relative; width: 144px; height: 124px; overflow: hidden; }
-  .cluster-label { position: absolute; top: 0; left: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; width: 144px; height: 144px; }
-  .cluster-label strong { font-size: 28px; font-weight: 400; font-family: Georgia, ui-serif, serif; line-height: 1; }
-  .cluster-caption { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-top: 8px; padding: 0 4px; font-size: 10px; font-weight: 500; line-height: 1; color: #8b8f99; letter-spacing: .06em; text-transform: uppercase; }
-  .cluster-caption .word { letter-spacing: 0; text-transform: none; color: #12141a; width: 3.5rem; }
-  .cluster-caption .share { text-align: right; width: 3.5rem; }
+  .cluster { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; width: 100%; }
+  .cluster-cell { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+  .cluster-cell .ring { position: relative; width: 72px; height: 72px; }
+  .cluster-cell .value { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 400; font-family: Georgia, ui-serif, serif; line-height: 1; pointer-events: none; }
+  .cluster-cell .face { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+  .cluster-cell .cap { margin-top: 8px; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 500; line-height: 1; text-align: center; color: #8b8f99; }
+  .cluster-cell .cap.word { color: #12141a; }
   #suggestion { font-size: 13px; }
   ul { margin: 4px 0; padding-left: 18px; font-size: 13px; }
   li.danger { color: #b3261e; }
@@ -492,54 +492,68 @@ document.getElementById("loadTypesBtn").addEventListener("click", loadTypes);
 function setStatus(s) { document.getElementById("status").textContent = s; }
 function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
 
+function sentimentFaceSvg(kind) {
+  const eyes = '<circle cx="11.5" cy="13" r="1.5" fill="#12141A"/><circle cx="20.5" cy="13" r="1.5" fill="#12141A"/>';
+  const m = 'fill="none" stroke="#12141A" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"';
+  const b = 'fill="none" stroke="#12141A" stroke-width="1.7" stroke-linecap="round"';
+  const faces = {
+    Hostile: `<path d="M9 9.4 L13.3 11.6" ${b}/><path d="M23 9.4 L18.7 11.6" ${b}/><path d="M11 21.2 H21" ${m}/>`,
+    Tense: `<path d="M9.6 10.2 L13.2 11.5" ${b}/><path d="M22.4 10.2 L18.8 11.5" ${b}/><path d="M11.2 21 Q16 19.4 20.8 21" ${m}/>`,
+    Frustrated: `<path d="M10.4 22.2 Q16 16.6 21.6 22.2" ${m}/>`,
+    Skeptical: `<path d="M11.2 21.4 Q16 18.6 20.8 21.4" ${m}/>`,
+    Neutral: `<path d="M11 20.4 H21" ${m}/>`,
+    Engaged: `<path d="M11.4 19.2 Q16 23 20.6 19.2" ${m}/>`,
+    Positive: `<path d="M10.4 18.6 Q16 24.4 21.6 18.6" ${m}/>`,
+    Enthusiastic: `<path d="M10 18 A 6 7.2 0 0 0 22 18 Z" ${m}/>`,
+  };
+  return `<svg width="36" height="36" viewBox="0 0 32 32" aria-hidden="true">${eyes}${faces[kind] || faces.Neutral}</svg>`;
+}
+
 function clusterHtml(score, sentiment, share) {
-  const SIZE = 144, CX = 72, CY = 72;
-  const STROKE_MAIN = 4, STROKE_SIDE = 4;
-  const R_MAIN = 42, R_SIDE = 56;
-  const C_MAIN = 2 * Math.PI * R_MAIN;
-  const C_SIDE = 2 * Math.PI * R_SIDE;
-  const ARC_FRAC = 0.28;
-  const ARC_LEN = C_SIDE * ARC_FRAC;
-  const HALF = (ARC_FRAC * 360) / 2;
-  const LEFT_ROT = 270 - HALF;
-  const RIGHT_ROT = 90 - HALF;
+  const SIZE = 72, STROKE = 4, CX = 36;
+  const R = (SIZE - STROKE) / 2;
+  const C = 2 * Math.PI * R;
   const parsed = parseSentimentFn(sentiment);
   const shownSentiment = parsed || "Neutral";
   const fill = sentimentFillFn(shownSentiment);
   const clamped = score == null ? 50 : Math.max(0, Math.min(100, score));
-  const scoreOffset = C_MAIN * (1 - clamped / 100);
   const slices = (share || []).filter((s) => s.pct > 0);
 
-  let shareCircles = "";
+  const track = `<circle cx="${CX}" cy="${CX}" r="${R}" fill="none" stroke="${TRACK}" stroke-width="${STROKE}"/>`;
+  const sentArc = fill <= 0 ? "" : `<circle cx="${CX}" cy="${CX}" r="${R}" fill="none" stroke="${SENTIMENT_COLOR}" stroke-width="${STROKE}" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - fill)}"/>`;
+  const scoreArc = `<circle cx="${CX}" cy="${CX}" r="${R}" fill="none" stroke="${ACCENT}" stroke-width="${STROKE}" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - clamped / 100)}"/>`;
+  let shareArcs = "";
   let cursor = 0;
   for (const s of slices) {
-    const seg = Math.max(ARC_LEN * (s.pct / 100), 1);
-    shareCircles += `<circle cx="${CX}" cy="${CY}" r="${R_SIDE}" fill="none" stroke="${s.color}" stroke-width="${STROKE_SIDE}" stroke-dasharray="${seg} ${C_SIDE - seg}" stroke-dashoffset="${-cursor}"><title>${escapeHtml(s.label)} ${s.pct}%</title></circle>`;
-    cursor += ARC_LEN * (s.pct / 100);
+    const seg = Math.max(C * (s.pct / 100), 1);
+    shareArcs += `<circle cx="${CX}" cy="${CX}" r="${R}" fill="none" stroke="${s.color}" stroke-width="${STROKE}" stroke-dasharray="${seg} ${C - seg}" stroke-dashoffset="${-cursor}"><title>${escapeHtml(s.label)} ${s.pct}%</title></circle>`;
+    cursor += C * (s.pct / 100);
   }
 
-  const scoreCircle = `<circle cx="${CX}" cy="${CY}" r="${R_MAIN}" fill="none" stroke="${ACCENT}" stroke-width="${STROKE_MAIN}" stroke-dasharray="${C_MAIN}" stroke-dashoffset="${scoreOffset}"/>`;
-  const sentCircle = `<circle cx="${CX}" cy="${CY}" r="${R_SIDE}" fill="none" stroke="${SENTIMENT_COLOR}" stroke-width="${STROKE_SIDE}" stroke-dasharray="${ARC_LEN * fill} ${C_SIDE - ARC_LEN * fill}"/>`;
+  const mePct = slices.find((s) => s.label === "Me");
 
   return `<div class="cluster">
-    <div class="cluster-ring">
-      <svg width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}" aria-hidden="true">
-        <g transform="rotate(-90 ${CX} ${CY})">
-          <circle cx="${CX}" cy="${CY}" r="${R_MAIN}" fill="none" stroke="${TRACK}" stroke-width="${STROKE_MAIN}"/>
-          ${scoreCircle}
-          <g transform="rotate(${LEFT_ROT} ${CX} ${CY})">
-            <circle cx="${CX}" cy="${CY}" r="${R_SIDE}" fill="none" stroke="${TRACK}" stroke-width="${STROKE_SIDE}" stroke-dasharray="${ARC_LEN} ${C_SIDE - ARC_LEN}"/>
-            ${sentCircle}
-          </g>
-          <g transform="rotate(${RIGHT_ROT} ${CX} ${CY})">
-            <circle cx="${CX}" cy="${CY}" r="${R_SIDE}" fill="none" stroke="${TRACK}" stroke-width="${STROKE_SIDE}" stroke-dasharray="${ARC_LEN} ${C_SIDE - ARC_LEN}"/>
-            ${shareCircles}
-          </g>
-        </g>
-      </svg>
-      <div class="cluster-label"><strong>${clamped}</strong></div>
+    <div class="cluster-cell">
+      <div class="ring">
+        <svg width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}" style="transform:rotate(-90deg)">${track}${scoreArc}</svg>
+        <div class="value">${clamped}</div>
+      </div>
+      <div class="cap">Score</div>
     </div>
-    <div class="cluster-caption"><span class="word">${escapeHtml(shownSentiment)}</span><span>Score</span><span class="share">Share</span></div>
+    <div class="cluster-cell">
+      <div class="ring">
+        <svg width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}" style="transform:rotate(-90deg)">${track}${sentArc}</svg>
+        <div class="face" title="${escapeHtml(shownSentiment)}">${sentimentFaceSvg(shownSentiment)}</div>
+      </div>
+      <div class="cap">Sentiment</div>
+    </div>
+    <div class="cluster-cell">
+      <div class="ring">
+        <svg width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}" style="transform:rotate(-90deg)">${track}${shareArcs}</svg>
+        ${mePct ? `<div class="value">${mePct.pct}</div>` : ""}
+      </div>
+      <div class="cap">Share</div>
+    </div>
   </div>`;
 }
 
