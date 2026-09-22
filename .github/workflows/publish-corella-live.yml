@@ -1,0 +1,48 @@
+name: Publish corella-live
+
+# Publishes packages/corella-live to npm. Triggered only by pushing a tag
+# shaped like corella-live-v*, never by pushes/merges to main — this repo
+# also contains the unrelated web/ app, so "push to main" would be the
+# wrong trigger. Uses npm's OIDC Trusted Publishing (no NPM_TOKEN secret)
+# and emits a provenance attestation, both of which are Socket.dev supply
+# chain signals.
+on:
+  push:
+    tags:
+      - "corella-live-v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/corella-live
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted Publishing needs npm >=11.5.1; Node 20's bundled npm predates that.
+      - run: npm install -g npm@latest
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#corella-live-v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) != package.json version ($PKG_VERSION)"
+            exit 1
+          fi
+
+      - run: npm publish --provenance
