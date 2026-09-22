@@ -281,6 +281,7 @@ export interface TranscriptSegment {
   // Set only when speaker_label resolves to an enrolled account — render
   // "Me" only when this equals the viewer's own id, the real name otherwise.
   linked_user_id: string | null;
+  speaker_id: string | null;
   channel: "me" | "them" | "unknown";
   start_ms: number;
   end_ms: number;
@@ -295,6 +296,7 @@ export interface CopilotInsight {
   suggestion: string | null;
   blockers: string[];
   coach_score: number | null;
+  sentiment: string | null;
 }
 
 export interface ProviderStatus {

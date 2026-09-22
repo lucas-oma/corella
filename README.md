@@ -13,8 +13,8 @@ A self-hosted meeting assistant: it records a call from your browser (or takes a
 - **Speaker separation, live** — more than one voice on your own mic (an in-person meeting around one laptop) or on the shared tab audio gets split into "Speaker 1"/"Speaker 2" / "Them 1"/"Them 2" mid-call, not just after the fact.
 - **Cross-meeting voice recognition** — enroll your voice once and Corella recognizes you (and teammates in the same organization) across future calls; unrecognized speakers get identified live from what they say ("Hi, this is Lucas") via your configured LLM.
 - **Pluggable speech-to-text** — local `faster-whisper` by default (zero config), or Deepgram if you connect an API key — per-user, per-provider model overrides available in Settings.
-- **Pluggable copilot LLM** — Anthropic, OpenAI, Gemini (bring your own key), or a self-hosted Ollama instance — live suggestions, blockers, action items, and a live coach score during the call.
-- **Post-call reports** — auto-generated the moment a call finishes: title, summary, key topics, sentiment, notable quotes, action items, talk ratio, and a coach score, tuned by call type (sales/support/interview/1:1/meeting).
+- **Pluggable copilot LLM** — Anthropic, OpenAI, Gemini (bring your own key), or a self-hosted Ollama instance — live suggestions, blockers, action items, a live coach score, and a closed-set sentiment during the call.
+- **Post-call reports** — auto-generated the moment a call finishes: title, summary, key topics, sentiment, notable quotes, action items, talk share, and a coach score, tuned by call type (sales/support/interview/1:1/meeting).
 - **Knowledge base** — upload your own documents; the live copilot retrieves relevant snippets via semantic search.
 - **Semantic search** — across your own meeting history, across your group's shared reports, or (as an org owner/admin) everything in the active organization.
 - **Organizations** — the isolation boundary. Open signup creates `{Name} Org` with you as owner; closed mode uses one instance org. Groups nest inside an org. Owner/admin/member are org roles; `super_admin` is an instance flag.
@@ -181,7 +181,7 @@ Writes (delete meeting, report, action-item edits) stay **owner-only**. Org owne
 
 ## API access
 
-Corella can be integrated with an external system in three ways — full reference (auth, REST/WebSocket shapes, hook payloads, examples) in [`API.md`](API.md). For a website that should stream a live conversation, use [`packages/corella-live`](packages/corella-live) (`npm install ./packages/corella-live`) so you do not reimplement the WebSocket quirks (speaker labels in particular).
+Corella can be integrated with an external system in three ways — full reference (auth, REST/WebSocket shapes, hook payloads, examples) in [`API.md`](API.md). For a website that should stream a live conversation, use [`packages/corella-live`](packages/corella-live) (`npm install corella-live`) so you do not reimplement the WebSocket quirks (speaker labels in particular).
 
 The three types:
 

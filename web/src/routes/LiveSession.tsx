@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import AppShell from "@/components/AppShell";
@@ -18,12 +18,16 @@ import { api, type CaptureMode } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useConfirm } from "@/lib/confirm";
 import { isOrgAdmin } from "@/lib/org";
+import { assignSpeakerColors, speakerColorKey, speakerDotClass } from "@/lib/speakerColor";
+import { speakerShareFromLabeled } from "@/lib/speakerShare";
+import LiveCoachCluster from "@/components/LiveCoachCluster";
 
 type ConnectionState = "connecting" | "connected" | "error";
 
 interface SpeakerInfo {
   label: string;
   linkedUserId: string | null;
+  speakerId: string | null;
 }
 
 // Speaker labels arrive live, after the fact — either the moment a voice is
@@ -31,12 +35,8 @@ interface SpeakerInfo {
 // their group) or once a second distinct voice is confirmed *on that
 // channel* (see app/services/diarization/cluster.py — Me and Them gate
 // independently) or once an unrecognized voice's name is spotted live from
-// what it said (corella.identify_speaker_name). A small stable color per
-// label helps them read as distinct people at a glance rather than just
-// more text — hashed from the label itself, not parsed as a number, since a
-// resolved name ("Lucas") has no digit to key off of the way "Speaker 2"
-// did.
-const SPEAKER_DOT_COLORS = ["bg-accent", "bg-status-success", "bg-status-danger", "bg-ink-subtle"];
+// what it said (corella.identify_speaker_name). Sequential muted colors
+// (Me always navy) keep them distinct at a glance.
 
 // Debug aid, not a durable record — nothing persisted server-side, so
 // capping client-side is enough to keep the panel from growing unbounded
@@ -47,12 +47,6 @@ const MAX_DEBUG_EVENTS = 200;
 // (see justLabeled/animate-speaker-pop) — long enough to actually notice,
 // short enough not to look stuck once it's served its purpose.
 const PULSE_MS = 1800;
-
-function speakerDotColor(label: string): string {
-  let hash = 0;
-  for (let i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) >>> 0;
-  return SPEAKER_DOT_COLORS[hash % SPEAKER_DOT_COLORS.length];
-}
 
 export default function LiveSession() {
   const { meetingId } = useParams<{ meetingId: string }>();
@@ -99,6 +93,38 @@ export default function LiveSession() {
     return info.linkedUserId && info.linkedUserId === user?.id ? "Me" : info.label;
   }
 
+  const liveShare = useMemo(() => {
+    if (Object.keys(speakerLabels).length === 0) return null;
+    return speakerShareFromLabeled(
+      transcript.map((segment) => {
+        const info = speakerLabels[segment.id];
+        return {
+          start_ms: segment.start_ms,
+          end_ms: segment.end_ms,
+          speaker_label: info?.label ?? null,
+          linked_user_id: info?.linkedUserId ?? null,
+          speaker_id: info?.speakerId ?? null,
+          channel: segment.channel,
+        };
+      }),
+      user?.id,
+      captureMode ?? undefined,
+    );
+  }, [transcript, speakerLabels, user?.id, captureMode]);
+
+  const speakerColors = useMemo(() => {
+    const speakers: { colorKey: string; isMe: boolean }[] = [];
+    for (const segment of transcript) {
+      const label = displayLabel(segment.id);
+      if (!label) continue;
+      speakers.push({
+        colorKey: speakerColorKey(speakerLabels[segment.id]?.speakerId, label),
+        isMe: label === "Me",
+      });
+    }
+    return assignSpeakerColors(speakers);
+  }, [transcript, speakerLabels, user?.id]);
+
   const clientRef = useRef<LiveSessionClient | null>(null);
   const micCaptureRef = useRef<CaptureHandle | null>(null);
   const themCaptureRef = useRef<CaptureHandle | null>(null);
@@ -131,7 +157,11 @@ export default function LiveSession() {
     setSpeakerLabels((prev) => {
       const next = { ...prev };
       for (const seg of event.segments) {
-        next[seg.id] = { label: seg.speaker_label, linkedUserId: seg.linked_user_id };
+        next[seg.id] = {
+          label: seg.speaker_label,
+          linkedUserId: seg.linked_user_id,
+          speakerId: seg.speaker_id ?? null,
+        };
       }
       return next;
     });
@@ -354,6 +384,8 @@ export default function LiveSession() {
           )}
           {transcript.map((segment) => {
             const label = displayLabel(segment.id);
+            const colorKey = speakerColorKey(speakerLabels[segment.id]?.speakerId, label ?? "");
+            const colorIndex = speakerColors.get(colorKey) ?? 1;
             return (
               <div
                 key={segment.id}
@@ -366,7 +398,9 @@ export default function LiveSession() {
                         justLabeled.has(segment.id) ? "animate-speaker-pop" : ""
                       }`}
                     >
-                      <span className={`h-1.5 w-1.5 rounded-full ${speakerDotColor(label)}`} />
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full ${speakerDotClass(colorIndex)}`}
+                      />
                       {label}
                     </p>
                   )}
@@ -416,15 +450,11 @@ export default function LiveSession() {
 
           {copilotAvailable && (
             <>
-              {copilot?.coach_score !== null && copilot?.coach_score !== undefined && (
-                <div>
-                  <p className="label mb-1">Coach score</p>
-                  <p className="font-serif text-2xl text-ink dark:text-ink-inverted">
-                    {copilot.coach_score}
-                    <span className="text-sm text-ink-subtle">/100</span>
-                  </p>
-                </div>
-              )}
+              <LiveCoachCluster
+                score={copilot?.coach_score ?? null}
+                sentiment={copilot?.sentiment ?? null}
+                slices={liveShare}
+              />
 
               <div>
                 <p className="label mb-1">Suggestion</p>

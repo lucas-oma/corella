@@ -48,7 +48,7 @@ async def test_run_cycle_persists_insight_anchored_to_last_segment(db, make_user
     async def fake_complete(provider, model, messages, api_key, base_url, max_tokens=1024):
         return LLMResponse(
             text='{"suggestion": "Mention the annual discount", "blockers": ["Pricing unresolved"], '
-            '"action_items": [], "coach_score": 72}',
+            '"action_items": [], "coach_score": 72, "sentiment": "Skeptical"}',
             input_tokens=50,
             output_tokens=15,
         )
@@ -59,6 +59,11 @@ async def test_run_cycle_persists_insight_anchored_to_last_segment(db, make_user
     assert result is not None
     assert result.suggestion == "Mention the annual discount"
     assert result.coach_score == 72
+    assert result.sentiment == "Skeptical"
+    assert result.speaker_share == [
+        {"label": "Speaker 1", "pct": 40},
+        {"label": "Speaker 2", "pct": 60},
+    ]
 
     insights = list(
         await db.scalars(select(CopilotInsight).where(CopilotInsight.meeting_id == meeting.id))
@@ -69,6 +74,7 @@ async def test_run_cycle_persists_insight_anchored_to_last_segment(db, make_user
     assert insight.suggestion == "Mention the annual discount"
     assert insight.blockers == ["Pricing unresolved"]
     assert insight.coach_score == 72
+    assert insight.sentiment == "Skeptical"
 
 
 @pytest.mark.asyncio
@@ -101,3 +107,29 @@ async def test_run_cycle_persists_score_only_cycle(db, make_user, monkeypatch):
     assert insights[0].suggestion is None
     assert insights[0].blockers == []
     assert insights[0].coach_score == 85
+    assert insights[0].sentiment is None
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_drops_unknown_sentiment(db, make_user, monkeypatch):
+    user = await make_user()
+    meeting = await _meeting_with_segments(
+        db, user.id, user.active_organization_id, [(Channel.ME, 0, 800, "Hey, how's it going?")]
+    )
+
+    async def fake_complete(provider, model, messages, api_key, base_url, max_tokens=1024):
+        return LLMResponse(
+            text='{"suggestion": null, "blockers": [], "action_items": [], "coach_score": 60, "sentiment": "Mixed"}',
+            input_tokens=30,
+            output_tokens=10,
+        )
+
+    monkeypatch.setattr(live_module, "complete", fake_complete)
+
+    result = await run_cycle(db, meeting.id, user.id, _fake_provider())
+    assert result is not None
+    assert result.sentiment is None
+    insights = list(
+        await db.scalars(select(CopilotInsight).where(CopilotInsight.meeting_id == meeting.id))
+    )
+    assert insights[0].sentiment is None

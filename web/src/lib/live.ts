@@ -25,6 +25,8 @@ export interface CopilotEvent {
   blockers: string[];
   action_items: string[];
   coach_score: number | null;
+  sentiment: string | null;
+  speaker_share: { label: string; pct: number }[] | null;
 }
 
 export interface DiarizedSegment {
@@ -38,6 +40,7 @@ export interface DiarizedSegment {
   // anonymous recognized-by-name guest — render "Me" only when this
   // equals the viewer's own id.
   linked_user_id: string | null;
+  speaker_id?: string | null;
 }
 
 /** Admin-only live debug panel event — see the plan's Phase R. Only ever
@@ -174,6 +177,8 @@ export class LiveSessionClient {
           blockers?: string[];
           action_items?: string[];
           coach_score?: number | null;
+          sentiment?: string | null;
+          speaker_share?: { label: string; pct: number }[] | null;
           is_snapshot?: boolean;
           removed_segment_ids?: string[];
           segments?: DiarizedSegment[];
@@ -196,6 +201,8 @@ export class LiveSessionClient {
             blockers: msg.blockers ?? [],
             action_items: msg.action_items ?? [],
             coach_score: msg.coach_score ?? null,
+            sentiment: msg.sentiment ?? null,
+            speaker_share: msg.speaker_share ?? null,
           });
         } else if (msg.type === "copilot_unavailable") this.onCopilotUnavailable?.();
         else if (msg.type === "diarization_update" || msg.type === "speaker_hint") {

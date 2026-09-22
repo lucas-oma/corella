@@ -61,6 +61,7 @@ _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 # the ordering mostly moot, but listed newest-first-added for readability).
 _TABLES = [
     "action_items",
+    "copilot_insights",
     "transcript_segments",
     "speakers",
     "notes",

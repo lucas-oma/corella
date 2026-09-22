@@ -1,7 +1,7 @@
 {
   "name": "corella-live",
-  "version": "0.1.0",
-  "description": "Client for Corella's live recording API — create a meeting, stream audio, get a speaker-labeled transcript.",
+  "version": "0.1.1",
+  "description": "Browser client for Corella live recording — mic or PCM in, labeled transcript plus live coach score, sentiment, and talk share.",
   "type": "module",
   "license": "Apache-2.0",
   "main": "./dist/index.js",
@@ -21,6 +21,17 @@
     "prepare": "tsc",
     "test": "vitest run"
   },
+  "homepage": "https://github.com/lucas-oma/corella/tree/main/packages/corella-live",
+  "bugs": {
+    "url": "https://github.com/lucas-oma/corella/issues"
+  },
+  "keywords": [
+    "corella",
+    "transcription",
+    "websocket",
+    "live",
+    "copilot"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lucas-oma/corella.git",

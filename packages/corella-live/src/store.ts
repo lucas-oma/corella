@@ -1,4 +1,4 @@
-import type { LiveChannel, LiveMessage, TranscriptLine } from "./types.js";
+import { parseSentiment, type LiveChannel, type LiveMessage, type Sentiment, type SpeakerShareSlice, type TranscriptLine } from "./types.js";
 
 export interface LiveStore {
   segments: Map<string, { id: string; channel: LiveChannel | "unknown"; start_ms: number; end_ms: number; text: string }>;
@@ -10,6 +10,8 @@ export interface LiveStore {
     blockers: string[];
     action_items: string[];
     coach_score: number | null;
+    sentiment: Sentiment | null;
+    speaker_share: SpeakerShareSlice[] | null;
   } | null;
   copilotAvailable: boolean;
 }
@@ -33,6 +35,16 @@ export function resetStore(store: LiveStore): void {
   store.partials.them = "";
   store.copilot = null;
   store.copilotAvailable = true;
+}
+
+function parseSpeakerShare(raw: LiveMessage["speaker_share"]): SpeakerShareSlice[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const slices: SpeakerShareSlice[] = [];
+  for (const row of raw) {
+    if (!row || typeof row.label !== "string" || typeof row.pct !== "number") continue;
+    slices.push({ label: row.label, pct: row.pct });
+  }
+  return slices.length > 0 ? slices : null;
 }
 
 /**
@@ -70,6 +82,8 @@ export function applyLiveMessage(store: LiveStore, msg: LiveMessage): void {
         blockers: msg.blockers ?? [],
         action_items: msg.action_items ?? [],
         coach_score: msg.coach_score ?? null,
+        sentiment: parseSentiment(msg.sentiment),
+        speaker_share: parseSpeakerShare(msg.speaker_share),
       };
       break;
     case "copilot_unavailable":

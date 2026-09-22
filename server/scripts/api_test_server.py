@@ -55,8 +55,9 @@ an integrator would npm-install. Build that package first:
 
 The page then connects with `CorellaLive.connect`, streams the mic via
 `startMic()`, and renders the package's already-labeled transcript plus
-copilot events. Stop finalizes like a real recording (auto-report,
-post-call hook if configured).
+copilot events — including Corella's live score ring, sentiment fill, and
+speaker-colored talk share (same colors and fill logic as the product UI).
+Stop finalizes like a real recording (auto-report, post-call hook if configured).
 """
 
 import asyncio
@@ -309,13 +310,22 @@ _LIVE_TEST_PAGE_HTML = """<!doctype html>
   button.secondary { background: #fff; color: #0b1b33; }
   #status { font-size: 12px; color: #5b5f6b; margin-left: 8px; }
   #transcriptCol { flex: 2; min-width: 380px; }
-  #copilotCol { flex: 1; min-width: 260px; }
+  #copilotCol { flex: 1; min-width: 280px; }
   #transcript { height: 360px; overflow-y: auto; font-size: 13px; line-height: 1.5; border: 1px solid #e4e4e1; border-radius: 6px; padding: 10px; background: #fafaf9; }
-  #transcript .line b { color: #0b1b33; }
+  #transcript .line { display: flex; align-items: baseline; gap: 6px; }
+  #transcript .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
   #transcript .partial { opacity: .55; font-style: italic; }
   .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8b8f99; margin: 14px 0 4px; }
   .label:first-child { margin-top: 0; }
-  #score { font-size: 28px; font-weight: 600; }
+  .gauges { margin-bottom: 4px; }
+  .gauges:empty { display: none; }
+  .cluster { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; width: 100%; }
+  .cluster-cell { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+  .cluster-cell .ring { position: relative; width: 72px; height: 72px; }
+  .cluster-cell .value { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 400; font-family: Georgia, ui-serif, serif; line-height: 1; pointer-events: none; }
+  .cluster-cell .face { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+  .cluster-cell .cap { margin-top: 8px; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 500; line-height: 1; text-align: center; color: #8b8f99; }
+  .cluster-cell .cap.word { color: #12141a; }
   #suggestion { font-size: 13px; }
   ul { margin: 4px 0; padding-left: 18px; font-size: 13px; }
   li.danger { color: #b3261e; }
@@ -347,8 +357,7 @@ _LIVE_TEST_PAGE_HTML = """<!doctype html>
     <div id="transcript"></div>
   </div>
   <div class="col" id="copilotCol">
-    <div class="label">Coach score</div>
-    <div id="score">—</div>
+    <div class="gauges" id="gauges"></div>
     <div class="label">Suggestion</div>
     <div id="suggestion">Nothing yet.</div>
     <div class="label">Blockers</div>
@@ -362,6 +371,81 @@ _LIVE_TEST_PAGE_HTML = """<!doctype html>
 let session = null;
 let lines = [];
 let partials = { me: "", them: "" };
+let lastCopilot = {};
+let parseSentimentFn = (raw) => {
+  if (typeof raw !== "string") return null;
+  const set = ["Hostile","Tense","Frustrated","Skeptical","Neutral","Engaged","Positive","Enthusiastic"];
+  const needle = raw.trim().toLowerCase();
+  return set.find((v) => v.toLowerCase() === needle) || null;
+};
+let sentimentFillFn = (value) => {
+  const set = ["Hostile","Tense","Frustrated","Skeptical","Neutral","Engaged","Positive","Enthusiastic"];
+  const i = set.indexOf(value);
+  return i < 0 ? 0 : i / (set.length - 1);
+};
+
+const ACCENT = "#0B1B33";
+const TRACK = "#E4E4E1";
+const SENTIMENT_COLOR = "#1D5A8C";
+const SPEAKER_COLORS = ["#0B1B33", "#2A6A84", "#1F7A4D", "#9A6300", "#B3261E", "#5C4E79", "#3E6A58", "#8B8F99"];
+const ANON_RE = /^(Speaker|Them) \\d+$/;
+
+function assignSpeakerColors(labels) {
+  const map = new Map();
+  let nextOther = 1;
+  const otherSlots = SPEAKER_COLORS.length - 1;
+  for (const label of labels) {
+    if (map.has(label)) continue;
+    if (label === "Me") map.set(label, 0);
+    else { map.set(label, 1 + ((nextOther - 1) % otherSlots)); nextOther += 1; }
+  }
+  return map;
+}
+function speakerColorHex(label, colors) {
+  const index = colors && colors.has(label) ? colors.get(label) : (label === "Me" ? 0 : 1);
+  return SPEAKER_COLORS[index % SPEAKER_COLORS.length];
+}
+function canonicalLabel(line) {
+  const raw = line.speakerLabel;
+  if (raw === "me" || raw === "Me") return "Me";
+  if (raw === "them" || raw === "Them") return "Them";
+  if (raw && raw !== "unknown") return raw;
+  if (line.channel === "me") return "Me";
+  if (line.channel === "them") return "Them";
+  return "Unknown";
+}
+function isAnonymous(label) {
+  return label === "Unknown" || label === "Them" || label === "Speaker" || ANON_RE.test(label);
+}
+function lineDisplayLabels(rows) {
+  const aliases = new Map();
+  let nextN = 1;
+  return rows.map((line) => {
+    const raw = canonicalLabel(line);
+    if (raw === "Me" || !isAnonymous(raw)) return raw;
+    const key = (line.channel || "unknown") + ":" + raw;
+    if (!aliases.has(key)) { aliases.set(key, "Speaker " + nextN); nextN += 1; }
+    return aliases.get(key);
+  });
+}
+function speakerShareFromLines(rows) {
+  const labeled = lineDisplayLabels(rows);
+  const msByLabel = new Map();
+  const order = [];
+  for (let i = 0; i < rows.length; i++) {
+    const duration = Math.max(0, (rows[i].end_ms || 0) - (rows[i].start_ms || 0));
+    if (duration <= 0) continue;
+    const label = labeled[i];
+    if (!msByLabel.has(label)) { order.push(label); msByLabel.set(label, 0); }
+    msByLabel.set(label, msByLabel.get(label) + duration);
+  }
+  const total = order.reduce((sum, label) => sum + msByLabel.get(label), 0);
+  if (!total || !order.length) return null;
+  const pcts = order.map((label) => Math.round((msByLabel.get(label) / total) * 100));
+  pcts[pcts.length - 1] += 100 - pcts.reduce((sum, pct) => sum + pct, 0);
+  const colors = assignSpeakerColors(order);
+  return order.map((label, i) => ({ label, pct: pcts[i], color: speakerColorHex(label, colors) })).filter((row) => row.pct > 0);
+}
 
 for (const id of ["apiBase", "apiKey"]) {
   const saved = localStorage.getItem("corella_test_" + id);
@@ -408,26 +492,109 @@ document.getElementById("loadTypesBtn").addEventListener("click", loadTypes);
 function setStatus(s) { document.getElementById("status").textContent = s; }
 function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
 
+function sentimentFaceSvg(kind) {
+  const eyes = '<circle cx="11.5" cy="13" r="1.5" fill="#12141A"/><circle cx="20.5" cy="13" r="1.5" fill="#12141A"/>';
+  const m = 'fill="none" stroke="#12141A" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"';
+  const b = 'fill="none" stroke="#12141A" stroke-width="1.7" stroke-linecap="round"';
+  const faces = {
+    Hostile: `<path d="M9 9.4 L13.3 11.6" ${b}/><path d="M23 9.4 L18.7 11.6" ${b}/><path d="M11 21.2 H21" ${m}/>`,
+    Tense: `<path d="M9.6 10.2 L13.2 11.5" ${b}/><path d="M22.4 10.2 L18.8 11.5" ${b}/><path d="M11.2 21 Q16 19.4 20.8 21" ${m}/>`,
+    Frustrated: `<path d="M10.4 22.2 Q16 16.6 21.6 22.2" ${m}/>`,
+    Skeptical: `<path d="M11.2 21.4 Q16 18.6 20.8 21.4" ${m}/>`,
+    Neutral: `<path d="M11 20.4 H21" ${m}/>`,
+    Engaged: `<path d="M11.4 19.2 Q16 23 20.6 19.2" ${m}/>`,
+    Positive: `<path d="M10.4 18.6 Q16 24.4 21.6 18.6" ${m}/>`,
+    Enthusiastic: `<path d="M10 18 A 6 7.2 0 0 0 22 18 Z" ${m}/>`,
+  };
+  return `<svg width="36" height="36" viewBox="0 0 32 32" aria-hidden="true">${eyes}${faces[kind] || faces.Neutral}</svg>`;
+}
+
+function clusterHtml(score, sentiment, share) {
+  const SIZE = 72, STROKE = 4, CX = 36;
+  const R = (SIZE - STROKE) / 2;
+  const C = 2 * Math.PI * R;
+  const parsed = parseSentimentFn(sentiment);
+  const shownSentiment = parsed || "Neutral";
+  const fill = sentimentFillFn(shownSentiment);
+  const clamped = score == null ? 50 : Math.max(0, Math.min(100, score));
+  const slices = (share || []).filter((s) => s.pct > 0);
+
+  const track = `<circle cx="${CX}" cy="${CX}" r="${R}" fill="none" stroke="${TRACK}" stroke-width="${STROKE}"/>`;
+  const sentArc = fill <= 0 ? "" : `<circle cx="${CX}" cy="${CX}" r="${R}" fill="none" stroke="${SENTIMENT_COLOR}" stroke-width="${STROKE}" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - fill)}"/>`;
+  const scoreArc = `<circle cx="${CX}" cy="${CX}" r="${R}" fill="none" stroke="${ACCENT}" stroke-width="${STROKE}" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - clamped / 100)}"/>`;
+  let shareArcs = "";
+  let cursor = 0;
+  for (const s of slices) {
+    const seg = Math.max(C * (s.pct / 100), 1);
+    shareArcs += `<circle cx="${CX}" cy="${CX}" r="${R}" fill="none" stroke="${s.color}" stroke-width="${STROKE}" stroke-dasharray="${seg} ${C - seg}" stroke-dashoffset="${-cursor}"><title>${escapeHtml(s.label)} ${s.pct}%</title></circle>`;
+    cursor += C * (s.pct / 100);
+  }
+
+  const mePct = slices.find((s) => s.label === "Me");
+
+  return `<div class="cluster">
+    <div class="cluster-cell">
+      <div class="ring">
+        <svg width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}" style="transform:rotate(-90deg)">${track}${scoreArc}</svg>
+        <div class="value">${clamped}</div>
+      </div>
+      <div class="cap">Score</div>
+    </div>
+    <div class="cluster-cell">
+      <div class="ring">
+        <svg width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}" style="transform:rotate(-90deg)">${track}${sentArc}</svg>
+        <div class="face" title="${escapeHtml(shownSentiment)}">${sentimentFaceSvg(shownSentiment)}</div>
+      </div>
+      <div class="cap">Sentiment</div>
+    </div>
+    <div class="cluster-cell">
+      <div class="ring">
+        <svg width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}" style="transform:rotate(-90deg)">${track}${shareArcs}</svg>
+        ${mePct ? `<div class="value">${mePct.pct}</div>` : ""}
+      </div>
+      <div class="cap">Share</div>
+    </div>
+  </div>`;
+}
+
+function renderGauges() {
+  const fromCopilot = (lastCopilot.speaker_share || []).filter((s) => s.label && s.pct > 0);
+  const copilotColors = assignSpeakerColors(fromCopilot.map((s) => s.label));
+  const share = speakerShareFromLines(lines) || fromCopilot.map((s) => ({
+    label: s.label, pct: s.pct, color: speakerColorHex(s.label, copilotColors),
+  }));
+  document.getElementById("gauges").innerHTML = clusterHtml(
+    lastCopilot.coach_score ?? null,
+    lastCopilot.sentiment,
+    share,
+  );
+}
+
 function renderTranscript() {
-  let html = lines.map((s) =>
-    `<div class="line"><b>${escapeHtml(s.speakerLabel)}</b>: ${escapeHtml(s.text)}</div>`
-  ).join("");
+  const labels = lineDisplayLabels(lines);
+  const colors = assignSpeakerColors(labels);
+  let html = lines.map((s, i) => {
+    const label = labels[i];
+    return `<div class="line"><span class="dot" style="background:${speakerColorHex(label, colors)}"></span><b>${escapeHtml(label)}</b>: ${escapeHtml(s.text)}</div>`;
+  }).join("");
   for (const ch of ["me", "them"]) {
     if (partials[ch]) html += `<div class="line partial"><b>${ch}</b>: ${escapeHtml(partials[ch])}…</div>`;
   }
   const el = document.getElementById("transcript");
   el.innerHTML = html || '<span style="color:#8b8f99">(waiting for speech…)</span>';
   el.scrollTop = el.scrollHeight;
+  renderGauges();
 }
 
 function renderCopilot(msg) {
-  document.getElementById("score").textContent = msg.coach_score ?? "—";
-  document.getElementById("suggestion").textContent = msg.suggestion || "Nothing yet.";
-  const blockers = msg.blockers || [];
+  lastCopilot = msg || {};
+  renderGauges();
+  document.getElementById("suggestion").textContent = lastCopilot.suggestion || "Nothing yet.";
+  const blockers = lastCopilot.blockers || [];
   document.getElementById("blockers").innerHTML = blockers.length
     ? blockers.map((b) => `<li class="danger">${escapeHtml(b)}</li>`).join("")
     : "<li>None.</li>";
-  const items = msg.action_items || [];
+  const items = lastCopilot.action_items || [];
   document.getElementById("actionItems").innerHTML = items.length
     ? items.map((a) => `<li>${escapeHtml(a)}</li>`).join("")
     : "<li>None.</li>";
@@ -435,7 +602,10 @@ function renderCopilot(msg) {
 
 async function loadClient() {
   try {
-    return await import("/corella-live/index.js");
+    const mod = await import("/corella-live/index.js");
+    if (typeof mod.parseSentiment === "function") parseSentimentFn = mod.parseSentiment;
+    if (typeof mod.sentimentFill === "function") sentimentFillFn = mod.sentimentFill;
+    return mod;
   } catch (e) {
     setStatus("corella-live is not built. From the repo: cd packages/corella-live && npm install && npm run build");
     throw e;
@@ -451,6 +621,7 @@ async function start() {
   document.getElementById("startBtn").disabled = true;
   lines = [];
   partials = { me: "", them: "" };
+  lastCopilot = {};
   renderTranscript();
   renderCopilot({});
   setStatus("Creating meeting…");

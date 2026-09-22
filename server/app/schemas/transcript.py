@@ -14,6 +14,7 @@ class TranscriptSegmentRead(BaseModel):
     # anonymous recognized-by-name guest — the viewer renders "Me" only
     # when this equals their own id (see Speaker.linked_user_id).
     linked_user_id: UUID | None
+    speaker_id: UUID | None
     channel: Channel
     start_ms: int
     end_ms: int

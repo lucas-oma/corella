@@ -22,26 +22,28 @@ from app.services.access import kb_visible_clause, searchable_owner_ids
 from app.services.copilot.action_items import persist_new_action_items
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import as_str_list, parse_json_response
+from app.services.copilot.sentiment import SENTIMENT_CHOICES, parse_sentiment
 from app.services.copilot.talk_ratio import talk_ratio
 from app.services.embeddings.qdrant_store import search_kb
 from app.services.embeddings.query import embed_query
 from app.services.llm.base import LLMError, LLMMessage, complete
 from app.services.llm.pricing import estimate_cost_usd
 from app.services.llm.resolve import ResolvedProvider
-from app.services.transcript_format import format_transcript
+from app.services.transcript_format import format_transcript, speaker_share
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """You are a live call copilot, silently observing a conversation and helping "Me" (the user) in real time. Given the recent transcript and optional reference material, respond with ONLY a single JSON object, no other text, in exactly this shape:
+_SYSTEM_PROMPT = f"""You are a live call copilot, silently observing a conversation and helping "Me" (the user) in real time. Given the recent transcript and optional reference material, respond with ONLY a single JSON object, no other text, in exactly this shape:
 
-{
+{{
   "suggestion": "<one short, concrete talking point or answer Me could use next, grounded in the reference material if relevant, or null if there's nothing useful to add right now>",
   "blockers": ["<an unresolved question or objection from Them that hasn't been addressed yet>"],
   "action_items": ["<a new commitment or follow-up task mentioned in this exchange>"],
-  "coach_score": <integer 0-100 rating how well this call is going for Me, considering engagement and whether Them's questions are being answered>
-}
+  "coach_score": <integer 0-100 rating how well this call is going for Me, considering engagement and whether Them's questions are being answered>,
+  "sentiment": "<exactly one of {SENTIMENT_CHOICES} — overall tone right now, not how well the call is going>"
+}}
 
-Use empty arrays / null when there's nothing to report in a field. Keep the suggestion under 2 sentences."""
+Use empty arrays / null when there's nothing to report in a field. Keep the suggestion under 2 sentences. sentiment must be one of those eight words exactly."""
 
 
 @dataclass
@@ -50,6 +52,8 @@ class CopilotResult:
     blockers: list[str]
     action_items: list[str]  # currently-open live captures, not the report digest
     coach_score: int | None
+    sentiment: str | None
+    speaker_share: list[dict[str, str | int]] | None
 
 
 async def run_cycle(
@@ -86,7 +90,12 @@ async def run_cycle(
 
     kb_context = await _retrieve_kb_context(db, owner_id, meeting_id, transcript_text)
 
+    share = speaker_share(all_segments, owner_id=owner_id, capture_mode=capture_mode)
     user_content = f"Recent transcript:\n{transcript_text}"
+    if share:
+        user_content += "\n\nTalk share so far — " + ", ".join(
+            f"{row['label']}: {row['pct']}%" for row in share
+        )
     if capture_mode == CaptureMode.MEETING_TAB and ratio["them"] > 0:
         user_content += f"\n\nTalk ratio so far — Me: {ratio['me']}%, Them: {ratio['them']}%"
     if pre_call_context:
@@ -109,7 +118,7 @@ async def run_cycle(
             messages,
             provider.api_key,
             provider.base_url,
-            max_tokens=220,
+            max_tokens=260,
         )
     except LLMError as e:
         logger.info("Copilot cycle skipped for meeting %s: %s", meeting_id, e)
@@ -145,6 +154,7 @@ async def run_cycle(
     blockers = as_str_list(parsed.get("blockers"))
     raw_coach_score = parsed.get("coach_score")
     coach_score = int(raw_coach_score) if isinstance(raw_coach_score, int | float) else None
+    sentiment = parse_sentiment(parsed.get("sentiment"))
 
     new_action_items = as_str_list(parsed.get("action_items"))
     if new_action_items:
@@ -157,7 +167,7 @@ async def run_cycle(
     # view sparse for no reason. Anchored to the transcript's own clock
     # (the most recent segment this cycle actually saw), not session-
     # elapsed wall time, so it lines up with TranscriptSegment.start_ms/
-    # end_ms for display (MeetingDetail's insights column).
+    # end_ms for display (MeetingDetail's score / sentiment charts).
     db.add(
         CopilotInsight(
             meeting_id=meeting_id,
@@ -165,6 +175,7 @@ async def run_cycle(
             suggestion=suggestion,
             blockers=blockers,
             coach_score=coach_score,
+            sentiment=sentiment,
         )
     )
     await db.commit()
@@ -184,6 +195,8 @@ async def run_cycle(
         blockers=blockers,
         action_items=open_items,
         coach_score=coach_score,
+        sentiment=sentiment,
+        speaker_share=share,
     )
 
 

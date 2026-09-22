@@ -68,4 +68,47 @@ describe("applyLiveMessage", () => {
     });
     expect(store.partials.me).toBe("");
   });
+
+  it("stores copilot sentiment from the closed set and drops junk", () => {
+    const store = createStore();
+    applyLiveMessage(store, {
+      type: "copilot",
+      suggestion: null,
+      blockers: [],
+      action_items: [],
+      coach_score: 70,
+      sentiment: "skeptical",
+    });
+    expect(store.copilot?.sentiment).toBe("Skeptical");
+    applyLiveMessage(store, {
+      type: "copilot",
+      suggestion: null,
+      blockers: [],
+      action_items: [],
+      coach_score: 70,
+      sentiment: "Mixed",
+    });
+    expect(store.copilot?.sentiment).toBeNull();
+    expect(store.copilot?.speaker_share).toBeNull();
+  });
+
+  it("stores live speaker_share from a copilot frame", () => {
+    const store = createStore();
+    applyLiveMessage(store, {
+      type: "copilot",
+      suggestion: null,
+      blockers: [],
+      action_items: [],
+      coach_score: 70,
+      sentiment: "Neutral",
+      speaker_share: [
+        { label: "Me", pct: 40 },
+        { label: "Speaker 1", pct: 60 },
+      ],
+    });
+    expect(store.copilot?.speaker_share).toEqual([
+      { label: "Me", pct: 40 },
+      { label: "Speaker 1", pct: 60 },
+    ]);
+  });
 });

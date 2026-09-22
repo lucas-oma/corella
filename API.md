@@ -125,14 +125,14 @@ Response (`201`) — `MeetingRead`:
 
 ```
 GET  /api/meetings/{id}              → MeetingRead (as above)
-GET  /api/meetings/{id}/transcript   → [{ id, speaker_label, linked_user_id, channel, start_ms, end_ms, text }, ...]
-GET  /api/meetings/{id}/insights     → [{ id, at_ms, suggestion, blockers: [string], coach_score }, ...]
+GET  /api/meetings/{id}/transcript   → [{ id, speaker_label, linked_user_id, speaker_id, channel, start_ms, end_ms, text }, ...]
+GET  /api/meetings/{id}/insights     → [{ id, at_ms, suggestion, blockers: [string], coach_score, sentiment }, ...]
 POST /api/meetings/{id}/report       → generates (or regenerates) the summary/report synchronously
 ```
 
-**Transcript.** `channel` is `"me"` | `"them"` | `"unknown"` — the audio pipe, not the printed name. `speaker_label` may still be `null` while same-room diarization catches up (or permanently, for a voice that never accumulated enough speech). `linked_user_id` is set only when the label resolved to an enrolled account — render `"Me"` only when it equals the viewing user's id. `{{corella.transcript}}` / the report prompt use those identities (`Me` / `Speaker N` / a name), not the raw channel.
+**Transcript.** `channel` is `"me"` | `"them"` | `"unknown"` — the audio pipe, not the printed name. `speaker_label` may still be `null` while same-room diarization catches up (or permanently, for a voice that never accumulated enough speech). `linked_user_id` is set only when the label resolved to an enrolled account — render `"Me"` only when it equals the viewing user's id. `speaker_id` is the meeting-scoped speaker row (stable across label changes like `Speaker 2` → `Ana`). `{{corella.transcript}}` / the report prompt use those identities (`Me` / `Speaker N` / a name), not the raw channel.
 
-**Insights.** The persisted live-copilot timeline, timestamp-ordered. `at_ms` lines up with `transcript[].start_ms` / `end_ms`. This shape does **not** include `action_items` — those on the live `copilot` WebSocket message are per-cycle suggestions; the durable open/done action items live on the report (`POST /report` / post-call payload).
+**Insights.** The persisted live-copilot timeline, timestamp-ordered. `at_ms` lines up with `transcript[].start_ms` / `end_ms`. `sentiment` is one of `Hostile`, `Tense`, `Frustrated`, `Skeptical`, `Neutral`, `Engaged`, `Positive`, `Enthusiastic`, or JSON `null` (unknown model output is dropped, not coerced). This shape does **not** include `action_items` — those on the live `copilot` WebSocket message are per-cycle suggestions; the durable open/done action items live on the report (`POST /report` / post-call payload).
 
 **`POST /report`.** Owner-only (not even an org admin of someone else's meeting). Requires an LLM provider connected for that account (`422` otherwise). Synchronous. A normal auto-generated report already fires once a recording finishes; this is for a forced refresh. **It does not fire the post-call hook** — regenerating is not "the conversation ending" a second time.
 
@@ -260,8 +260,8 @@ Closing the Corella web UI without pressing Stop is the same as a bare disconnec
 | `copilot_unavailable` | `{}` | No LLM provider connected — live suggestions off, transcription still works |
 | `transcript` | `{ segment: {id, channel, start_ms, end_ms, text} }` | A committed (final) transcript segment. **No `speaker_label`** — see quirk 18 |
 | `partial_transcript` | `{ channel, text }` | Disposable live preview — replaced by the next `transcript` / `partial_transcript` for that channel, **never persisted** |
-| `copilot` | `{ suggestion, blockers: [string], action_items: [string], coach_score }` | One live-coaching cycle. Also persisted (minus `action_items`) as a row `GET /insights` returns |
-| `diarization_update` / `speaker_hint` | `{ is_snapshot, removed_segment_ids: [string], segments: [{id, channel, start_ms, end_ms, text, speaker_label, linked_user_id}] }` | Speaker labels resolving/changing. A `speaker_hint` is a fast guess; a later `diarization_update` for the same segment overwrites it. Apply as a diff: drop `removed_segment_ids`, upsert `segments`. Keep names in a **separate map keyed by segment id** — do not store them only on the transcript object |
+| `copilot` | `{ suggestion, blockers: [string], action_items: [string], coach_score, sentiment, speaker_share }` | One live-coaching cycle. Also persisted (minus `action_items` and `speaker_share`) as a row `GET /insights` returns. `sentiment` is the closed eight-word set or JSON `null`. `speaker_share` is `[{"label": "Me", "pct": 55}, …]` (sums to 100) or JSON `null` when there is no timed speech yet |
+| `diarization_update` / `speaker_hint` | `{ is_snapshot, removed_segment_ids: [string], segments: [{id, channel, start_ms, end_ms, text, speaker_label, linked_user_id, speaker_id}] }` | Speaker labels resolving/changing. A `speaker_hint` is a fast guess; a later `diarization_update` for the same segment overwrites it. Apply as a diff: drop `removed_segment_ids`, upsert `segments`. Keep names in a **separate map keyed by segment id** — do not store them only on the transcript object |
 | `stopped` | `{}` | Acknowledges a graceful client-sent `stop` only |
 | `debug_event` | `{ stage, at_ms, detail }` | Org owner/admin or super_admin only, and only after the client sent `{"type":"debug","enabled":true}`. Other users' debug frames are ignored |
 
@@ -318,11 +318,11 @@ Body tokens are `{{corella.KEY}}` only — unprefixed `{{KEY}}` is left as-is. O
 | `{{corella.meeting_id}}`, `{{corella.owner_id}}`, `{{corella.owner_name}}` | Identity |
 | `{{corella.title}}`, `{{corella.call_type}}`, `{{corella.status}}` | Basics (`call_type` is the type's **name** string, or JSON `null` if untyped) |
 | `{{corella.capture_mode}}`, `{{corella.capture_app}}` | How audio arrived: `open_mic` / `meeting_tab` / `upload`, and `meet` / `teams` / `zoom` / `other` / JSON `null` |
-| `{{corella.summary}}`, `{{corella.key_topics}}`, `{{corella.sentiment}}`, `{{corella.notable_quotes}}` | Report content |
+| `{{corella.summary}}`, `{{corella.key_topics}}`, `{{corella.sentiment}}`, `{{corella.notable_quotes}}` | Report content (`sentiment` is one of Hostile / Tense / Frustrated / Skeptical / Neutral / Engaged / Positive / Enthusiastic, or JSON `null`) |
 | `{{corella.coach_score}}`, `{{corella.estimated_cost_usd}}`, `{{corella.talk_ratio}}` | Report metrics (`talk_ratio` is `{"me": <pct>, "them": <pct>}` on `meeting_tab` only; JSON `null` otherwise) |
-| `{{corella.speaker_share}}` | Open-mic / upload talk share by display name: `[{"label": "Speaker 1", "pct": 40}, …]` (sums to 100). JSON `null` on `meeting_tab` |
+| `{{corella.speaker_share}}` | Talk share by display name: `[{"label": "Speaker 1", "pct": 40}, …]` (sums to 100). All capture modes |
 | `{{corella.action_items}}` | Report digest only (`source=report`): `[{"text": "...", "status": "open"\|"done"}, ...]` — not the live-capture pile |
-| `{{corella.copilot_insights}}` | `[{"at_ms": 12000, "suggestion": "...", "blockers": [...], "coach_score": 74}, ...]` — same timeline `GET /insights` returns |
+| `{{corella.copilot_insights}}` | `[{"at_ms": 12000, "suggestion": "...", "blockers": [...], "coach_score": 74, "sentiment": "Skeptical"}, ...]` — same timeline `GET /insights` returns |
 | `{{corella.transcript}}` | Full transcript as `"Me: ...\nSpeaker 1: ..."` — owner's enrolled voice (or unlabeled `meeting_tab` mic) is `Me`; other people are names or `Speaker N`. Not the raw me/them channel. |
 | `{{corella.created_at}}`, `{{corella.started_at}}`, `{{corella.ended_at}}`, `{{corella.duration_seconds}}` | Timing (ISO-8601 or JSON `null`) |
 | `{{corella.full_payload}}` | The entire structured payload below, as one embedded JSON object — equivalent to turning "Send everything" on, but usable inline in a hand-written template |
@@ -344,7 +344,7 @@ Pre-call templates use the same escaping rules on their smaller set.
   "speaker_share": [{"label": "Me", "pct": 55}, {"label": "Speaker 1", "pct": 45}],
   "action_items": [{"text": "Send proposal by Friday", "status": "open"}],
   "copilot_insights": [
-    {"at_ms": 42000, "suggestion": "Address the pricing objection directly", "blockers": ["Pricing concern raised"], "coach_score": 71}
+    {"at_ms": 42000, "suggestion": "Address the pricing objection directly", "blockers": ["Pricing concern raised"], "coach_score": 71, "sentiment": "Skeptical"}
   ],
   "transcript": "Me: ...\nSpeaker 1: ...",
   "created_at": "2026-09-08T12:00:00Z", "started_at": "2026-09-08T12:00:05Z",
@@ -396,7 +396,7 @@ These are the ones that bite integrations. All are real behavior, not omissions.
 8. **Auth is the first WS frame, in 5 seconds, or `4401`.** Don't open the socket and then wait on your audio pipeline before sending `auth`.
 9. **Audio format is fixed.** PCM16LE mono 16 kHz, channel byte prefix. No `Content-Type`, no JSON wrapper, no Opus/WebM.
 10. **Partial transcripts are UI-only.** Only `transcript` (and later diarization rewrites of those segments) is persisted.
-11. **Live `copilot.action_items` ≠ report action items.** The WS field is ephemeral per cycle. Durable items are `GET /action-items` with `source=live|report`. The report / post-call payload is the digest (`source=report`) only. `GET /insights` has suggestion/blockers/score, not those live action items.
+11. **Live `copilot.action_items` ≠ report action items.** The WS field is ephemeral per cycle. Durable items are `GET /action-items` with `source=live|report`. The report / post-call payload is the digest (`source=report`) only. `GET /insights` has suggestion/blockers/score/sentiment, not those live action items.
 12. **Post-call runs only after a successful auto-report.** No LLM connected → no auto-report → no hook, even if the recording finalized to `ready`. Manual `POST /report` also does not fire it.
 13. **Pre-call failure is silent to the caller.** You still get `201`. The most common prod miss is DNS: the hostname in the hook URL does not resolve *inside* the api container (`Name or service not known`). Org owner/admins can open the meeting's **API logs**; otherwise check Corella logs or your receiving endpoint.
 14. **Mandatory hook headers always win.** You cannot spoof `X-Corella-Meeting-Id` or `X-Corella-Org-Id` via custom header config.
@@ -411,7 +411,7 @@ These are the ones that bite integrations. All are real behavior, not omissions.
 
 ## Website client: `packages/corella-live`
 
-An installable TypeScript client that does what the test page below does: create a meeting with an API key, open the live WebSocket, stream PCM, and emit a speaker-labeled transcript. `npm install ./packages/corella-live` from this repo (not on the public registry yet). See that package's README for a 15-line browser example. CORS still applies to `POST /api/meetings` from a browser origin — create from your server and `connect({ meetingId })` if you cannot add the origin to `CORS_ORIGINS`.
+An installable TypeScript client that does what the test page below does: create a meeting with an API key, open the live WebSocket, stream PCM, and emit a speaker-labeled transcript plus live copilot (score, sentiment, talk share). `npm install corella-live`, or `npm install ./packages/corella-live` from this repo. See that package's README for a browser example. CORS still applies to `POST /api/meetings` from a browser origin — create from your server and `connect({ meetingId })` if you cannot add the origin to `CORS_ORIGINS`.
 
 ---
 
@@ -452,5 +452,5 @@ cd packages/corella-live && npm install && npm run build
 
 1. Create an API key (Settings → API keys) and paste it in, with the API base URL (`http://localhost:8090` in local Docker, or whatever `API_PORT` you set).
 2. **Start** — proxied `POST /api/meetings`, then `CorellaLive.connect` + `startMic()`.
-3. Speak — transcript (already labeled) and (if an LLM is connected) coaching update live.
+3. Speak — transcript (already labeled) and (if an LLM is connected) coaching, score ring, sentiment, and talk share update live.
 4. **Stop** — finalizes like a real recording (auto-report, post-call hook if configured).

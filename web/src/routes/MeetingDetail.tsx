@@ -13,14 +13,15 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { meetingsListPath, meetingsTabFromState } from "@/lib/meetingsTab";
+import { parseSentiment, SENTIMENTS, type Sentiment } from "@/lib/sentiment";
 import {
-  sliceOpacity,
+  speakerShareFromApi,
   speakerShareFromSegments,
-  talkRatioFromSegments,
   type SpeakerShareSlice,
 } from "@/lib/speakerShare";
 import { isOrgAdmin } from "@/lib/org";
 import { useConfirm } from "@/lib/confirm";
+import TalkShareBar from "@/components/TalkShareBar";
 
 const POLL_INTERVAL_MS = 3000;
 // Same-room diarization (server/app/workers/tasks.py:reconcile_diarization)
@@ -257,15 +258,25 @@ function hasUnresolvedLiveSpeaker(segments: TranscriptSegment[]): boolean {
   );
 }
 
-const CHART_W = 264;
-const CHART_H = 64;
+const CHART_W = 320;
+const CHART_H = 72;
 
-/** A small inline-SVG line chart of coach_score over the call's own timeline
- * (at_ms) — one series, one hue (the app's own `accent`, same token the talk-
- * ratio bar already uses), no legend needed per the dataviz skill's single-
- * series rule. Hover shows a crosshair + tooltip (score, timestamp); clicking
- * anywhere seeks the audio to that moment, same interaction the transcript
- * rows and the insight list below it both already have. */
+function nearestPointIndex<T extends { x: number }>(points: T[], relX: number): number {
+  let nearest = 0;
+  for (let i = 1; i < points.length; i++) {
+    if (Math.abs(points[i].x - relX) < Math.abs(points[nearest].x - relX)) nearest = i;
+  }
+  return nearest;
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <h2 className="mb-3 font-serif text-base text-ink dark:text-ink-inverted">{children}</h2>
+  );
+}
+
+/** Inline-SVG line chart of coach_score over the call clock. One series,
+ * one hue. Hover + click-to-seek, same as the transcript rows. */
 function CoachScoreTimeline({
   insights,
   onSeek,
@@ -277,7 +288,14 @@ function CoachScoreTimeline({
   const svgRef = useRef<SVGSVGElement>(null);
 
   const scored = insights.filter((i): i is CopilotInsight & { coach_score: number } => i.coach_score !== null);
-  if (scored.length === 0) return null;
+  if (scored.length === 0) {
+    return (
+      <div>
+        <SectionTitle>Score over time</SectionTitle>
+        <p className="text-xs text-ink-subtle">No live score yet.</p>
+      </div>
+    );
+  }
 
   const maxMs = Math.max(1, scored[scored.length - 1].at_ms);
   const x = (ms: number) => (ms / maxMs) * CHART_W;
@@ -290,16 +308,12 @@ function CoachScoreTimeline({
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return;
     const relX = ((e.clientX - rect.left) / rect.width) * CHART_W;
-    let nearest = 0;
-    for (let i = 1; i < points.length; i++) {
-      if (Math.abs(points[i].x - relX) < Math.abs(points[nearest].x - relX)) nearest = i;
-    }
-    setHoverIndex(nearest);
+    setHoverIndex(nearestPointIndex(points, relX));
   }
 
   return (
     <div className="relative">
-      <p className="label mb-1">Score over time</p>
+      <SectionTitle>Score over time</SectionTitle>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${CHART_W} ${CHART_H}`}
@@ -309,7 +323,6 @@ function CoachScoreTimeline({
         onMouseLeave={() => setHoverIndex(null)}
         onClick={() => hovered && onSeek(hovered.insight.at_ms)}
       >
-        {/* Recessive gridlines at 0/50/100 */}
         {[0, 50, 100].map((score) => (
           <line
             key={score}
@@ -355,13 +368,6 @@ function CoachScoreTimeline({
           className="pointer-events-none absolute rounded-sm border border-border bg-surface-raised px-2 py-1 text-xs shadow-card dark:border-border-dark dark:bg-surface-dark-raised"
           style={{
             left: `${Math.min(85, Math.max(0, (hovered.x / CHART_W) * 100))}%`,
-            // Anchored to the hovered point's own y (not always the chart's
-            // top) so a low-score point's tooltip doesn't have to reach all
-            // the way up past the "Score over time" label above it. Flips
-            // to sit below the point for the chart's whole top half — the
-            // tooltip itself is taller than the top half's available
-            // clearance, so "above" only actually fits once the point is
-            // past the midline.
             top: `${(hovered.y / CHART_H) * 100}%`,
             transform:
               hovered.y < CHART_H / 2
@@ -372,6 +378,124 @@ function CoachScoreTimeline({
           <span className="font-medium text-ink dark:text-ink-inverted">
             {hovered.insight.coach_score}/100
           </span>
+          <span className="ml-1.5 text-ink-subtle">{formatTimestamp(hovered.insight.at_ms)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SentimentTimeline({
+  insights,
+  onSeek,
+}: {
+  insights: CopilotInsight[];
+  onSeek: (ms: number) => void;
+}) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const stepped = insights
+    .map((insight) => {
+      const sentiment = parseSentiment(insight.sentiment);
+      return sentiment ? { insight, sentiment } : null;
+    })
+    .filter((row): row is { insight: CopilotInsight; sentiment: Sentiment } => row !== null);
+
+  if (stepped.length === 0) {
+    return (
+      <div>
+        <SectionTitle>Sentiment over time</SectionTitle>
+        <p className="text-xs text-ink-subtle">No live sentiment yet.</p>
+      </div>
+    );
+  }
+
+  const maxMs = Math.max(1, stepped[stepped.length - 1].insight.at_ms);
+  const x = (ms: number) => (ms / maxMs) * CHART_W;
+  const y = (sentiment: Sentiment) =>
+    CHART_H - (SENTIMENTS.indexOf(sentiment) / (SENTIMENTS.length - 1)) * CHART_H;
+  const points = stepped.map((row) => ({
+    x: x(row.insight.at_ms),
+    y: y(row.sentiment),
+    insight: row.insight,
+    sentiment: row.sentiment,
+  }));
+  const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  const hovered = hoverIndex !== null ? points[hoverIndex] : null;
+
+  function onMove(e: React.MouseEvent<SVGSVGElement>) {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const relX = ((e.clientX - rect.left) / rect.width) * CHART_W;
+    setHoverIndex(nearestPointIndex(points, relX));
+  }
+
+  return (
+    <div className="relative">
+      <SectionTitle>Sentiment over time</SectionTitle>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+        className="w-full cursor-pointer overflow-visible"
+        style={{ height: CHART_H }}
+        onMouseMove={onMove}
+        onMouseLeave={() => setHoverIndex(null)}
+        onClick={() => hovered && onSeek(hovered.insight.at_ms)}
+      >
+        {[0, 3, 7].map((index) => (
+          <line
+            key={index}
+            x1={0}
+            x2={CHART_W}
+            y1={y(SENTIMENTS[index])}
+            y2={y(SENTIMENTS[index])}
+            className="stroke-border dark:stroke-border-dark"
+            strokeWidth={1}
+          />
+        ))}
+        <path
+          d={path}
+          fill="none"
+          className="stroke-accent dark:stroke-ink-inverted"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        {hovered && (
+          <>
+            <line
+              x1={hovered.x}
+              x2={hovered.x}
+              y1={0}
+              y2={CHART_H}
+              className="stroke-ink-subtle"
+              strokeWidth={1}
+              strokeDasharray="2,2"
+            />
+            <circle
+              cx={hovered.x}
+              cy={hovered.y}
+              r={3.5}
+              className="fill-accent stroke-surface-raised dark:fill-ink-inverted dark:stroke-surface-dark-raised"
+              strokeWidth={2}
+            />
+          </>
+        )}
+      </svg>
+      {hovered && (
+        <div
+          className="pointer-events-none absolute rounded-sm border border-border bg-surface-raised px-2 py-1 text-xs shadow-card dark:border-border-dark dark:bg-surface-dark-raised"
+          style={{
+            left: `${Math.min(85, Math.max(0, (hovered.x / CHART_W) * 100))}%`,
+            top: `${(hovered.y / CHART_H) * 100}%`,
+            transform:
+              hovered.y < CHART_H / 2
+                ? "translate(-50%, 8px)"
+                : "translate(-50%, calc(-100% - 8px))",
+          }}
+        >
+          <span className="font-medium text-ink dark:text-ink-inverted">{hovered.sentiment}</span>
           <span className="ml-1.5 text-ink-subtle">{formatTimestamp(hovered.insight.at_ms)}</span>
         </div>
       )}
@@ -411,7 +535,6 @@ export default function MeetingDetail() {
   const [deleting, setDeleting] = useState(false);
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
   const [showCaptured, setShowCaptured] = useState(false);
-  const [talkRatio, setTalkRatio] = useState<{ me: number; them: number } | null>(null);
   const [speakerShare, setSpeakerShare] = useState<SpeakerShareSlice[] | null>(null);
   const [providerConnected, setProviderConnected] = useState<boolean | null>(null);
   const [generatingReport, setGeneratingReport] = useState(false);
@@ -627,8 +750,7 @@ export default function MeetingDetail() {
           : prev,
       );
       setActionItems(await api.listActionItems(meetingId));
-      setTalkRatio(report.talk_ratio);
-      setSpeakerShare(report.speaker_share);
+      setSpeakerShare(speakerShareFromApi(report.speaker_share));
     } catch (err) {
       setReportError(err instanceof ApiError ? err.message : "Couldn't generate the report");
     } finally {
@@ -637,10 +759,6 @@ export default function MeetingDetail() {
   }
 
   const reportReady = Boolean(meeting?.summary);
-  const shownTalkRatio = useMemo(
-    () => talkRatioFromSegments(transcript ?? [], meeting?.capture_mode) ?? talkRatio,
-    [transcript, meeting?.capture_mode, talkRatio],
-  );
   const shownSpeakerShare = useMemo(
     () =>
       speakerShareFromSegments(transcript ?? [], meeting?.capture_mode, user?.id) ?? speakerShare,
@@ -891,39 +1009,6 @@ export default function MeetingDetail() {
                   </ul>
                 )}
 
-                {shownTalkRatio && (
-                  <div className="mt-4">
-                    <p className="label mb-1">Talk ratio</p>
-                    <div className="flex h-2 overflow-hidden rounded-full bg-border dark:bg-border-dark">
-                      <div className="bg-accent" style={{ width: `${shownTalkRatio.me}%` }} />
-                    </div>
-                    <p className="mt-1 text-xs text-ink-subtle">
-                      Me {shownTalkRatio.me}% · Them {shownTalkRatio.them}%
-                    </p>
-                  </div>
-                )}
-
-                {!shownTalkRatio && shownSpeakerShare && shownSpeakerShare.length > 0 && (
-                  <div className="mt-4">
-                    <p className="label mb-1">Talk share</p>
-                    <div className="flex h-2 overflow-hidden rounded-full bg-border dark:bg-border-dark">
-                      {shownSpeakerShare.map((slice, i) => (
-                        <div
-                          key={`${slice.label}-${i}`}
-                          className="bg-accent"
-                          style={{
-                            width: `${slice.pct}%`,
-                            opacity: sliceOpacity(i, shownSpeakerShare.length),
-                          }}
-                        />
-                      ))}
-                    </div>
-                    <p className="mt-1 text-xs text-ink-subtle">
-                      {shownSpeakerShare.map((slice) => `${slice.label} ${slice.pct}%`).join(" · ")}
-                    </p>
-                  </div>
-                )}
-
                 {(shownActionItems.length > 0 || canShowCaptured) && (
                   <div className="mt-4">
                     <div className="mb-1.5 flex items-baseline justify-between gap-3">
@@ -970,8 +1055,23 @@ export default function MeetingDetail() {
               </div>
 
               {canViewFull && (
-                <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
-                  <div>
+                <>
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                    <div className="card p-5">
+                      <CoachScoreTimeline insights={insights ?? []} onSeek={seekTo} />
+                    </div>
+                    <div className="card p-5">
+                      <SentimentTimeline insights={insights ?? []} onSeek={seekTo} />
+                    </div>
+                    <div className="card p-5">
+                      <SectionTitle>Talk share</SectionTitle>
+                      {shownSpeakerShare && shownSpeakerShare.length > 0 ? (
+                        <TalkShareBar slices={shownSpeakerShare} />
+                      ) : (
+                        <p className="text-xs text-ink-subtle">No speaker share yet.</p>
+                      )}
+                    </div>
+                    <div className="min-w-0 md:col-span-2">
                     {transcript === null && (
                       <p className="text-sm text-ink-muted">Loading transcript…</p>
                     )}
@@ -1019,12 +1119,10 @@ export default function MeetingDetail() {
                         })}
                       </ol>
                     )}
-                  </div>
+                    </div>
 
-                  <div className="card h-fit space-y-4 p-5">
-                    <h2 className="font-serif text-base text-ink dark:text-ink-inverted">
-                      Copilot insights
-                    </h2>
+                  <div className="card h-fit p-5">
+                    <SectionTitle>Copilot insights</SectionTitle>
 
                     {insights === null && (
                       <p className="text-xs text-ink-subtle">Loading…</p>
@@ -1036,13 +1134,10 @@ export default function MeetingDetail() {
 
                     {insights && insights.length > 0 && (
                       <>
-                        <CoachScoreTimeline insights={insights} onSeek={seekTo} />
                         {insights.every((i) => !i.suggestion && i.blockers.length === 0) ? (
-                          <p className="border-t border-border pt-3 text-xs text-ink-subtle dark:border-border-dark">
-                            Nothing flagged — just the score above.
-                          </p>
+                          <p className="text-xs text-ink-subtle">Nothing flagged.</p>
                         ) : (
-                        <ul className="space-y-3 border-t border-border pt-3 dark:border-border-dark">
+                        <ul className="space-y-3">
                           {insights
                             .filter((i) => i.suggestion || i.blockers.length > 0)
                             .map((insight) => (
@@ -1075,6 +1170,7 @@ export default function MeetingDetail() {
                     )}
                   </div>
                 </div>
+                </>
               )}
             </div>
           )}

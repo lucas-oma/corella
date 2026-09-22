@@ -8,23 +8,26 @@ from app.models.meeting import ActionItem, ActionItemSource, CaptureMode, Meetin
 from app.services.copilot.action_items import list_report_action_items, replace_report_action_items
 from app.services.copilot.cost import add_meeting_cost
 from app.services.copilot.json_parse import as_str_list, parse_json_response
+from app.services.copilot.sentiment import SENTIMENT_CHOICES, parse_sentiment
 from app.services.copilot.talk_ratio import talk_ratio
 from app.services.llm.base import LLMError, LLMMessage, complete
 from app.services.llm.pricing import estimate_cost_usd
 from app.services.llm.resolve import ResolvedProvider
 from app.services.transcript_format import format_transcript, speaker_share
 
-_SYSTEM_PROMPT = """You are summarizing a completed call transcript. Respond with ONLY a single JSON object, no other text, in exactly this shape:
+_SYSTEM_PROMPT = f"""You are summarizing a completed call transcript. Respond with ONLY a single JSON object, no other text, in exactly this shape:
 
-{
+{{
   "title": "<a short, specific title for this call, 3-8 words>",
   "summary": "<a few sentences summarizing what was discussed and any conclusions reached>",
   "key_topics": ["<a distinct topic or theme discussed, 2-5 items>"],
-  "sentiment": "<one or two words describing the overall tone, e.g. Positive, Neutral, Tense, Mixed>",
+  "sentiment": "<exactly one of {SENTIMENT_CHOICES} — overall tone, not how well the call went>",
   "notable_quotes": ["<a directly-quoted, noteworthy line from the transcript, verbatim, 0-4 items>"],
   "coach_score": <integer 0-100 rating how well this call went for Me overall, considering engagement and whether Them's questions or concerns were addressed>,
   "action_items": ["<a distinct, concrete next step — 3-8 items, merge paraphrases of the same task, only real commitments not a restated project plan, or [] if none>"]
-}"""
+}}
+
+sentiment must be one of those eight words exactly."""
 
 
 class ReportError(Exception):
@@ -43,7 +46,7 @@ class ReportResult:
     estimated_cost_usd: float | None
     action_items: list[ActionItem]  # report digest only (source=report), after replace
     talk_ratio: dict[str, int] | None  # None unless meeting_tab with them audio
-    speaker_share: list[dict[str, str | int]] | None  # open_mic / upload; None on meeting_tab
+    speaker_share: list[dict[str, str | int]] | None
 
 
 async def generate_report(db: AsyncSession, meeting: Meeting, provider: ResolvedProvider) -> ReportResult:
@@ -76,10 +79,10 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
     )
 
     user_content = f"Full transcript:\n{transcript_text}"
+    if share:
+        user_content += "\n\nTalk share — " + ", ".join(f"{row['label']}: {row['pct']}%" for row in share)
     if has_channel_data:
         user_content += f"\n\nTalk ratio — Me: {ratio['me']}%, Them: {ratio['them']}%"
-    elif share:
-        user_content += "\n\nTalk share — " + ", ".join(f"{row['label']}: {row['pct']}%" for row in share)
     if live_items:
         user_content += (
             "\n\nAction items captured live during the call — deduplicate and summarize "
@@ -145,7 +148,7 @@ async def generate_report(db: AsyncSession, meeting: Meeting, provider: Resolved
 
     title = str(parsed.get("title") or "").strip() or meeting.title
     key_topics = as_str_list(parsed.get("key_topics"))
-    sentiment = str(parsed.get("sentiment") or "").strip() or None
+    sentiment = parse_sentiment(parsed.get("sentiment"))
     notable_quotes = as_str_list(parsed.get("notable_quotes"))
     raw_score = parsed.get("coach_score")
     coach_score = int(raw_score) if isinstance(raw_score, int | float) else None

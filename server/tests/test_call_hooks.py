@@ -255,7 +255,7 @@ async def test_full_payload_includes_every_field(db, make_user):
     await db.commit()
     db.add(TranscriptSegment(meeting_id=meeting.id, channel=Channel.ME, start_ms=0, end_ms=500, text="Hi."))
     db.add(
-        CopilotInsight(meeting_id=meeting.id, at_ms=500, suggestion="Mention the discount", blockers=["Price"], coach_score=70)
+        CopilotInsight(meeting_id=meeting.id, at_ms=500, suggestion="Mention the discount", blockers=["Price"], coach_score=70, sentiment="Skeptical")
     )
     await db.commit()
     meeting = await db.get(Meeting, meeting.id)
@@ -274,7 +274,7 @@ async def test_full_payload_includes_every_field(db, make_user):
     assert payload["speaker_share"] is None
     assert payload["action_items"] == [{"text": "Follow up", "status": "open"}]
     assert payload["copilot_insights"] == [
-        {"at_ms": 500, "suggestion": "Mention the discount", "blockers": ["Price"], "coach_score": 70}
+        {"at_ms": 500, "suggestion": "Mention the discount", "blockers": ["Price"], "coach_score": 70, "sentiment": "Skeptical"}
     ]
     assert "Hi." in payload["transcript"]
     assert payload["duration_seconds"] == 120

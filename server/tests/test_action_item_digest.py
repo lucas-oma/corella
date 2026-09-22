@@ -171,3 +171,35 @@ async def test_run_cycle_returns_live_open_items_only(db, make_user, monkeypatch
     rows = list(await db.scalars(select(ActionItem).where(ActionItem.meeting_id == meeting.id)))
     sent = [i for i in rows if i.text == "Send the proposal"]
     assert len(sent) == 1 and sent[0].source == ActionItemSource.LIVE
+
+
+@pytest.mark.asyncio
+async def test_generate_report_drops_unknown_sentiment(db, make_user, monkeypatch):
+    user = await make_user()
+    meeting = Meeting(owner_id=user.id, organization_id=user.active_organization_id, title="A call")
+    db.add(meeting)
+    await db.flush()
+    db.add(
+        TranscriptSegment(
+            meeting_id=meeting.id, channel=Channel.ME, start_ms=0, end_ms=800, text="Let's wrap up."
+        )
+    )
+    await db.commit()
+
+    async def fake_complete(provider, model, messages, api_key, base_url, max_tokens=1024):
+        return LLMResponse(
+            text=(
+                '{"title": "Wrap up", "summary": "They closed the meeting.", '
+                '"key_topics": ["Close"], "sentiment": "Mixed", "notable_quotes": [], '
+                '"coach_score": 70, "action_items": []}'
+            ),
+            input_tokens=40,
+            output_tokens=20,
+        )
+
+    monkeypatch.setattr(report_module, "complete", fake_complete)
+
+    result = await generate_report(db, meeting, _fake_provider())
+    assert result.sentiment is None
+    await db.refresh(meeting)
+    assert meeting.sentiment is None

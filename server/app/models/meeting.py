@@ -255,6 +255,9 @@ class CopilotInsight(UUIDPrimaryKeyMixin, Base):
     # so gating it on suggestion/blockers being non-empty would leave a
     # score-over-time view sparse for no reason.
     coach_score: Mapped[int | None] = mapped_column(Integer)
+    # Closed enum in app/services/copilot/sentiment.py — stored as a
+    # string so older free-text meetings.sentiment rows are unaffected.
+    sentiment: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
